@@ -36,7 +36,29 @@ function formatTimestamp(value: string): string {
   return `${utcTimestamp.format(new Date(value))} UTC`
 }
 
+const firstPartyAdvisoryFailureContent: Partial<
+  Record<AssessmentRunErrorCode, { heading: string; guidance: string }>
+> = {
+  first_party_advisory_unavailable: {
+    heading: "First-party advisory Source unavailable",
+    guidance:
+      "Verify the first-party Source is reachable, then create a new Assessment Run. Existing OSV Evidence Records remain available.",
+  },
+  invalid_first_party_advisory: {
+    heading: "First-party advisory Source response rejected",
+    guidance:
+      "The first-party Source response was rejected. Existing OSV Evidence Records remain available.",
+  },
+  first_party_advisory_policy_blocked: {
+    heading: "First-party advisory lookup blocked by Policy Decision",
+    guidance:
+      "Review the recorded first-party advisory tool-call Policy Decision. Existing OSV Evidence Records remain available.",
+  },
+}
+
 function assessmentRunFailureGuidance(code: AssessmentRunErrorCode): string {
+  const firstPartyContent = firstPartyAdvisoryFailureContent[code]
+  if (firstPartyContent) return firstPartyContent.guidance
   if (code === "osv_unavailable") {
     return "Verify the OSV Source is reachable, then create a new Assessment Run. No evidence was substituted."
   }
@@ -91,6 +113,8 @@ function assessmentRunFailureGuidance(code: AssessmentRunErrorCode): string {
 }
 
 function failureHeading(code: AssessmentRunErrorCode): string {
+  const firstPartyContent = firstPartyAdvisoryFailureContent[code]
+  if (firstPartyContent) return firstPartyContent.heading
   if (code === "osv_unavailable") return "OSV Source unavailable"
   if (code === "invalid_osv_response") return "OSV Source response rejected"
   if (code === "osv_lookup_policy_blocked") return "OSV lookup blocked by Policy Decision"

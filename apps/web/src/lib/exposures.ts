@@ -1,5 +1,6 @@
 import { loadCollection } from "./assessment-runs"
 import type { PackageInstance } from "./asset-snapshots"
+import type { EvidenceRelationship } from "./evidence"
 
 export type VulnerabilityRecord = {
   id: string
@@ -29,6 +30,7 @@ export type EvidenceRecord = {
   payloadIdentity: string
   content: string
   passages: EvidencePassage[]
+  relationship: EvidenceRelationship
 }
 
 export type ExposureRanking = {
@@ -71,6 +73,7 @@ export type Exposure = {
   ranking: ExposureRanking
   rank: number
   selectedForInvestigation: boolean
+  authoritativeConflict: boolean
   kev: KevSignal
   epss: EpssSignal
   evidenceRecords: EvidenceRecord[]

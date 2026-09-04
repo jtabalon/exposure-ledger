@@ -298,6 +298,7 @@ class EvidenceRecordResponse(ApiModel):
     payload_identity: str
     content: str
     passages: list[EvidencePassageResponse]
+    relationship: str
 
     @classmethod
     def from_record(cls, evidence: EvidenceRecordRecord) -> "EvidenceRecordResponse":
@@ -311,6 +312,7 @@ class EvidenceRecordResponse(ApiModel):
             aliases=list(evidence.aliases),
             payload_identity=evidence.payload_identity,
             content=evidence.content,
+            relationship=evidence.relationship,
             passages=[EvidencePassageResponse.from_record(item) for item in evidence.passages],
         )
 
@@ -339,6 +341,7 @@ class ExposureResponse(ApiModel):
     ranking: ExposureRankingResponse
     rank: int
     selected_for_investigation: bool
+    authoritative_conflict: bool
     kev: KevSignalResponse
     epss: EpssSignalResponse
     evidence_records: list[EvidenceRecordResponse]
@@ -357,6 +360,7 @@ class ExposureResponse(ApiModel):
             ranking=ExposureRankingResponse.from_domain(exposure.ranking),
             rank=exposure.rank,
             selected_for_investigation=exposure.selected_for_investigation,
+            authoritative_conflict=exposure.authoritative_conflict,
             kev=KevSignalResponse.model_validate(exposure.kev, from_attributes=True),
             epss=EpssSignalResponse(
                 state=exposure.epss.state,

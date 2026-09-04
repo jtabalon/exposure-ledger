@@ -28,6 +28,7 @@ class AssessmentOperation(StrEnum):
     SYNTHETIC_EXPOSURE_ASSESSMENT = "synthetic_exposure_assessment"
     PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT = "public_repository_exposure_assessment"
     PUBLIC_OSV_LOOKUP = "public_osv_lookup"
+    PUBLIC_FIRST_PARTY_ADVISORY_LOOKUP = "public_first_party_advisory_lookup"
     PUBLIC_CISA_KEV_LOOKUP = "public_cisa_kev_lookup"
     PUBLIC_FIRST_EPSS_LOOKUP = "public_first_epss_lookup"
     SUMMARIZE_PUBLIC_ADVISORY = "summarize_public_advisory"
@@ -84,6 +85,9 @@ _OPERATION_CLASSIFICATIONS: Final = {
         AssistanceClass.C1, ActionLevel.A1
     ),
     AssessmentOperation.PUBLIC_OSV_LOOKUP: _Classification(AssistanceClass.C1, ActionLevel.A1),
+    AssessmentOperation.PUBLIC_FIRST_PARTY_ADVISORY_LOOKUP: _Classification(
+        AssistanceClass.C1, ActionLevel.A1
+    ),
     AssessmentOperation.PUBLIC_CISA_KEV_LOOKUP: _Classification(AssistanceClass.C1, ActionLevel.A1),
     AssessmentOperation.PUBLIC_FIRST_EPSS_LOOKUP: _Classification(
         AssistanceClass.C1, ActionLevel.A1

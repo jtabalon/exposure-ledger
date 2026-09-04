@@ -40,6 +40,9 @@ export type AssessmentRunErrorCode =
   | AssetSnapshotRejectionCode
   | "policy_gate_unavailable"
   | "invalid_osv_response"
+  | "invalid_first_party_advisory"
+  | "first_party_advisory_policy_blocked"
+  | "first_party_advisory_unavailable"
   | "osv_lookup_policy_blocked"
   | "osv_unavailable"
   | "repository_fetch_policy_blocked"

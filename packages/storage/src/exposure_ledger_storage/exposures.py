@@ -12,6 +12,7 @@ import psycopg
 from exposure_ledger import (
     AssessmentResult,
     EpssSignal,
+    EvidenceRelationship,
     ExposureRanking,
     ExposureSeverity,
     KevSignal,
@@ -59,6 +60,7 @@ class EvidenceRecordRecord:
     payload_identity: str
     content: str
     passages: tuple[EvidencePassageRecord, ...]
+    relationship: EvidenceRelationship
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,7 @@ class ExposureRecord:
     ranking: ExposureRanking
     rank: int
     selected_for_investigation: bool
+    authoritative_conflict: bool
     kev: KevSignal
     epss: EpssSignal
     evidence_records: tuple[EvidenceRecordRecord, ...]
@@ -169,11 +172,12 @@ class ExposureRepository:
                         assessment_run_id, exposure_id, rank, selected_for_investigation,
                         severity, direct_dependency, dependency_depth,
                         fixed_version_available, ranking_score,
+                        authoritative_conflict,
                         kev_state, kev_listed, kev_observed_at, kev_detail,
                         epss_state, epss_score, epss_percentile, epss_observed_at, epss_detail
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (assessment_run_id, exposure_id) DO NOTHING
                     """,
@@ -187,6 +191,7 @@ class ExposureRepository:
                         exposure.ranking.dependency_depth,
                         exposure.ranking.fixed_version_available,
                         exposure.ranking.score,
+                        exposure.authoritative_conflict,
                         exposure.kev.state,
                         exposure.kev.listed,
                         exposure.kev.observed_at,
@@ -203,11 +208,16 @@ class ExposureRepository:
                     connection.execute(
                         """
                         INSERT INTO assessment_run_exposure_evidence (
-                            assessment_run_id, exposure_id, evidence_record_id
-                        ) VALUES (%s, %s, %s)
+                            assessment_run_id, exposure_id, evidence_record_id, relationship
+                        ) VALUES (%s, %s, %s, %s)
                         ON CONFLICT DO NOTHING
                         """,
-                        (assessment_run_id, exposure_id, evidence_id),
+                        (
+                            assessment_run_id,
+                            exposure_id,
+                            evidence_id,
+                            evidence_reference.relationship,
+                        ),
                     )
                     with connection.cursor() as cursor:
                         cursor.executemany(
@@ -273,6 +283,7 @@ class ExposureRepository:
                        assessment_run_exposures.dependency_depth,
                        assessment_run_exposures.fixed_version_available,
                        assessment_run_exposures.ranking_score,
+                       assessment_run_exposures.authoritative_conflict,
                        assessment_run_exposures.kev_state,
                        assessment_run_exposures.kev_listed,
                        assessment_run_exposures.kev_observed_at,
@@ -548,6 +559,7 @@ class ExposureRepository:
             ),
             rank=int(row["rank"]),
             selected_for_investigation=bool(row["selected_for_investigation"]),
+            authoritative_conflict=bool(row["authoritative_conflict"]),
             kev=KevSignal(
                 state=SourceObservationState(str(row["kev_state"])),
                 listed=(bool(row["kev_listed"]) if row["kev_listed"] is not None else None),
@@ -578,7 +590,7 @@ class ExposureRepository:
                    evidence_records.attribution, evidence_records.aliases,
                    evidence_records.payload_identity, evidence_records.content,
                    sources.identity_key AS source_identity, sources.authority,
-                   sources.location
+                   sources.location, assessment_run_exposure_evidence.relationship
             FROM assessment_run_exposure_evidence
             JOIN evidence_records
               ON evidence_records.id = assessment_run_exposure_evidence.evidence_record_id
@@ -602,7 +614,15 @@ class ExposureRepository:
                 WHERE assessment_run_exposure_passages.assessment_run_id = %s
                   AND assessment_run_exposure_passages.exposure_id = %s
                   AND assessment_run_exposure_passages.evidence_record_id = %s
-                ORDER BY evidence_passages.identity_key
+                ORDER BY
+                    CASE evidence_passages.kind
+                        WHEN 'publication' THEN 0
+                        WHEN 'affected' THEN 1
+                        WHEN 'affected_guidance' THEN 1
+                        ELSE 2
+                    END,
+                    evidence_passages.selector,
+                    evidence_passages.identity_key
                 """,
                 (assessment_run_id, exposure_id, evidence["id"]),
             ).fetchall()
@@ -621,6 +641,7 @@ class ExposureRepository:
                     aliases=tuple(str(alias) for alias in evidence["aliases"]),
                     payload_identity=str(evidence["payload_identity"]),
                     content=str(evidence["content"]),
+                    relationship=EvidenceRelationship(str(evidence["relationship"])),
                     passages=tuple(
                         EvidencePassageRecord(
                             id=UUID(str(passage["id"])),

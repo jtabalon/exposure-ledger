@@ -24,6 +24,10 @@ from exposure_ledger import (
     ExposureDiscovery,
     ExposureEnricher,
     FirstEpssResponse,
+    FirstPartyAdvisoryCollector,
+    FirstPartyAdvisorySource,
+    GitHubAdvisoryResponseRejected,
+    GitHubAdvisorySourceUnavailable,
     KevSourceUnavailable,
     OsvResponseRejected,
     OsvSource,
@@ -32,6 +36,7 @@ from exposure_ledger import (
     PolicyResult,
     RepositoryArchiveSource,
     RepositoryArchiveUnavailable,
+    derive_assessment_advisory_targets,
 )
 from exposure_ledger_storage import (
     DEFAULT_DATABASE_URL,
@@ -46,6 +51,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from exposure_ledger_worker.enrichment import CisaKevApiSource, FirstEpssApiSource
+from exposure_ledger_worker.github_advisories import GitHubAdvisoryApiSource
 from exposure_ledger_worker.osv import OsvApiSource
 from exposure_ledger_worker.repository_archives import GitHubArchiveSource
 
@@ -165,6 +171,7 @@ def process_next_assessment(
     osv_source: OsvSource | None = None,
     kev_source: CisaKevSource | None = None,
     epss_source: EpssSource | None = None,
+    advisory_source: FirstPartyAdvisorySource | None = None,
 ) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
     repository = AssessmentRunRepository(database_url)
@@ -285,6 +292,57 @@ def process_next_assessment(
                             epss_source or FirstEpssApiSource(),
                         ),
                     ).enrich(discovered)
+                    advisory_targets = derive_assessment_advisory_targets(result)
+                    for target in advisory_targets:
+                        advisory_decision = _public_source_decision(
+                            AssessmentOperation.PUBLIC_FIRST_PARTY_ADVISORY_LOOKUP,
+                            target.api_url,
+                        )
+                        repository.record_tool_policy_decision(assessment_run.id, advisory_decision)
+                        if advisory_decision.result is not PolicyResult.ALLOWED:
+                            exposure_repository.record(
+                                assessment_run_id=assessment_run.id,
+                                asset_snapshot_id=snapshot.id,
+                                result=result,
+                            )
+                            repository.fail(
+                                assessment_run.id,
+                                claim_id=assessment_run.claim_id,
+                                code="first_party_advisory_policy_blocked",
+                                message=advisory_decision.reason,
+                            )
+                            return True
+                    if advisory_targets:
+                        try:
+                            result = FirstPartyAdvisoryCollector(
+                                advisory_source or GitHubAdvisoryApiSource()
+                            ).collect(result)
+                        except GitHubAdvisorySourceUnavailable as error:
+                            exposure_repository.record(
+                                assessment_run_id=assessment_run.id,
+                                asset_snapshot_id=snapshot.id,
+                                result=result,
+                            )
+                            repository.fail(
+                                assessment_run.id,
+                                claim_id=assessment_run.claim_id,
+                                code="first_party_advisory_unavailable",
+                                message=str(error),
+                            )
+                            return True
+                        except GitHubAdvisoryResponseRejected as error:
+                            exposure_repository.record(
+                                assessment_run_id=assessment_run.id,
+                                asset_snapshot_id=snapshot.id,
+                                result=result,
+                            )
+                            repository.fail(
+                                assessment_run.id,
+                                claim_id=assessment_run.claim_id,
+                                code="invalid_first_party_advisory",
+                                message=str(error),
+                            )
+                            return True
                     exposure_repository.record(
                         assessment_run_id=assessment_run.id,
                         asset_snapshot_id=snapshot.id,

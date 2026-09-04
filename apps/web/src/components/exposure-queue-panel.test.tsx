@@ -27,6 +27,7 @@ describe("ExposureQueuePanel", () => {
             },
             rank: 1,
             selectedForInvestigation: true,
+            authoritativeConflict: false,
             kev: {
               state: "available",
               listed: true,
@@ -62,6 +63,7 @@ describe("ExposureQueuePanel", () => {
                 aliases: ["CVE-2026-4000", "PYSEC-2026-40"],
                 payloadIdentity: "PYSEC-2026-40",
                 content: '{"id":"PYSEC-2026-40"}',
+                relationship: "supports",
                 passages: [
                   {
                     id: "91126ae4-09df-4212-a5f0-e78bb02edee5",
@@ -89,6 +91,7 @@ describe("ExposureQueuePanel", () => {
             },
             rank: 2,
             selectedForInvestigation: true,
+            authoritativeConflict: false,
             kev: {
               state: "available",
               listed: false,
@@ -128,6 +131,7 @@ describe("ExposureQueuePanel", () => {
             },
             rank: 3,
             selectedForInvestigation: true,
+            authoritativeConflict: false,
             kev: {
               state: "unavailable",
               listed: null,
