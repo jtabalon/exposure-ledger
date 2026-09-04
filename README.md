@@ -74,8 +74,9 @@ curl -sS http://localhost:8000/api/v1/assessment-runs/<assessment-run-id>
 curl -sS http://localhost:8000/api/v1/policy-decisions
 ```
 
-Capture a live public repository as an immutable `uv.lock` Asset Snapshot by creating a
-repository Assessment Run with a complete commit ID and explicit Environment Profile:
+Capture a live public repository as an immutable Asset Snapshot from `uv.lock`, `poetry.lock`, or
+fully pinned `requirements.txt` data by creating a repository Assessment Run with a complete commit
+ID and explicit Environment Profile:
 
 ```bash
 curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
@@ -97,14 +98,20 @@ curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
 
 The API policy-gates and durably queues the request. The worker records a second Policy Decision at
 the repository-fetch boundary, constrains egress to public GitHub codeload addresses, and reads the
-archive and lockfile as untrusted data in memory. It never installs dependencies, imports modules,
-runs builds or hooks, or executes repository content. The bounded archive payload is explicitly
-discarded after either successful capture or rejection; no repository archive is retained on disk.
-`GET /api/v1/asset-snapshots` exposes the
-pinned scope, digest, Environment Profile, normalized packages, and Dependency Paths shown in the
-workbench.
+archive and dependency data as untrusted text in memory. It never installs dependencies, imports
+modules, runs builds or hooks, or executes repository content. Poetry capture also reads and retains
+the selected project's `pyproject.toml` so direct and transitive Dependency Paths are derived from
+declared project dependencies rather than guessed from graph shape. Fully pinned requirements data
+does not carry trustworthy relationship provenance, so its API records return `null` for `direct`
+and `dependencyPaths`; the workbench labels both as unknown. Unsupported markers, unpinned entries,
+and other format limitations fail with typed Assessment errors. The bounded repository archive is
+explicitly discarded after either successful capture or rejection and is never retained on disk.
+`GET /api/v1/asset-snapshots`
+exposes the pinned scope, digest, Environment Profile, normalized packages, and known or explicitly
+unknown Dependency Paths shown in the workbench.
 
-Repository requests must explicitly select one project root and one `uv.lock`. Unsafe targets,
+Repository requests must explicitly select one project root and one supported dependency file
+(`uv.lock`, `poetry.lock`, `requirements.txt`, or `requirements-*.txt`). Unsafe targets,
 ambiguous selections, archive traversal or links, corrupt content, and configured size, file-count,
 compression-ratio, lockfile, or Dependency Path ceilings fail with a stable rejection code. A
 request rejected before queueing returns that code in HTTP 422; a capture rejected by the worker

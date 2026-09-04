@@ -10,9 +10,9 @@ export type EnvironmentProfile = {
 export type PackageInstance = {
   name: string
   version: string
-  direct: boolean
+  direct: boolean | null
   source: Record<string, unknown>
-  dependencyPaths: string[][]
+  dependencyPaths: string[][] | null
 }
 
 export type AssetSnapshot = {

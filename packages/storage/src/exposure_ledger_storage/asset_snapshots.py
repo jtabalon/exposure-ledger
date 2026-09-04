@@ -22,9 +22,9 @@ from psycopg.rows import dict_row, tuple_row
 class PackageInstanceRecord:
     name: str
     version: str
-    direct: bool
+    direct: bool | None
     source: dict[str, Any]
-    dependency_paths: tuple[tuple[str, ...], ...]
+    dependency_paths: tuple[tuple[str, ...], ...] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +65,10 @@ class AssetSnapshotRepository:
                 """
                 INSERT INTO asset_snapshots (
                     id, repository, commit_sha, project_root, lockfile_path,
-                    lockfile_digest, lockfile_content, environment_profile_id,
+                    lockfile_digest, lockfile_content, project_file_path,
+                    project_file_digest, project_file_content, environment_profile_id,
                     parser_version, captured_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (
                     repository, commit_sha, project_root, lockfile_path,
                     lockfile_digest, environment_profile_id
@@ -82,6 +83,9 @@ class AssetSnapshotRepository:
                     snapshot.lockfile_path,
                     snapshot.lockfile_digest,
                     snapshot.lockfile_content,
+                    snapshot.project_file.path if snapshot.project_file is not None else None,
+                    snapshot.project_file.digest if snapshot.project_file is not None else None,
+                    snapshot.project_file.content if snapshot.project_file is not None else None,
                     environment_id,
                     snapshot.parser_version,
                     snapshot.captured_at,
@@ -128,14 +132,15 @@ class AssetSnapshotRepository:
                             ),
                         ),
                     )
-                    with connection.cursor() as cursor:
-                        cursor.executemany(
-                            """
-                            INSERT INTO dependency_paths (package_instance_id, path)
-                            VALUES (%s, %s)
-                            """,
-                            [(package_id, list(path)) for path in package.dependency_paths],
-                        )
+                    if package.dependency_paths is not None:
+                        with connection.cursor() as cursor:
+                            cursor.executemany(
+                                """
+                                INSERT INTO dependency_paths (package_instance_id, path)
+                                VALUES (%s, %s)
+                                """,
+                                [(package_id, list(path)) for path in package.dependency_paths],
+                            )
                 connection.execute(
                     "UPDATE asset_snapshots SET sealed = true WHERE id = %s",
                     (snapshot_id,),
@@ -189,9 +194,13 @@ class AssetSnapshotRepository:
                     PackageInstanceRecord(
                         name=str(package["name"]),
                         version=str(package["version"]),
-                        direct=bool(package["direct"]),
+                        direct=(bool(package["direct"]) if package["direct"] is not None else None),
                         source=json.loads(str(package["source"])),
-                        dependency_paths=tuple(tuple(item["path"]) for item in path_rows),
+                        dependency_paths=(
+                            tuple(tuple(item["path"]) for item in path_rows)
+                            if package["direct"] is not None
+                            else None
+                        ),
                     )
                 )
             return AssetSnapshotRecord(

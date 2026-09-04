@@ -48,7 +48,21 @@ function assetSnapshotFailureGuidance(code: AssessmentRunErrorCode): string {
     return "Choose a smaller repository revision or lockfile, then create a new Assessment Run."
   }
   if (code === "ambiguous_project_root") {
-    return "Select exactly one project root and one uv.lock, then create a new Assessment Run."
+    return "Select exactly one project root and one supported dependency file, then create a new Assessment Run."
+  }
+  if (
+    code === "invalid_project_file" ||
+    code === "invalid_requirements" ||
+    code === "project_file_not_found" ||
+    code === "project_file_too_large" ||
+    code === "unpinned_requirement" ||
+    code === "unsupported_package_source" ||
+    code === "unsupported_project_file" ||
+    code === "unsupported_requirement_directive" ||
+    code === "unsupported_requirement_source" ||
+    code === "unsupported_version_constraint"
+  ) {
+    return "Choose supported, fully pinned dependency data and valid project metadata, then create a new Assessment Run."
   }
   if (
     code === "invalid_repository" ||

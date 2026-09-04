@@ -16,6 +16,7 @@ from exposure_ledger.asset_snapshots import (
     RepositoryArchive,
     RepositoryArchiveSource,
     RepositoryArchiveUnavailable,
+    RetainedDependencyManifest,
     validate_asset_snapshot_request,
 )
 from exposure_ledger.cyber_policy import (
@@ -60,6 +61,7 @@ __all__ = [
     "Recommendation",
     "RecommendationDecision",
     "RecommendationPolicy",
+    "RetainedDependencyManifest",
     "RepositoryArchive",
     "RepositoryArchiveSource",
     "RepositoryArchiveUnavailable",

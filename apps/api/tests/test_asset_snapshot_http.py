@@ -64,6 +64,69 @@ def repository_assessment_payload() -> dict[str, object]:
     }
 
 
+class RequirementsArchiveSource:
+    def fetch(self, repository: str, commit: str) -> RepositoryArchive:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                f"requirements-fixture-{commit}/requirements.txt",
+                "http-x==2.3.0\nleaf-lib==1.0.0\n",
+            )
+        return RepositoryArchive(content=buffer.getvalue())
+
+
+class UnpinnedRequirementsArchiveSource:
+    def fetch(self, repository: str, commit: str) -> RepositoryArchive:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                f"requirements-fixture-{commit}/requirements.txt",
+                "http-x>=2.3\n",
+            )
+        return RepositoryArchive(content=buffer.getvalue())
+
+
+class PoetryArchiveSource:
+    def fetch(self, repository: str, commit: str) -> RepositoryArchive:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                f"poetry-fixture-{commit}/pyproject.toml",
+                """
+[project]
+name = "poetry-app"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["http-x>=2,<3"]
+""",
+            )
+            archive.writestr(
+                f"poetry-fixture-{commit}/poetry.lock",
+                """
+[[package]]
+name = "http-x"
+version = "2.3.0"
+python-versions = ">=3.12"
+groups = ["main"]
+
+[package.dependencies]
+leaf-lib = ">=1,<2"
+
+[[package]]
+name = "leaf-lib"
+version = "1.0.0"
+python-versions = ">=3.12"
+groups = ["main"]
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.12"
+content-hash = "fixture"
+""",
+            )
+        return RepositoryArchive(content=buffer.getvalue())
+
+
 def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
     database_url: str,
 ) -> None:
@@ -217,6 +280,128 @@ def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
     with TestClient(app) as client:
         duplicate_completed = client.get(f"/api/v1/assessment-runs/{duplicate.json()['id']}")
         assert duplicate_completed.json()["assetSnapshotId"] == snapshot["id"]
+
+
+def test_pinned_requirements_unknown_dependency_paths_are_visible_in_api(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/assessment-runs",
+            json={
+                "mode": "repository",
+                "repository": "https://github.com/example/requirements-fixture",
+                "commit": COMMIT,
+                "projectRoot": ".",
+                "lockfilePath": "requirements.txt",
+                "environmentProfile": {
+                    "pythonVersion": "3.12.2",
+                    "operatingSystem": "linux",
+                    "architecture": "x86_64",
+                },
+            },
+        )
+        assert response.status_code == 201
+        assessment_id = response.json()["id"]
+
+    assert process_next_assessment(
+        database_url=database_url, archive_source=RequirementsArchiveSource()
+    )
+
+    with TestClient(app) as client:
+        assessment = client.get(f"/api/v1/assessment-runs/{assessment_id}").json()
+        assert assessment["status"] == "completed"
+        snapshot = client.get(f"/api/v1/asset-snapshots/{assessment['assetSnapshotId']}").json()
+        assert snapshot["parserVersion"] == "requirements-v1"
+        assert snapshot["packages"] == [
+            {
+                "name": "http-x",
+                "version": "2.3.0",
+                "direct": None,
+                "source": {"manifest": "requirements.txt"},
+                "dependencyPaths": None,
+            },
+            {
+                "name": "leaf-lib",
+                "version": "1.0.0",
+                "direct": None,
+                "source": {"manifest": "requirements.txt"},
+                "dependencyPaths": None,
+            },
+        ]
+
+
+def test_unpinned_requirements_rejection_code_is_visible_in_api(database_url: str) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/assessment-runs",
+            json={
+                "mode": "repository",
+                "repository": "https://github.com/example/requirements-fixture",
+                "commit": COMMIT,
+                "projectRoot": ".",
+                "lockfilePath": "requirements.txt",
+                "environmentProfile": {
+                    "pythonVersion": "3.12.2",
+                    "operatingSystem": "linux",
+                    "architecture": "x86_64",
+                },
+            },
+        )
+        assessment_id = response.json()["id"]
+
+    assert process_next_assessment(
+        database_url=database_url, archive_source=UnpinnedRequirementsArchiveSource()
+    )
+
+    with TestClient(app) as client:
+        assessment = client.get(f"/api/v1/assessment-runs/{assessment_id}").json()
+        assert assessment["status"] == "failed"
+        assert assessment["errorCode"] == "unpinned_requirement"
+        assert (
+            assessment["errorMessage"] == "requirement http-x must pin exactly one version with =="
+        )
+        events = client.get(f"/api/v1/assessment-runs/{assessment_id}/events?follow=false").text
+        assert '"code":"unpinned_requirement"' in events
+
+
+def test_poetry_lock_can_be_selected_through_the_assessment_flow(database_url: str) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/assessment-runs",
+            json={
+                "mode": "repository",
+                "repository": "https://github.com/example/poetry-fixture",
+                "commit": COMMIT,
+                "projectRoot": ".",
+                "lockfilePath": "poetry.lock",
+                "environmentProfile": {
+                    "pythonVersion": "3.12.2",
+                    "operatingSystem": "linux",
+                    "architecture": "x86_64",
+                },
+            },
+        )
+        assert response.status_code == 201
+        assessment_id = response.json()["id"]
+
+    assert process_next_assessment(database_url=database_url, archive_source=PoetryArchiveSource())
+
+    with TestClient(app) as client:
+        assessment = client.get(f"/api/v1/assessment-runs/{assessment_id}").json()
+        assert assessment["status"] == "completed"
+        snapshot = client.get(f"/api/v1/asset-snapshots/{assessment['assetSnapshotId']}").json()
+        assert snapshot["parserVersion"] == "poetry-lock-v1"
+        assert [
+            (package["name"], package["direct"], package["dependencyPaths"])
+            for package in snapshot["packages"]
+        ] == [
+            ("http-x", True, [["poetry-app", "http-x"]]),
+            ("leaf-lib", False, [["poetry-app", "http-x", "leaf-lib"]]),
+        ]
 
 
 def test_asset_snapshot_rejection_is_typed_and_does_not_persist(

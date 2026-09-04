@@ -25,6 +25,9 @@ erDiagram
 ## Identity and immutability
 
 - An Asset Snapshot is unique to repository, commit, selected project root, lockfile digest, and Environment Profile.
+- A Package Instance's directness and Dependency Paths are nullable only when a supported flat
+  requirements format cannot encode trustworthy relationship provenance; null means unknown, not
+  an empty path or an inferred direct dependency.
 - A Vulnerability Record preserves aliases without using any one provider identifier as universal identity.
 - An Exposure is unique to Asset Snapshot, Vulnerability Record, and affected package.
 - An Investigation belongs to one Exposure. Reassessment of unchanged code appends an Investigation Revision.

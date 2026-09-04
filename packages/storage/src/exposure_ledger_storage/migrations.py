@@ -337,6 +337,52 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             WHERE enforcement_point = 'request' AND assessment_run_id IS NOT NULL;
         """,
     ),
+    (
+        7,
+        """
+        ALTER TABLE package_instances
+            ALTER COLUMN direct DROP NOT NULL;
+
+        ALTER TABLE asset_snapshots
+            ADD COLUMN project_file_path text,
+            ADD COLUMN project_file_digest text,
+            ADD COLUMN project_file_content text,
+            ADD CONSTRAINT asset_snapshots_project_file_check
+                CHECK (
+                    (project_file_path IS NULL
+                     AND project_file_digest IS NULL
+                     AND project_file_content IS NULL)
+                    OR
+                    (project_file_path IS NOT NULL
+                     AND project_file_digest IS NOT NULL
+                     AND project_file_content IS NOT NULL)
+                );
+
+        CREATE OR REPLACE FUNCTION allow_only_asset_snapshot_seal()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF OLD.sealed = false AND NEW.sealed = true
+               AND ROW(OLD.id, OLD.repository, OLD.commit_sha, OLD.project_root,
+                       OLD.lockfile_path, OLD.lockfile_digest, OLD.lockfile_content,
+                       OLD.project_file_path, OLD.project_file_digest,
+                       OLD.project_file_content, OLD.environment_profile_id,
+                       OLD.parser_version, OLD.captured_at)
+                   IS NOT DISTINCT FROM
+                   ROW(NEW.id, NEW.repository, NEW.commit_sha, NEW.project_root,
+                       NEW.lockfile_path, NEW.lockfile_digest, NEW.lockfile_content,
+                       NEW.project_file_path, NEW.project_file_digest,
+                       NEW.project_file_content, NEW.environment_profile_id,
+                       NEW.parser_version, NEW.captured_at)
+            THEN
+                RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'Asset Snapshot records are immutable';
+        END;
+        $$;
+        """,
+    ),
 )
 
 

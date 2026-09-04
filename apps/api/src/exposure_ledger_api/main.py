@@ -179,9 +179,9 @@ class EnvironmentProfileResponse(ApiModel):
 class PackageInstanceResponse(ApiModel):
     name: str
     version: str
-    direct: bool
+    direct: bool | None
     source: dict[str, object]
-    dependency_paths: list[list[str]]
+    dependency_paths: list[list[str]] | None
 
     @classmethod
     def from_record(cls, package: PackageInstanceRecord) -> "PackageInstanceResponse":
@@ -190,7 +190,11 @@ class PackageInstanceResponse(ApiModel):
             version=package.version,
             direct=package.direct,
             source=package.source,
-            dependency_paths=[list(path) for path in package.dependency_paths],
+            dependency_paths=(
+                [list(path) for path in package.dependency_paths]
+                if package.dependency_paths is not None
+                else None
+            ),
         )
 
 
