@@ -27,6 +27,19 @@ describe("ExposureQueuePanel", () => {
             },
             rank: 1,
             selectedForInvestigation: true,
+            kev: {
+              state: "available",
+              listed: true,
+              observedAt: "2026-09-03T10:15:30Z",
+              detail: null,
+            },
+            epss: {
+              state: "available",
+              score: 0.42,
+              percentile: 0.97,
+              observedAt: "2026-09-03T00:00:00Z",
+              detail: null,
+            },
             ranking: {
               severity: "high",
               directDependency: true,
@@ -76,6 +89,19 @@ describe("ExposureQueuePanel", () => {
             },
             rank: 2,
             selectedForInvestigation: true,
+            kev: {
+              state: "available",
+              listed: false,
+              observedAt: "2026-09-03T10:15:30Z",
+              detail: null,
+            },
+            epss: {
+              state: "missing",
+              score: null,
+              percentile: null,
+              observedAt: null,
+              detail: "FIRST EPSS returned no score.",
+            },
             ranking: {
               severity: "high",
               directDependency: true,
@@ -102,6 +128,19 @@ describe("ExposureQueuePanel", () => {
             },
             rank: 3,
             selectedForInvestigation: true,
+            kev: {
+              state: "unavailable",
+              listed: null,
+              observedAt: null,
+              detail: "CISA KEV timed out.",
+            },
+            epss: {
+              state: "stale",
+              score: 0.01,
+              percentile: 0.4,
+              observedAt: "2026-08-01T00:00:00Z",
+              detail: "FIRST EPSS observation is stale.",
+            },
             ranking: {
               severity: "unknown",
               directDependency: null,
@@ -131,6 +170,16 @@ describe("ExposureQueuePanel", () => {
     expect(html).toContain("Dependency depth unknown")
     expect(html).toContain("Dependency paths unknown for this manifest")
     expect(html).toContain("Evidence trace")
+    expect(html).toContain("Known exploitation · CISA KEV")
+    expect(html).toContain("Listed")
+    expect(html).toContain("Not listed")
+    expect(html).toContain("Exploit probability · FIRST EPSS")
+    expect(html).toContain("42.0% probability")
+    expect(html).toContain("97th percentile")
+    expect(html).toContain("Observed 2026-09-03T10:15:30Z")
+    expect(html).toContain("EPSS evidence missing")
+    expect(html).toContain("KEV Source unavailable")
+    expect(html).toContain("Stale observation")
     expect(html).toContain("PYSEC-2026-40")
     expect(html).toContain("sha256:provider-payload")
     expect(html).toContain("Open Source Vulnerabilities (OSV)")

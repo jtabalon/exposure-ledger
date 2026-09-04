@@ -24,6 +24,7 @@ from exposure_ledger import (
     ExposureSeverity,
     OperatingSystem,
     PolicyResult,
+    SourceObservationState,
     validate_asset_snapshot_request,
 )
 from exposure_ledger_storage import (
@@ -314,6 +315,21 @@ class EvidenceRecordResponse(ApiModel):
         )
 
 
+class KevSignalResponse(ApiModel):
+    state: SourceObservationState
+    listed: bool | None
+    observed_at: datetime | None
+    detail: str | None
+
+
+class EpssSignalResponse(ApiModel):
+    state: SourceObservationState
+    score: float | None
+    percentile: float | None
+    observed_at: datetime | None
+    detail: str | None
+
+
 class ExposureResponse(ApiModel):
     id: UUID
     assessment_run_id: UUID
@@ -323,6 +339,8 @@ class ExposureResponse(ApiModel):
     ranking: ExposureRankingResponse
     rank: int
     selected_for_investigation: bool
+    kev: KevSignalResponse
+    epss: EpssSignalResponse
     evidence_records: list[EvidenceRecordResponse]
 
     @classmethod
@@ -339,6 +357,18 @@ class ExposureResponse(ApiModel):
             ranking=ExposureRankingResponse.from_domain(exposure.ranking),
             rank=exposure.rank,
             selected_for_investigation=exposure.selected_for_investigation,
+            kev=KevSignalResponse.model_validate(exposure.kev, from_attributes=True),
+            epss=EpssSignalResponse(
+                state=exposure.epss.state,
+                score=(float(exposure.epss.score) if exposure.epss.score is not None else None),
+                percentile=(
+                    float(exposure.epss.percentile)
+                    if exposure.epss.percentile is not None
+                    else None
+                ),
+                observed_at=exposure.epss.observed_at,
+                detail=exposure.epss.detail,
+            ),
             evidence_records=[
                 EvidenceRecordResponse.from_record(item) for item in exposure.evidence_records
             ],
