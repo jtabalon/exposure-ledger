@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from io import BytesIO
 from pathlib import PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 from packaging.markers import InvalidMarker, Marker
@@ -43,6 +43,34 @@ _ALL_MARKER_VARIABLES = _SUPPORTED_MARKER_VARIABLES | {
     "platform_release",
     "platform_version",
 }
+
+type AssetSnapshotRejectionCode = Literal[
+    "ambiguous_dependency",
+    "ambiguous_project_root",
+    "archive_compression_ratio_exceeded",
+    "archive_too_large",
+    "archive_too_many_files",
+    "dependency_graph_too_large",
+    "environment_marker_too_complex",
+    "invalid_archive",
+    "invalid_commit",
+    "invalid_lockfile",
+    "invalid_repository",
+    "invalid_repository_path",
+    "lockfile_not_found",
+    "lockfile_too_large",
+    "repository_address_rejected",
+    "repository_address_unavailable",
+    "repository_redirect_rejected",
+    "repository_target_rejected",
+    "repository_unavailable",
+    "unknown_extra",
+    "unsafe_archive_link",
+    "unsafe_archive_path",
+    "unsupported_environment",
+    "unsupported_environment_marker",
+    "unsupported_lockfile",
+]
 
 
 class OperatingSystem(StrEnum):
@@ -90,9 +118,26 @@ class CaptureAssetSnapshot:
     environment_profile: EnvironmentProfile
 
 
-@dataclass(frozen=True, slots=True)
 class RepositoryArchive:
-    content: bytes
+    """A bounded archive payload whose contents can be explicitly discarded."""
+
+    __slots__ = ("_content",)
+
+    def __init__(self, *, content: bytes) -> None:
+        self._content: bytes | None = content
+
+    @property
+    def content(self) -> bytes:
+        if self._content is None:
+            raise RuntimeError("Repository archive content has been discarded.")
+        return self._content
+
+    @property
+    def closed(self) -> bool:
+        return self._content is None
+
+    def close(self) -> None:
+        self._content = None
 
 
 class RepositoryArchiveSource(Protocol):
@@ -101,6 +146,10 @@ class RepositoryArchiveSource(Protocol):
 
 class RepositoryArchiveUnavailable(RuntimeError):
     """The approved public repository archive could not be retrieved."""
+
+    def __init__(self, code: AssetSnapshotRejectionCode, message: str) -> None:
+        self.code = code
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -147,7 +196,7 @@ class ArchiveLimits:
 class AssetSnapshotRejected(ValueError):
     """A typed, safe rejection at the Asset Snapshot boundary."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: AssetSnapshotRejectionCode, message: str) -> None:
         self.code = code
         super().__init__(message)
 
@@ -179,37 +228,40 @@ class AssetSnapshotCapture:
         validated = validate_asset_snapshot_request(request)
 
         archive = self._archive_source.fetch(validated.repository, validated.commit)
-        lockfile_bytes = _read_lockfile_from_archive(
-            archive.content,
-            lockfile_path=validated.lockfile_path,
-            limits=self._limits,
-        )
         try:
-            lockfile_content = lockfile_bytes.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise AssetSnapshotRejected(
-                "invalid_lockfile", "uv.lock must be valid UTF-8 text."
-            ) from error
+            lockfile_bytes = _read_lockfile_from_archive(
+                archive.content,
+                lockfile_path=validated.lockfile_path,
+                limits=self._limits,
+            )
+            try:
+                lockfile_content = lockfile_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise AssetSnapshotRejected(
+                    "invalid_lockfile", "uv.lock must be valid UTF-8 text."
+                ) from error
 
-        packages = _parse_uv_lock(
-            lockfile_content,
-            project_root=validated.project_root,
-            lockfile_path=validated.lockfile_path,
-            environment=validated.environment_profile,
-            max_dependency_paths=self._limits.max_dependency_paths,
-        )
-        return AssetSnapshot(
-            repository=validated.repository,
-            commit=validated.commit,
-            project_root=validated.project_root,
-            lockfile_path=validated.lockfile_path,
-            lockfile_digest=f"sha256:{hashlib.sha256(lockfile_bytes).hexdigest()}",
-            lockfile_content=lockfile_content,
-            environment_profile=validated.environment_profile,
-            packages=packages,
-            parser_version=ASSET_SNAPSHOT_PARSER_VERSION,
-            captured_at=self._clock(),
-        )
+            packages = _parse_uv_lock(
+                lockfile_content,
+                project_root=validated.project_root,
+                lockfile_path=validated.lockfile_path,
+                environment=validated.environment_profile,
+                max_dependency_paths=self._limits.max_dependency_paths,
+            )
+            return AssetSnapshot(
+                repository=validated.repository,
+                commit=validated.commit,
+                project_root=validated.project_root,
+                lockfile_path=validated.lockfile_path,
+                lockfile_digest=f"sha256:{hashlib.sha256(lockfile_bytes).hexdigest()}",
+                lockfile_content=lockfile_content,
+                environment_profile=validated.environment_profile,
+                packages=packages,
+                parser_version=ASSET_SNAPSHOT_PARSER_VERSION,
+                captured_at=self._clock(),
+            )
+        finally:
+            archive.close()
 
 
 def validate_asset_snapshot_request(request: CaptureAssetSnapshot) -> CaptureAssetSnapshot:
@@ -262,7 +314,7 @@ def _canonical_repository(value: str) -> str:
     if repository.endswith(".git"):
         repository = repository[:-4]
     if not all(
-        segment and _REPOSITORY_SEGMENT_PATTERN.fullmatch(segment)
+        segment not in {".", ".."} and _REPOSITORY_SEGMENT_PATTERN.fullmatch(segment)
         for segment in (owner, repository)
     ):
         raise AssetSnapshotRejected(
@@ -371,7 +423,12 @@ def _read_lockfile_from_archive(
             )
         if lockfile.file_size > limits.max_lockfile_bytes:
             raise AssetSnapshotRejected("lockfile_too_large", "uv.lock exceeds size limit")
-        return archive.read(lockfile)
+        try:
+            return archive.read(lockfile)
+        except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, EOFError) as error:
+            raise AssetSnapshotRejected(
+                "invalid_archive", "repository archive content could not be read safely"
+            ) from error
 
 
 def _is_symlink(member: zipfile.ZipInfo) -> bool:
@@ -389,7 +446,7 @@ def _parse_uv_lock(
 ) -> tuple[PackageInstance, ...]:
     try:
         document = tomllib.loads(content)
-    except tomllib.TOMLDecodeError as error:
+    except (tomllib.TOMLDecodeError, RecursionError) as error:
         raise AssetSnapshotRejected("invalid_lockfile", "uv.lock is not valid TOML") from error
     if document.get("version") != 1:
         raise AssetSnapshotRejected("unsupported_lockfile", "uv.lock format version is unsupported")
@@ -441,18 +498,31 @@ def _parse_uv_lock(
             frozenset[str],
         ]
     ] = deque()
+    scheduled_paths = 0
+
+    def schedule(
+        package: _LockedPackage,
+        path: tuple[str, ...],
+        key_path: tuple[tuple[str, str | None, PackageSource], ...],
+        active_extras: frozenset[str],
+    ) -> None:
+        nonlocal scheduled_paths
+        scheduled_paths += 1
+        if scheduled_paths > max_dependency_paths:
+            raise AssetSnapshotRejected(
+                "dependency_graph_too_large", "uv.lock contains too many Dependency Paths"
+            )
+        queue.append((package, path, key_path, active_extras))
+
     for dependency in _dependencies_for(root, frozenset(environment.selected_extras), environment):
         target = _resolve_dependency(dependency, by_name)
-        queue.append(
-            (
-                target,
-                (root.name, target.name),
-                (root.key, target.key),
-                frozenset(_dependency_extras(dependency)),
-            )
+        schedule(
+            target,
+            (root.name, target.name),
+            (root.key, target.key),
+            frozenset(_dependency_extras(dependency)),
         )
 
-    total_paths = 0
     expanded: set[tuple[tuple[str, str | None, PackageSource], tuple[str, ...], frozenset[str]]] = (
         set()
     )
@@ -464,22 +534,15 @@ def _parse_uv_lock(
         expanded.add(state)
         if package.version is not None and path not in paths[package.key]:
             paths[package.key].add(path)
-            total_paths += 1
-            if total_paths > max_dependency_paths:
-                raise AssetSnapshotRejected(
-                    "dependency_graph_too_large", "uv.lock contains too many Dependency Paths"
-                )
         for dependency in _dependencies_for(package, active_extras, environment):
             target = _resolve_dependency(dependency, by_name)
             if target.key in key_path:
                 continue
-            queue.append(
-                (
-                    target,
-                    (*path, target.name),
-                    (*key_path, target.key),
-                    frozenset(_dependency_extras(dependency)),
-                )
+            schedule(
+                target,
+                (*path, target.name),
+                (*key_path, target.key),
+                frozenset(_dependency_extras(dependency)),
             )
 
     result = []
@@ -627,6 +690,11 @@ def _marker_applies(
         marker = Marker(value)
         extras = active_extras or frozenset({""})
         return any(marker.evaluate(_marker_environment(environment, extra)) for extra in extras)
+    except RecursionError as error:
+        raise AssetSnapshotRejected(
+            "environment_marker_too_complex",
+            "uv.lock environment marker exceeds the parser complexity limit",
+        ) from error
     except (InvalidMarker, KeyError) as error:
         raise AssetSnapshotRejected(
             "unsupported_environment_marker", "uv.lock contains an unsupported environment marker"

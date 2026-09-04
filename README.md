@@ -98,9 +98,18 @@ curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
 The API policy-gates and durably queues the request. The worker records a second Policy Decision at
 the repository-fetch boundary, constrains egress to public GitHub codeload addresses, and reads the
 archive and lockfile as untrusted data in memory. It never installs dependencies, imports modules,
-runs builds or hooks, or executes repository content. `GET /api/v1/asset-snapshots` exposes the
+runs builds or hooks, or executes repository content. The bounded archive payload is explicitly
+discarded after either successful capture or rejection; no repository archive is retained on disk.
+`GET /api/v1/asset-snapshots` exposes the
 pinned scope, digest, Environment Profile, normalized packages, and Dependency Paths shown in the
 workbench.
+
+Repository requests must explicitly select one project root and one `uv.lock`. Unsafe targets,
+ambiguous selections, archive traversal or links, corrupt content, and configured size, file-count,
+compression-ratio, lockfile, or Dependency Path ceilings fail with a stable rejection code. A
+request rejected before queueing returns that code in HTTP 422; a capture rejected by the worker
+records it in the Assessment Run's `errorCode`. Rejected captures never create a partial Asset
+Snapshot, and the workbench shows guidance for correcting the request.
 
 SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
 

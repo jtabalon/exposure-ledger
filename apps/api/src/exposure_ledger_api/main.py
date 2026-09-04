@@ -37,7 +37,9 @@ from exposure_ledger_storage import (
     PolicyDecisionRecord,
 )
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from exposure_ledger_api.settings import Settings
@@ -280,6 +282,71 @@ def create_app(
         version=APP_VERSION,
         lifespan=lifespan,
     )
+
+    @application.exception_handler(RequestValidationError)
+    async def typed_request_validation(
+        request: Request,
+        error: RequestValidationError,
+    ) -> Response:
+        body = error.body
+        selection_error_fields = {
+            str(item["loc"][-1])
+            for item in error.errors()
+            if item.get("loc")
+            and item["loc"][-1] in {"projectRoot", "lockfilePath", "project_root", "lockfile_path"}
+        }
+        if isinstance(body, dict) and body.get("mode") == "repository" and selection_error_fields:
+            raw_context = body.get("policyContext", body.get("policy_context", {}))
+            raw_chain = (
+                raw_context.get("operationChain", raw_context.get("operation_chain", []))
+                if isinstance(raw_context, dict)
+                else []
+            )
+            operation_chain = (
+                tuple(raw_chain)
+                if isinstance(raw_chain, list)
+                and all(isinstance(operation, str) for operation in raw_chain)
+                else ("unrecognized_operation",)
+            )
+            raw_repository = body.get("repository")
+            raw_commit = body.get("commit")
+            target_scope = (
+                f"{raw_repository}@{raw_commit}"
+                if isinstance(raw_repository, str) and isinstance(raw_commit, str)
+                else None
+            )
+            decision = CyberPolicy.decide(
+                AssessmentRequest(
+                    operation=AssessmentOperation.PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT,
+                    target_scope=target_scope,
+                    authorization_scope="local operator",
+                    authorization_status=AuthorizationStatus.UNCERTAIN,
+                    operation_chain=operation_chain,
+                )
+            )
+            repository.record_policy_decision(
+                replace(
+                    decision,
+                    result=PolicyResult.BLOCKED,
+                    reason=(
+                        "Asset Snapshot project and lockfile selection is materially uncertain; "
+                        "the Assessment request is blocked."
+                    ),
+                )
+            )
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                content={
+                    "detail": {
+                        "code": "asset_snapshot_selection_required",
+                        "message": (
+                            "Select exactly one project root and one supported lockfile before "
+                            "capturing an Asset Snapshot."
+                        ),
+                    }
+                },
+            )
+        return await request_validation_exception_handler(request, error)
 
     @application.get("/health", response_model=HealthResponse, tags=["operations"])
     def health() -> HealthResponse:

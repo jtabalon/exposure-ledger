@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from exposure_ledger import RepositoryArchive
+from exposure_ledger import RepositoryArchive, RepositoryArchiveUnavailable
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_worker.main import process_next_assessment
@@ -29,6 +29,39 @@ class FixtureArchiveSource:
                         path, f"exposure-fixture-{commit}/{path.relative_to(FIXTURE_ROOT)}"
                     )
         return RepositoryArchive(content=buffer.getvalue())
+
+
+class RedirectedArchiveSource:
+    def fetch(self, repository: str, commit: str) -> RepositoryArchive:
+        raise RepositoryArchiveUnavailable(
+            "repository_redirect_rejected",
+            "GitHub archive redirects are not accepted.",
+        )
+
+
+class ExcessiveFileCountArchiveSource:
+    def fetch(self, repository: str, commit: str) -> RepositoryArchive:
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("project-root/services/api/uv.lock", "version = 1")
+            for index in range(5_000):
+                archive.writestr(f"project-root/generated/{index}.txt", "")
+        return RepositoryArchive(content=buffer.getvalue())
+
+
+def repository_assessment_payload() -> dict[str, object]:
+    return {
+        "mode": "repository",
+        "repository": "https://github.com/example/exposure-fixture",
+        "commit": COMMIT,
+        "projectRoot": "services/api",
+        "lockfilePath": "services/api/uv.lock",
+        "environmentProfile": {
+            "pythonVersion": "3.12",
+            "operatingSystem": "linux",
+            "architecture": "x86_64",
+        },
+    }
 
 
 def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
@@ -84,7 +117,7 @@ def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
             "projectRoot": "services/api",
             "lockfilePath": "services/api/uv.lock",
             "lockfileDigest": (
-                "sha256:6f36f370f6f43bfe19c0082ef6ef5e51a8fe478f9f6226fbaa39863ec5f3894d"
+                "sha256:9ecd0209306e7e59e67eaf9f4aaed668726f42209685c974ca363345e18d9542"
             ),
             "environmentProfile": {
                 "pythonVersion": "3.12.2",
@@ -224,6 +257,102 @@ def test_asset_snapshot_rejection_is_typed_and_does_not_persist(
         )
         assert decisions[0]["result"] == "blocked"
         assert decisions[0]["enforcementPoint"] == "request"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        None,
+        {"projectRoot": None, "lockfilePath": None},
+        {"project_root": None, "lockfile_path": None},
+    ],
+)
+def test_repository_assessment_requires_explicit_project_and_lockfile_selection(
+    database_url: str,
+    selection: dict[str, object] | None,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    payload = repository_assessment_payload()
+    if selection is None:
+        payload.pop("projectRoot")
+        payload.pop("lockfilePath")
+    else:
+        payload.update(selection)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/assessment-runs", json=payload)
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "detail": {
+                "code": "asset_snapshot_selection_required",
+                "message": (
+                    "Select exactly one project root and one supported lockfile before "
+                    "capturing an Asset Snapshot."
+                ),
+            }
+        }
+        assert client.get("/api/v1/assessment-runs").json() == {"items": []}
+        assert client.get("/api/v1/asset-snapshots").json() == {"items": []}
+        decisions = client.get("/api/v1/policy-decisions").json()["items"]
+        assert len(decisions) == 1
+        assert decisions[0]["result"] == "blocked"
+        assert decisions[0]["enforcementPoint"] == "request"
+        repository_schema = client.get("/openapi.json").json()["components"]["schemas"][
+            "CreateRepositoryAssessmentRunRequest"
+        ]
+        assert {"projectRoot", "lockfilePath"} <= set(repository_schema["required"])
+
+
+def test_repository_source_rejection_is_typed_and_does_not_create_a_partial_snapshot(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+
+    with TestClient(app) as client:
+        queued = client.post("/api/v1/assessment-runs", json=repository_assessment_payload())
+        assert queued.status_code == 201
+
+        assert (
+            process_next_assessment(
+                database_url=database_url,
+                archive_source=RedirectedArchiveSource(),
+            )
+            is True
+        )
+
+        failed = client.get(f"/api/v1/assessment-runs/{queued.json()['id']}")
+        assert failed.status_code == 200
+        assert failed.json()["status"] == "failed"
+        assert failed.json()["errorCode"] == "repository_redirect_rejected"
+        assert failed.json()["errorMessage"] == "GitHub archive redirects are not accepted."
+        assert failed.json()["assetSnapshotId"] is None
+        assert client.get("/api/v1/asset-snapshots").json() == {"items": []}
+
+
+def test_capture_ceiling_is_typed_and_does_not_create_a_partial_snapshot(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+
+    with TestClient(app) as client:
+        queued = client.post("/api/v1/assessment-runs", json=repository_assessment_payload())
+        assert queued.status_code == 201
+
+        assert (
+            process_next_assessment(
+                database_url=database_url,
+                archive_source=ExcessiveFileCountArchiveSource(),
+            )
+            is True
+        )
+
+        failed = client.get(f"/api/v1/assessment-runs/{queued.json()['id']}")
+        assert failed.status_code == 200
+        assert failed.json()["status"] == "failed"
+        assert failed.json()["errorCode"] == "archive_too_many_files"
+        assert failed.json()["assetSnapshotId"] is None
+        assert client.get("/api/v1/asset-snapshots").json() == {"items": []}
 
 
 def test_policy_gate_runs_before_repository_retrieval(database_url: str) -> None:

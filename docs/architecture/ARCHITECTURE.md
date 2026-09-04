@@ -54,7 +54,7 @@ Each module is deep: callers cross a small interface while the volatile source, 
 - Every retry is idempotent and cannot mutate a prior Evidence Record or Investigation Revision.
 - Model or source failure is visible; no provider fallback occurs implicitly.
 - Budgets cap model calls, tool calls, graph transitions, wall time, and—when hosted models arrive—money.
-- Repository archives are deleted after successful parsing; only manifests, normalized results, hashes, and evidence-bearing excerpts remain.
+- Repository archives are bounded in memory and explicitly discarded after successful parsing or rejection; only manifests, normalized results, hashes, and evidence-bearing excerpts remain.
 
 ## Security invariants
 

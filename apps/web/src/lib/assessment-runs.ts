@@ -1,5 +1,37 @@
 export type AssessmentRunStatus = "queued" | "running" | "completed" | "failed"
 export type PolicyResult = "allowed" | "restricted" | "blocked"
+export type AssetSnapshotRejectionCode =
+  | "ambiguous_dependency"
+  | "ambiguous_project_root"
+  | "archive_compression_ratio_exceeded"
+  | "archive_too_large"
+  | "archive_too_many_files"
+  | "dependency_graph_too_large"
+  | "environment_marker_too_complex"
+  | "invalid_archive"
+  | "invalid_commit"
+  | "invalid_lockfile"
+  | "invalid_repository"
+  | "invalid_repository_path"
+  | "lockfile_not_found"
+  | "lockfile_too_large"
+  | "repository_address_rejected"
+  | "repository_address_unavailable"
+  | "repository_redirect_rejected"
+  | "repository_target_rejected"
+  | "repository_unavailable"
+  | "unknown_extra"
+  | "unsafe_archive_link"
+  | "unsafe_archive_path"
+  | "unsupported_environment"
+  | "unsupported_environment_marker"
+  | "unsupported_lockfile"
+export type AssessmentRunErrorCode =
+  | AssetSnapshotRejectionCode
+  | "policy_gate_unavailable"
+  | "repository_fetch_policy_blocked"
+  | "synthetic_worker_failure"
+  | "worker_execution_failed"
 
 export type PolicyDecision = {
   id: string
@@ -26,7 +58,7 @@ export type AssessmentRun = {
   createdAt: string
   startedAt: string | null
   completedAt: string | null
-  errorCode: string | null
+  errorCode: AssessmentRunErrorCode | null
   errorMessage: string | null
   assetSnapshotId: string | null
   policyDecision: PolicyDecision

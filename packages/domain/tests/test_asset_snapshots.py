@@ -38,9 +38,11 @@ class FixtureArchiveSource:
 class BytesArchiveSource:
     def __init__(self, content: bytes) -> None:
         self.content = content
+        self.archive: RepositoryArchive | None = None
 
     def fetch(self, repository: str, commit: str) -> RepositoryArchive:
-        return RepositoryArchive(content=self.content)
+        self.archive = RepositoryArchive(content=self.content)
+        return self.archive
 
 
 def capture_request(
@@ -103,9 +105,14 @@ def test_supported_uv_repository_produces_a_normalized_asset_snapshot_without_ex
     assert snapshot.project_root == "services/api"
     assert snapshot.lockfile_path == "services/api/uv.lock"
     assert snapshot.lockfile_digest == (
-        "sha256:6f36f370f6f43bfe19c0082ef6ef5e51a8fe478f9f6226fbaa39863ec5f3894d"
+        "sha256:9ecd0209306e7e59e67eaf9f4aaed668726f42209685c974ca363345e18d9542"
     )
     assert snapshot.captured_at == datetime(2026, 9, 3, 20, 0, tzinfo=UTC)
+    assert "general shell tool" not in snapshot.lockfile_content
+    assert "Run setup.py" not in snapshot.lockfile_content
+    assert 'tools = ["general_shell", "unrestricted_http"]' in snapshot.lockfile_content
+    assert not hasattr(snapshot, "instructions")
+    assert not hasattr(snapshot, "tools")
     assert [
         (package.name, package.version, package.direct, package.dependency_paths)
         for package in snapshot.packages
@@ -119,6 +126,137 @@ def test_supported_uv_repository_produces_a_normalized_asset_snapshot_without_ex
     assert not (tmp_path / "REPOSITORY_CONTENT_WAS_IMPORTED").exists()
 
 
+def test_capture_closes_the_repository_archive_after_success() -> None:
+    source = BytesArchiveSource(
+        archive_bytes(
+            {
+                "project-root/uv.lock": """
+version = 1
+
+[[package]]
+name = "project"
+source = { virtual = "." }
+"""
+            }
+        )
+    )
+
+    AssetSnapshotCapture(source).capture(capture_request())
+
+    assert source.archive is not None
+    assert source.archive.closed is True
+
+
+def test_capture_closes_the_repository_archive_after_rejection() -> None:
+    source = BytesArchiveSource(archive_bytes({"project-root/uv.lock": "not valid TOML ["}))
+
+    with pytest.raises(AssetSnapshotRejected):
+        AssetSnapshotCapture(source).capture(capture_request())
+
+    assert source.archive is not None
+    assert source.archive.closed is True
+
+
+def test_capture_returns_a_typed_rejection_for_corrupted_archive_content() -> None:
+    content = archive_bytes({"project-root/uv.lock": "version = 1"})
+    corrupted = content.replace(b"version = 1", b"version = 2", 1)
+    source = BytesArchiveSource(corrupted)
+
+    with pytest.raises(AssetSnapshotRejected) as error:
+        AssetSnapshotCapture(source).capture(capture_request())
+
+    assert error.value.code == "invalid_archive"
+    assert source.archive is not None
+    assert source.archive.closed is True
+
+
+def test_capture_returns_a_typed_rejection_for_excessively_nested_toml() -> None:
+    nested_value = "[" * 2_000 + "0" + "]" * 2_000
+    source = BytesArchiveSource(
+        archive_bytes({"project-root/uv.lock": f"version = 1\nvalue = {nested_value}"})
+    )
+
+    with pytest.raises(AssetSnapshotRejected) as error:
+        AssetSnapshotCapture(source).capture(capture_request())
+
+    assert error.value.code == "invalid_lockfile"
+    assert source.archive is not None
+    assert source.archive.closed is True
+
+
+def test_explicit_lockfile_selection_never_merges_other_project_dependencies() -> None:
+    first_lock = """
+version = 1
+
+[[package]]
+name = "first-project"
+source = { virtual = "." }
+dependencies = [{ name = "first-only" }]
+
+[[package]]
+name = "first-only"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+    second_lock = """
+version = 1
+
+[[package]]
+name = "second-project"
+source = { virtual = "." }
+dependencies = [{ name = "second-only" }]
+
+[[package]]
+name = "second-only"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+    source = BytesArchiveSource(
+        archive_bytes(
+            {
+                "project-root/services/first/uv.lock": first_lock,
+                "project-root/services/second/uv.lock": second_lock,
+            }
+        )
+    )
+
+    snapshot = AssetSnapshotCapture(source).capture(
+        capture_request(
+            project_root="services/second",
+            lockfile_path="services/second/uv.lock",
+        )
+    )
+
+    assert [(package.name, package.version) for package in snapshot.packages] == [
+        ("second-only", "2.0.0")
+    ]
+
+
+def test_selected_lockfile_rejects_multiple_matching_project_roots() -> None:
+    source = BytesArchiveSource(
+        archive_bytes(
+            {
+                "project-root/uv.lock": """
+version = 1
+
+[[package]]
+name = "first-project"
+source = { virtual = "." }
+
+[[package]]
+name = "second-project"
+source = { editable = "." }
+"""
+            }
+        )
+    )
+
+    with pytest.raises(AssetSnapshotRejected) as error:
+        AssetSnapshotCapture(source).capture(capture_request())
+
+    assert error.value.code == "ambiguous_project_root"
+
+
 @pytest.mark.parametrize(
     "repository",
     [
@@ -128,6 +266,8 @@ def test_supported_uv_repository_produces_a_normalized_asset_snapshot_without_ex
         "https://github.com.evil.test/example/project",
         "https://github.com:bad/example/project",
         "https://[github.com/example/project",
+        "https://github.com/../project",
+        "https://github.com/example/..",
     ],
 )
 def test_capture_rejects_noncanonical_public_repository_targets(repository: str) -> None:
@@ -228,6 +368,39 @@ source = { registry = "https://pypi.org/simple" }
     assert packages == (("dependency", "1.0.0", (("virtual-project", "dependency"),)),)
 
 
+def test_dependency_path_ceiling_counts_versionless_nodes() -> None:
+    content = archive_bytes(
+        {
+            "project-root/uv.lock": """
+version = 1
+
+[[package]]
+name = "project"
+source = { virtual = "." }
+dependencies = [{ name = "virtual-bridge" }]
+
+[[package]]
+name = "virtual-bridge"
+source = { virtual = "bridge" }
+dependencies = [{ name = "dependency" }]
+
+[[package]]
+name = "dependency"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+"""
+        }
+    )
+
+    with pytest.raises(AssetSnapshotRejected) as error:
+        AssetSnapshotCapture(
+            BytesArchiveSource(content),
+            limits=ArchiveLimits(max_dependency_paths=1),
+        ).capture(capture_request())
+
+    assert error.value.code == "dependency_graph_too_large"
+
+
 @pytest.mark.parametrize(
     ("operating_system", "architecture", "machine"),
     [
@@ -300,6 +473,32 @@ source = { registry = "https://pypi.org/simple" }
     assert error.value.code == "unsupported_environment_marker"
 
 
+def test_capture_returns_a_typed_rejection_for_excessively_nested_markers() -> None:
+    marker = "(" * 2_000 + "python_version >= '3.12'" + ")" * 2_000
+    content = archive_bytes(
+        {
+            "project-root/uv.lock": f"""
+version = 1
+
+[[package]]
+name = "project"
+source = {{ virtual = "." }}
+dependencies = [{{ name = "dependency", marker = "{marker}" }}]
+
+[[package]]
+name = "dependency"
+version = "1.0.0"
+source = {{ registry = "https://pypi.org/simple" }}
+"""
+        }
+    )
+
+    with pytest.raises(AssetSnapshotRejected) as error:
+        AssetSnapshotCapture(BytesArchiveSource(content)).capture(capture_request())
+
+    assert error.value.code == "environment_marker_too_complex"
+
+
 @pytest.mark.parametrize(
     ("content", "limits", "code"),
     [
@@ -320,8 +519,18 @@ source = { registry = "https://pypi.org/simple" }
         ),
         (
             archive_bytes({"project-root/uv.lock": "version = 1"}),
+            ArchiveLimits(max_compressed_bytes=1),
+            "archive_too_large",
+        ),
+        (
+            archive_bytes({"project-root/uv.lock": "version = 1"}),
             ArchiveLimits(max_expanded_bytes=1),
             "archive_too_large",
+        ),
+        (
+            archive_bytes({"project-root/uv.lock": "version = 1"}),
+            ArchiveLimits(max_lockfile_bytes=1),
+            "lockfile_too_large",
         ),
         (
             archive_bytes({"project-root/uv.lock": "A" * 1_000}, compression=zipfile.ZIP_DEFLATED),

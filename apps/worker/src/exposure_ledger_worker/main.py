@@ -159,7 +159,7 @@ def process_next_assessment(
                     repository.fail(
                         assessment_run.id,
                         claim_id=assessment_run.claim_id,
-                        code="repository_unavailable",
+                        code=error.code,
                         message=str(error),
                     )
                     return True

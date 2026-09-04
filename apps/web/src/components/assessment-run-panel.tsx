@@ -5,6 +5,7 @@ import { Activity, Database, ShieldCheck } from "lucide-react"
 
 import { Badge } from "./ui/badge"
 import type {
+  AssessmentRunErrorCode,
   AssessmentRun,
   AssessmentRunStatus,
   PolicyDecision,
@@ -33,6 +34,37 @@ const utcTimestamp = new Intl.DateTimeFormat("en-US", {
 
 function formatTimestamp(value: string): string {
   return `${utcTimestamp.format(new Date(value))} UTC`
+}
+
+function assetSnapshotFailureGuidance(code: AssessmentRunErrorCode): string {
+  if (
+    code === "archive_too_large" ||
+    code === "archive_too_many_files" ||
+    code === "archive_compression_ratio_exceeded" ||
+    code === "lockfile_too_large" ||
+    code === "dependency_graph_too_large" ||
+    code === "environment_marker_too_complex"
+  ) {
+    return "Choose a smaller repository revision or lockfile, then create a new Assessment Run."
+  }
+  if (code === "ambiguous_project_root") {
+    return "Select exactly one project root and one uv.lock, then create a new Assessment Run."
+  }
+  if (
+    code === "invalid_repository" ||
+    code === "invalid_repository_path" ||
+    code === "repository_target_rejected" ||
+    code === "repository_address_rejected" ||
+    code === "repository_redirect_rejected" ||
+    code === "unsafe_archive_path" ||
+    code === "unsafe_archive_link"
+  ) {
+    return "Use a canonical public GitHub repository and safe in-repository selections."
+  }
+  if (code === "repository_address_unavailable" || code === "repository_unavailable") {
+    return "Verify public GitHub is reachable, then create a new Assessment Run."
+  }
+  return "Review the rejection details, correct the request, and create a new Assessment Run."
 }
 
 function DetailRow({ label, value }: { label: string; value: ReactNode }) {
@@ -184,7 +216,17 @@ export function AssessmentRunPanel({
               <p className="mt-3 text-xs leading-5 text-muted-foreground">
                 {selected.policyDecision.reason}
               </p>
-              {selected.errorMessage ? (
+              {selected.mode === "repository" && selected.errorCode ? (
+                <div
+                  role="alert"
+                  className="mt-3 border-l-2 border-red-600 bg-red-600/7 p-3 text-xs leading-5 text-red-900"
+                >
+                  <div className="font-semibold">Asset Snapshot rejected</div>
+                  <div className="mt-1 font-mono text-[10px]">{selected.errorCode}</div>
+                  {selected.errorMessage ? <p className="mt-1">{selected.errorMessage}</p> : null}
+                  <p className="mt-2">{assetSnapshotFailureGuidance(selected.errorCode)}</p>
+                </div>
+              ) : selected.errorMessage ? (
                 <p className="mt-3 text-xs text-red-800">{selected.errorMessage}</p>
               ) : null}
             </>
