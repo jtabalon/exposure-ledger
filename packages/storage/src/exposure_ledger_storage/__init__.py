@@ -30,6 +30,7 @@ from exposure_ledger_storage.exposures import (
 from exposure_ledger_storage.investigations import (
     GENERATION_READINESS_MAX_AGE_SECONDS,
     AssessmentClaimLost,
+    InvalidInvestigationOperation,
     InvestigationOperation,
     InvestigationOperationStatus,
     InvestigationRepository,
@@ -93,6 +94,7 @@ __all__ = [
     "PackageInstanceRecord",
     "HYBRID_RETRIEVAL_CONFIGURATION_VERSION",
     "GENERATION_READINESS_MAX_AGE_SECONDS",
+    "InvalidInvestigationOperation",
     "InvestigationRepository",
     "InvestigationOperation",
     "InvestigationOperationStatus",

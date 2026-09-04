@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, cast
@@ -426,11 +426,12 @@ class AssessmentRunRepository:
         operation_id: UUID,
         exposure_id: UUID,
         event: InvestigationEvent,
-    ) -> bool:
+    ) -> InvestigationEvent | None:
         """Append one fenced graph-stage event exactly once for an Investigation operation."""
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             if not self._owns_claim(connection, assessment_run_id, claim_id=claim_id):
-                return False
+                return None
+            idempotency_key = f"investigation:{operation_id}:stage:{event.stage}"
             self._insert_event(
                 connection,
                 assessment_run_id,
@@ -445,9 +446,17 @@ class AssessmentRunRepository:
                     "message": event.detail,
                 },
                 occurred_at=event.occurred_at,
-                idempotency_key=f"investigation:{operation_id}:stage:{event.stage}",
+                idempotency_key=idempotency_key,
             )
-            return True
+            row = connection.execute(
+                """
+                SELECT occurred_at FROM assessment_events
+                WHERE assessment_run_id = %s AND idempotency_key = %s
+                """,
+                (assessment_run_id, idempotency_key),
+            ).fetchone()
+            assert row is not None
+            return replace(event, occurred_at=cast(datetime, row[0]))
 
     def claim_next(self, *, stale_after_seconds: float) -> AssessmentRun | None:
         claimed_at = datetime.now(UTC)

@@ -332,8 +332,22 @@ class InMemoryProgressHistory:
     def __init__(self) -> None:
         self.events: list[tuple[RunInvestigation, InvestigationEvent]] = []
 
-    def record(self, command: RunInvestigation, event: InvestigationEvent) -> None:
+    def record(self, command: RunInvestigation, event: InvestigationEvent) -> InvestigationEvent:
         self.events.append((command, event))
+        return event
+
+
+class InterruptAfterRevisionCommitHistory(InMemoryRevisionHistory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_calls = 0
+
+    def append(self, revision: InvestigationRevision) -> InvestigationRevision:
+        self.append_calls += 1
+        if self.append_calls > 1:
+            raise AssertionError("a committed Revision must not be appended again")
+        self.revisions.append(revision)
+        raise RuntimeError("controlled interruption after the Revision commit")
 
 
 def _supported_draft() -> StructuredInvestigationDraft:
@@ -527,6 +541,35 @@ async def test_retry_after_final_checkpoint_returns_the_same_revision() -> None:
 
     assert await retried.run(_command()) == revision
     assert first_history.revisions == [revision]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_revision_commit_before_checkpoint_reads_authoritative_revision() -> None:
+    checkpointer = InMemorySaver()
+    history = InterruptAfterRevisionCommitHistory()
+    first = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(RuntimeError, match="after the Revision commit"):
+        await first.run(_command())
+
+    retried = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert await retried.run(_command()) == history.revisions[0]
+    assert history.append_calls == 1
 
 
 @pytest.mark.asyncio

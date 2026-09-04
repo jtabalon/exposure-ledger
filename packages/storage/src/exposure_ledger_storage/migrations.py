@@ -1151,6 +1151,7 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             assessment_run_id uuid NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
             exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
             asset_snapshot_id uuid NOT NULL REFERENCES asset_snapshots(id) ON DELETE RESTRICT,
+            command_digest text NOT NULL,
             status text NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
             revision_id uuid UNIQUE REFERENCES investigation_revisions(id) ON DELETE RESTRICT,
             started_at timestamptz NOT NULL,
@@ -1172,6 +1173,20 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
 
         CREATE INDEX investigation_operations_assessment_idx
             ON investigation_operations (assessment_run_id, status, started_at);
+        """,
+    ),
+    (
+        19,
+        """
+        ALTER TABLE investigation_operations
+            ADD COLUMN IF NOT EXISTS command_digest text;
+
+        UPDATE investigation_operations
+        SET command_digest = 'unrecoverable:legacy-unpinned'
+        WHERE command_digest IS NULL;
+
+        ALTER TABLE investigation_operations
+            ALTER COLUMN command_digest SET NOT NULL;
         """,
     ),
 )

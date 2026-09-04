@@ -37,7 +37,9 @@ erDiagram
 - A new commit or Environment Profile creates a new Asset Snapshot and new Investigations.
 - Evidence Records, Investigation Revisions, Policy Decisions, and Dispositions are append-only.
 - An Investigation operation is unique to one Assessment Run and selected Exposure. Its identity is
-  also the graph-checkpoint thread and eventual Revision identity, making retries idempotent.
+  also the graph-checkpoint thread and eventual Revision identity, making retries idempotent. A
+  digest pins the complete command, including model, embedding, graph, prompt, policy, parser,
+  retrieval, source-adapter, and budget configuration before the first graph checkpoint.
 - Ordered Assessment events carry idempotency identities for Investigation stages, so reconnecting SSE
   consumers observe each authoritative progress step once without sequence gaps.
 - An Investigation Revision preserves a model-proposed Evidence Gap and follow-up separately from the

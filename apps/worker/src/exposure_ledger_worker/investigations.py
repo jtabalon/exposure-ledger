@@ -23,6 +23,7 @@ from exposure_ledger import (
     EvidenceState,
     FollowUpAuthorizationContext,
     FollowUpValidator,
+    InvestigationConfiguration,
     InvestigationEvent,
     InvestigationEventMode,
     InvestigationEvidenceState,
@@ -84,7 +85,9 @@ class RevisionHistory(Protocol):
 
 
 class ProgressHistory(Protocol):
-    def record(self, command: RunInvestigation, event: InvestigationEvent) -> None: ...
+    def record(
+        self, command: RunInvestigation, event: InvestigationEvent
+    ) -> InvestigationEvent: ...
 
 
 class InvalidInvestigationCheckpoint(RuntimeError):
@@ -345,7 +348,7 @@ class BoundedInvestigationRunner:
             }
         event = InvestigationEvent(stage, mode, detail, occurred_at)
         if self._progress_history is not None:
-            self._progress_history.record(command, event)
+            event = self._progress_history.record(command, event)
         return {
             "events": (*state["events"], event),
             "graph_transitions": state["graph_transitions"] + 1,
@@ -673,6 +676,19 @@ class BoundedInvestigationRunner:
         return updates
 
     def _persist_revision(self, state: _GraphState) -> dict[str, object]:
+        command = state["command"]
+        existing = self._revision_history.get(command.operation_id)
+        if existing is not None:
+            if (
+                existing.assessment_run_id != command.assessment_run_id
+                or existing.exposure_id != command.exposure_id
+                or existing.asset_snapshot_id != command.asset_snapshot_id
+                or not _same_configuration(existing.configuration, command.configuration)
+            ):
+                raise InvalidInvestigationCheckpoint(
+                    f"Investigation Revision {command.operation_id} does not match its operation."
+                )
+            return {"revision": existing}
         updates = self._event(state, InvestigationStage.PERSIST_REVISION)
         events = cast(tuple[InvestigationEvent, ...], updates.get("events", state["events"]))
         completed_at = self._clock()
@@ -867,17 +883,23 @@ def _same_operation(stored: object, requested: RunInvestigation) -> bool:
         and stored.exposure_id == requested.exposure_id
         and stored.asset_snapshot_id == requested.asset_snapshot_id
         and stored.budget == requested.budget
-        and stored_configuration.application_release == requested_configuration.application_release
-        and stored_configuration.graph_version == requested_configuration.graph_version
-        and stored_configuration.prompt_version == requested_configuration.prompt_version
-        and stored_configuration.policy_version == requested_configuration.policy_version
-        and stored_configuration.parser_version == requested_configuration.parser_version
-        and stored_configuration.retrieval_configuration_version
-        == requested_configuration.retrieval_configuration_version
-        and stored_configuration.source_policy_version
-        == requested_configuration.source_policy_version
-        and tuple(stored_configuration.source_adapter_versions)
-        == requested_configuration.source_adapter_versions
-        and stored_configuration.generation_model == requested_configuration.generation_model
-        and stored_configuration.embedding_space == requested_configuration.embedding_space
+        and _same_configuration(stored_configuration, requested_configuration)
+    )
+
+
+def _same_configuration(
+    stored: InvestigationConfiguration,
+    requested: InvestigationConfiguration,
+) -> bool:
+    return (
+        stored.application_release == requested.application_release
+        and stored.graph_version == requested.graph_version
+        and stored.prompt_version == requested.prompt_version
+        and stored.policy_version == requested.policy_version
+        and stored.parser_version == requested.parser_version
+        and stored.retrieval_configuration_version == requested.retrieval_configuration_version
+        and stored.source_policy_version == requested.source_policy_version
+        and tuple(stored.source_adapter_versions) == tuple(requested.source_adapter_versions)
+        and stored.generation_model == requested.generation_model
+        and stored.embedding_space == requested.embedding_space
     )

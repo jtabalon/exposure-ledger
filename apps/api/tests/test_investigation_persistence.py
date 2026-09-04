@@ -32,6 +32,7 @@ from exposure_ledger import (
     EvidenceRelationship,
     EvidenceType,
     GenerationModel,
+    InvestigationBudget,
     InvestigationConfiguration,
     InvestigationEvent,
     InvestigationEvidenceState,
@@ -43,11 +44,18 @@ from exposure_ledger import (
     RetrievedInvestigationEvidence,
     RetrievedInvestigationPassage,
     RevisionRecommendation,
+    RunInvestigation,
     StructuredInvestigationDraft,
 )
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
-from exposure_ledger_storage import ExposureRepository, InvestigationRepository, apply_migrations
+from exposure_ledger_storage import (
+    AssessmentRunRepository,
+    ExposureRepository,
+    InvalidInvestigationOperation,
+    InvestigationRepository,
+    apply_migrations,
+)
 from exposure_ledger_storage.postgres_deadline import connect_with_deadline
 from exposure_ledger_worker.local_generation import GenerationReadiness
 from exposure_ledger_worker.main import process_next_assessment
@@ -437,6 +445,30 @@ def test_retrying_the_same_revision_is_idempotent(database_url: str) -> None:
     assert [record.revision.id for record in repository.list_for_exposure(exposure.id)] == [
         revision.id
     ]
+
+
+def test_operation_identity_rejects_changed_pinned_configuration(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    command = RunInvestigation(
+        operation_id=uuid4(),
+        assessment_run_id=exposure.assessment_run_id,
+        exposure_id=exposure.id,
+        asset_snapshot_id=exposure.asset_snapshot_id,
+        configuration=revision.configuration,
+        budget=InvestigationBudget(),
+    )
+    repository = InvestigationRepository(database_url)
+
+    repository.begin_operation(command)
+
+    with pytest.raises(InvalidInvestigationOperation, match="configuration changed"):
+        repository.begin_operation(
+            replace(
+                command,
+                configuration=replace(command.configuration, prompt_version="changed-v2"),
+            )
+        )
 
 
 def test_follow_up_migration_preserves_legacy_incomplete_revisions(
@@ -1161,6 +1193,18 @@ def test_worker_and_api_restart_resume_investigations_from_postgres_checkpoints(
         )
         connection.commit()
 
+    with TestClient(create_app(Settings(database_url=database_url))) as interrupted_client:
+        interrupted_events = interrupted_client.get(
+            f"/api/v1/assessment-runs/{run['id']}/events?follow=false"
+        )
+    interrupted_ids = [
+        int(line.removeprefix("id: "))
+        for line in interrupted_events.text.splitlines()
+        if line.startswith("id: ")
+    ]
+    assert interrupted_ids
+    reconnect_after = interrupted_ids[-1]
+
     resumed_provider = ControlledFollowUpGenerationProvider()
     assert process_next_assessment(
         database_url=database_url,
@@ -1189,6 +1233,19 @@ def test_worker_and_api_restart_resume_investigations_from_postgres_checkpoints(
         InvestigationStoppingCondition.COMPLETED,
         InvestigationStoppingCondition.FOLLOW_UP_LIMIT_REACHED,
     }
+    progress_events = [
+        event
+        for event in AssessmentRunRepository(database_url).list_events(UUID(run["id"]), after=0)
+        if event.event_type == "investigation.progress"
+    ]
+    assert len(progress_events) == sum(len(record.revision.events) for record in revisions)
+    progress_by_operation_and_stage = {
+        (event.payload["operationId"], event.payload["stage"]): event for event in progress_events
+    }
+    for record in revisions:
+        for event in record.revision.events:
+            persisted = progress_by_operation_and_stage[(str(record.revision.id), event.stage)]
+            assert persisted.occurred_at == event.occurred_at
     with psycopg.connect(database_url) as connection:
         assert connection.execute(
             "SELECT count(*) FROM investigation_operations WHERE assessment_run_id = %s "
@@ -1198,9 +1255,17 @@ def test_worker_and_api_restart_resume_investigations_from_postgres_checkpoints(
         assert connection.execute("SELECT count(*) FROM checkpoints").fetchone()[0] > 0
 
     with TestClient(create_app(Settings(database_url=database_url))) as restarted_client:
-        response = restarted_client.get(f"/api/v1/assessment-runs/{run['id']}/events?follow=false")
+        response = restarted_client.get(
+            f"/api/v1/assessment-runs/{run['id']}/events?follow=false",
+            headers={"Last-Event-ID": str(reconnect_after)},
+        )
 
     assert response.status_code == 200
-    assert response.text.count("event: investigation.progress") == sum(
-        len(record.revision.events) for record in revisions
-    )
+    resumed_ids = [
+        int(line.removeprefix("id: "))
+        for line in response.text.splitlines()
+        if line.startswith("id: ")
+    ]
+    assert resumed_ids
+    assert interrupted_ids + resumed_ids == list(range(1, resumed_ids[-1] + 1))
+    assert all(event_id > reconnect_after for event_id in resumed_ids)

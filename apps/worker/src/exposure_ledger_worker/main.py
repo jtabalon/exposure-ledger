@@ -57,6 +57,7 @@ from exposure_ledger_storage import (
     EmbeddingProviderUnavailable,
     EvidenceRetriever,
     ExposureRepository,
+    InvalidInvestigationOperation,
     InvestigationOperationStatus,
     InvestigationRepository,
     OllamaEmbeddingProvider,
@@ -147,17 +148,19 @@ class _InvestigationProgressHistory:
         self._repository = repository
         self._claim_id = claim_id
 
-    def record(self, command: RunInvestigation, event: InvestigationEvent) -> None:
-        if not self._repository.record_investigation_progress(
+    def record(self, command: RunInvestigation, event: InvestigationEvent) -> InvestigationEvent:
+        persisted = self._repository.record_investigation_progress(
             command.assessment_run_id,
             claim_id=self._claim_id,
             operation_id=command.operation_id,
             exposure_id=command.exposure_id,
             event=event,
-        ):
+        )
+        if persisted is None:
             raise AssessmentClaimLost(
                 "Assessment claim was lost while recording Investigation progress"
             )
+        return persisted
 
 
 class _PolicyGatedKevSource:
@@ -369,7 +372,21 @@ def _run_investigations_or_fail(
                 ),
             )
             for command in commands:
-                operation = investigation_repository.begin_operation(command)
+                try:
+                    operation = investigation_repository.begin_operation(command)
+                except InvalidInvestigationOperation as error:
+                    investigation_repository.fail_running_operations(
+                        assessment_run_id,
+                        code="invalid_investigation_checkpoint",
+                        message=str(error),
+                    )
+                    repository.fail(
+                        assessment_run_id,
+                        claim_id=claim_id,
+                        code="invalid_investigation_checkpoint",
+                        message=str(error),
+                    )
+                    return False
                 if operation.status is InvestigationOperationStatus.COMPLETED:
                     continue
                 if operation.status is InvestigationOperationStatus.FAILED:

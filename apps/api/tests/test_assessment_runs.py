@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 19")
     connection.execute("DROP TABLE investigation_operations")
     connection.execute("DROP INDEX policy_decisions_idempotency_idx")
     connection.execute("ALTER TABLE policy_decisions DROP COLUMN idempotency_key")
@@ -279,6 +281,7 @@ def test_investigation_progress_is_idempotent_and_replayable(database_url: str) 
     claimed = repository.claim_next(stale_after_seconds=30)
     assert claimed is not None and claimed.claim_id is not None
     operation_id = uuid4()
+    exposure_id = uuid4()
     event = InvestigationEvent(
         stage="retrieve_passages",
         mode="retrieval",
@@ -286,20 +289,22 @@ def test_investigation_progress_is_idempotent_and_replayable(database_url: str) 
         occurred_at=datetime.now(UTC),
     )
 
-    assert repository.record_investigation_progress(
+    persisted = repository.record_investigation_progress(
         assessment_id,
         claim_id=claimed.claim_id,
         operation_id=operation_id,
-        exposure_id=uuid4(),
+        exposure_id=exposure_id,
         event=event,
     )
-    assert repository.record_investigation_progress(
+    replayed = repository.record_investigation_progress(
         assessment_id,
         claim_id=claimed.claim_id,
         operation_id=operation_id,
-        exposure_id=uuid4(),
-        event=event,
+        exposure_id=exposure_id,
+        event=replace(event, occurred_at=event.occurred_at + timedelta(seconds=1)),
     )
+    assert persisted == event
+    assert replayed == event
 
     with TestClient(create_app(settings)) as restarted_client:
         response = restarted_client.get(
@@ -508,5 +513,6 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         16,
         17,
         18,
+        19,
     ]
     assert enforcement_point == ("enforcement_point",)
