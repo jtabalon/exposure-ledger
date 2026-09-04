@@ -54,6 +54,38 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         WHERE status = 'running';
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE policy_decisions (
+            id uuid PRIMARY KEY,
+            assessment_run_id uuid REFERENCES assessment_runs(id) ON DELETE SET NULL,
+            standard_version text NOT NULL,
+            assistance_class text CHECK (assistance_class IN ('C0', 'C1', 'C2', 'C3')),
+            action_level text CHECK (action_level IN ('A0', 'A1', 'A2', 'A3', 'A4')),
+            target_scope text,
+            authorization_scope text,
+            result text NOT NULL CHECK (result IN ('allowed', 'restricted', 'blocked')),
+            rule_version text NOT NULL,
+            reason text NOT NULL,
+            created_at timestamptz NOT NULL
+        );
+
+        CREATE INDEX policy_decisions_created_at_idx
+            ON policy_decisions (created_at DESC, id DESC);
+        CREATE INDEX policy_decisions_assessment_run_id_idx
+            ON policy_decisions (assessment_run_id);
+
+        INSERT INTO policy_decisions (
+            id, assessment_run_id, standard_version, assistance_class, action_level,
+            target_scope, authorization_scope, result, rule_version, reason, created_at
+        )
+        SELECT gen_random_uuid(), id, '0.1', 'C1', 'A1', 'bundled synthetic fixture',
+               'local operator', 'allowed', 'assessment-request-v1',
+               'C1 assistance at A1 is permitted for the confirmed target scope.', created_at
+        FROM assessment_runs;
+        """,
+    ),
 )
 
 

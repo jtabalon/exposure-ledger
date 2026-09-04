@@ -7,9 +7,13 @@ name = "exposure-ledger-storage"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+  "exposure-ledger-domain",
   "pydantic-settings>=2.8",
   "psycopg[binary]>=3.2",
 ]
+
+[tool.uv.sources]
+exposure-ledger-domain = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/exposure_ledger_storage"]

@@ -8,6 +8,7 @@ from exposure_ledger_storage.assessments import (
     AssessmentRunRepository,
     AssessmentScenario,
     AssessmentStatus,
+    PolicyDecisionRecord,
 )
 from exposure_ledger_storage.configuration import (
     DEFAULT_DATABASE_URL,
@@ -24,6 +25,7 @@ __all__ = [
     "AssessmentScenario",
     "AssessmentStatus",
     "DEFAULT_DATABASE_URL",
+    "PolicyDecisionRecord",
     "apply_migrations",
     "normalize_database_url",
 ]

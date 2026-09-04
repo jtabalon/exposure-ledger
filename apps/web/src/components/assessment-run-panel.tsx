@@ -1,17 +1,28 @@
 "use client"
 
 import { useState, type ReactNode } from "react"
-import { Activity, Database } from "lucide-react"
+import { Activity, Database, ShieldCheck } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
-import type { AssessmentRun, AssessmentRunStatus } from "@/lib/assessment-runs"
-import { cn } from "@/lib/utils"
+import { Badge } from "./ui/badge"
+import type {
+  AssessmentRun,
+  AssessmentRunStatus,
+  PolicyDecision,
+  PolicyResult,
+} from "../lib/assessment-runs"
+import { cn } from "../lib/utils"
 
 const statusStyles: Record<AssessmentRunStatus, string> = {
   queued: "border-amber-700/25 bg-amber-600/8 text-amber-800",
   running: "border-sky-700/25 bg-sky-600/8 text-sky-800",
   completed: "border-emerald-700/25 bg-emerald-600/8 text-emerald-800",
   failed: "border-red-700/25 bg-red-600/8 text-red-800",
+}
+
+const policyStyles: Record<PolicyResult, string> = {
+  allowed: "border-emerald-700/25 bg-emerald-600/8 text-emerald-800",
+  restricted: "border-amber-700/25 bg-amber-600/8 text-amber-800",
+  blocked: "border-red-700/25 bg-red-600/8 text-red-800",
 }
 
 const utcTimestamp = new Intl.DateTimeFormat("en-US", {
@@ -36,9 +47,13 @@ function DetailRow({ label, value }: { label: string; value: ReactNode }) {
 export function AssessmentRunPanel({
   assessmentRuns,
   error,
+  policyDecisions,
+  policyDecisionsError,
 }: {
   assessmentRuns: AssessmentRun[]
   error: string | null
+  policyDecisions: PolicyDecision[]
+  policyDecisionsError: string | null
 }) {
   const [selectedId, setSelectedId] = useState(assessmentRuns[0]?.id ?? null)
   const selected = assessmentRuns.find(({ id }) => id === selectedId) ?? assessmentRuns[0]
@@ -154,7 +169,18 @@ export function AssessmentRunPanel({
                     selected.completedAt ? formatTimestamp(selected.completedAt) : "Not finished"
                   }
                 />
+                <DetailRow
+                  label="Policy"
+                  value={`${selected.policyDecision.assistanceClass ?? "Uncertain"} / ${selected.policyDecision.actionLevel ?? "Uncertain"} · ${selected.policyDecision.result}`}
+                />
+                <DetailRow
+                  label="Scope"
+                  value={selected.policyDecision.targetScope ?? "Uncertain"}
+                />
               </dl>
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                {selected.policyDecision.reason}
+              </p>
               {selected.errorMessage ? (
                 <p className="mt-3 text-xs text-red-800">{selected.errorMessage}</p>
               ) : null}
@@ -163,6 +189,67 @@ export function AssessmentRunPanel({
             <div className="grid min-h-28 place-items-center text-sm text-muted-foreground">
               Select an Assessment Run to inspect it.
             </div>
+          )}
+        </div>
+
+        <div className="border-t pt-4 xl:col-span-2">
+          <div className="mb-3 flex items-center justify-between gap-4">
+            <div>
+              <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
+                <ShieldCheck className="size-3.5" aria-hidden="true" />
+                Cyber policy
+              </div>
+              <h3 className="text-base font-semibold">Policy Decision ledger</h3>
+            </div>
+            <span className="font-mono text-xs text-muted-foreground">
+              {policyDecisions.length} total
+            </span>
+          </div>
+
+          {policyDecisionsError ? (
+            <div
+              role="alert"
+              className="border-l-2 border-red-600 bg-red-600/7 p-3 text-xs leading-5 text-red-900"
+            >
+              {policyDecisionsError}
+            </div>
+          ) : policyDecisions.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No Policy Decisions recorded yet.</p>
+          ) : (
+            <ul className="grid gap-2 lg:grid-cols-2" aria-label="Policy Decisions">
+              {policyDecisions.map((decision) => (
+                <li key={decision.id} className="rounded-md border bg-card p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-mono text-xs">
+                      <span>{decision.assistanceClass ?? "Uncertain"}</span>
+                      <span aria-hidden="true">/</span>
+                      <span>{decision.actionLevel ?? "Uncertain"}</span>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "text-[9px] tracking-[0.08em] uppercase",
+                        policyStyles[decision.result],
+                      )}
+                    >
+                      {decision.result}
+                    </Badge>
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-foreground">{decision.reason}</p>
+                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
+                    <span>{decision.targetScope ?? "Target scope uncertain"}</span>
+                    <span>
+                      {decision.assessmentRunId
+                        ? `Run ${decision.assessmentRunId}`
+                        : "No worker task created"}
+                    </span>
+                    <span>
+                      Standard {decision.standardVersion} · Rule {decision.ruleVersion}
+                    </span>
+                  </div>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       </div>
