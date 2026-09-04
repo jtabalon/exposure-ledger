@@ -68,10 +68,11 @@ def test_decision_table_applies_the_first_release_capability_ceiling(
     [
         (
             AssessmentRequest(
-                operation="unrecognized_operation",
+                operation=AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT,
                 target_scope="bundled synthetic fixture",
                 authorization_scope="local operator",
                 authorization_status=AuthorizationStatus.CONFIRMED,
+                operation_chain=("unrecognized_operation",),
             ),
             (
                 "Assistance Class or Action Level is materially uncertain; the Assessment "
@@ -97,7 +98,7 @@ def test_material_uncertainty_fails_closed(
 
     assert decision.result is PolicyResult.BLOCKED
     assert decision.reason == reason
-    if policy_request.operation == "unrecognized_operation":
+    if "unrecognized_operation" in policy_request.operation_chain:
         assert decision.assistance_class is AssistanceClass.C3
         assert decision.action_level is ActionLevel.A4
     else:

@@ -125,8 +125,8 @@ class CyberPolicy:
         if any(classification is None for classification in classifications):
             return _decision(
                 request,
-                assistance_class=assistance_class,
-                action_level=action_level,
+                assistance_class=AssistanceClass.C3,
+                action_level=ActionLevel.A4,
                 result=PolicyResult.BLOCKED,
                 reason=(
                     "Assistance Class or Action Level is materially uncertain; the Assessment "

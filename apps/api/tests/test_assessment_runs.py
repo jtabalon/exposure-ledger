@@ -245,6 +245,9 @@ def test_non_allowed_policy_decisions_are_visible_without_creating_worker_tasks(
         assert detail["message"] == expected_reason
         assert detail["policyDecision"]["result"] == expected_result
         assert detail["policyDecision"]["assessmentRunId"] is None
+        if "unrecognized_operation" in payload.get("operationChain", []):
+            assert detail["policyDecision"]["assistanceClass"] == "C3"
+            assert detail["policyDecision"]["actionLevel"] == "A4"
 
         runs_response = client.get("/api/v1/assessment-runs")
         assert runs_response.status_code == 200
