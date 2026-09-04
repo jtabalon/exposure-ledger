@@ -13,10 +13,9 @@ from exposure_ledger_worker.github_advisories import GitHubAdvisoryApiSource
 
 
 def _target() -> GitHubAdvisoryTarget:
-    return GitHubAdvisoryTarget(
-        owner="acme",
-        repository="demo",
-        advisory_id="GHSA-2345-6789-CFGH",
+    return GitHubAdvisoryTarget.from_osv_reference(
+        "https://github.com/acme/demo/security/advisories/GHSA-2345-6789-CFGH",
+        allowed_aliases=("GHSA-2345-6789-CFGH",),
         derived_from_evidence="sha256:osv-capture",
     )
 

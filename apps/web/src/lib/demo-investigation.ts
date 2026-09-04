@@ -106,7 +106,7 @@ export const demoInvestigation: DemoInvestigation = {
         authority: "Maintainer · Tier 1",
         affectedRange: ">=2.1.0, <2.4.3",
         fixedVersion: "2.4.3",
-        relationship: "supports",
+        relationship: "contradicts",
       },
       {
         source: "Synthetic public vulnerability record",
@@ -198,7 +198,7 @@ export const demoInvestigation: DemoInvestigation = {
       source: "Synthetic maintainer advisory",
       authority: "Maintainer · Tier 1",
       capturedAt: "2026-08-28 16:41 UTC",
-      relationship: "supports",
+      relationship: "contradicts",
       claimIds: ["claim-version", "claim-fix"],
       passage:
         "Releases from 2.1.0 through 2.4.2 are affected. Consumers should upgrade to cipherleaf 2.4.3 or later.",

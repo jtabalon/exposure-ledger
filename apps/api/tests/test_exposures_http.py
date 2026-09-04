@@ -582,7 +582,7 @@ def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(
 
     assert exposure["authoritativeConflict"] is True
     evidence_by_source = {item["source"]["identity"]: item for item in exposure["evidenceRecords"]}
-    assert evidence_by_source["osv"]["relationship"] == "supports"
+    assert evidence_by_source["osv"]["relationship"] == "contradicts"
     advisory = evidence_by_source["github_repository_security_advisory"]
     assert advisory["relationship"] == "contradicts"
     assert advisory["source"]["authority"] == "Repository maintainer"

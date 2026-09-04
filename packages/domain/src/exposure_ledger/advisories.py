@@ -28,9 +28,10 @@ from exposure_ledger.exposures import AssessmentResult, Exposure, ExposureEviden
 
 _GITHUB_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})\Z")
 _GHSA_ID = re.compile(
-    r"GHSA-[23456789CFGHJMPQRVWX]{4}-[23456789CFGHJMPQRVWX]{4}-"
-    r"[23456789CFGHJMPQRVWX]{4}\Z"
+    r"GHSA-[23456789CFGHJMPQRVWXY]{4}-[23456789CFGHJMPQRVWXY]{4}-"
+    r"[23456789CFGHJMPQRVWXY]{4}\Z"
 )
+_TARGET_DERIVATION_TOKEN = object()
 
 
 class GitHubAdvisoryTargetRejected(ValueError):
@@ -45,12 +46,31 @@ class GitHubAdvisorySourceUnavailable(RuntimeError):
     """The allowlisted GitHub advisory source could not be retrieved."""
 
 
-@dataclass(frozen=True, slots=True, order=True)
+@dataclass(frozen=True, slots=True, order=True, init=False)
 class GitHubAdvisoryTarget:
     owner: str
     repository: str
     advisory_id: str
     derived_from_evidence: str
+
+    def __init__(
+        self,
+        owner: str,
+        repository: str,
+        advisory_id: str,
+        derived_from_evidence: str,
+        *,
+        _derivation_token: object | None = None,
+    ) -> None:
+        if _derivation_token is not _TARGET_DERIVATION_TOKEN:
+            raise GitHubAdvisoryTargetRejected(
+                "GitHub advisory targets must be derived from allowlisted evidence"
+            )
+        object.__setattr__(self, "owner", owner)
+        object.__setattr__(self, "repository", repository)
+        object.__setattr__(self, "advisory_id", advisory_id)
+        object.__setattr__(self, "derived_from_evidence", derived_from_evidence)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         normalized_id = self.advisory_id.upper()
@@ -124,6 +144,7 @@ class GitHubAdvisoryTarget:
             repository=repository,
             advisory_id=advisory_id,
             derived_from_evidence=derived_from_evidence,
+            _derivation_token=_TARGET_DERIVATION_TOKEN,
         )
 
 
@@ -182,12 +203,16 @@ def derive_first_party_advisory_targets(
     return tuple(sorted(by_target.values()))
 
 
-def derive_assessment_advisory_targets(
-    result: AssessmentResult,
-) -> tuple[GitHubAdvisoryTarget, ...]:
-    """Derive only targets linked to an Exposure in this Assessment result."""
+@dataclass(frozen=True, slots=True)
+class _AssessmentAdvisoryTargetPlan:
+    by_exposure: tuple[tuple[GitHubAdvisoryTarget, ...], ...]
+    requested: tuple[GitHubAdvisoryTarget, ...]
+
+
+def _assessment_advisory_target_plan(result: AssessmentResult) -> _AssessmentAdvisoryTargetPlan:
     records = {record.identity: record for record in result.evidence_records}
     vulnerabilities = {record.identity: record for record in result.vulnerability_records}
+    by_exposure: list[tuple[GitHubAdvisoryTarget, ...]] = []
     by_target: dict[tuple[str, str, str], GitHubAdvisoryTarget] = {}
     for exposure in result.exposures:
         vulnerability = vulnerabilities[exposure.vulnerability_identity]
@@ -196,12 +221,25 @@ def derive_assessment_advisory_targets(
             for reference in exposure.evidence
             if reference.record_identity in records
         )
-        for target in derive_first_party_advisory_targets(
-            referenced, allowed_aliases=vulnerability.aliases
-        ):
+        targets = derive_first_party_advisory_targets(
+            referenced,
+            allowed_aliases=vulnerability.aliases,
+        )
+        for target in targets:
             key = (target.owner.lower(), target.repository.lower(), target.advisory_id)
             by_target.setdefault(key, target)
-    return tuple(sorted(by_target.values()))
+        by_exposure.append(targets)
+    return _AssessmentAdvisoryTargetPlan(
+        by_exposure=tuple(by_exposure),
+        requested=tuple(sorted(by_target.values())),
+    )
+
+
+def derive_assessment_advisory_targets(
+    result: AssessmentResult,
+) -> tuple[GitHubAdvisoryTarget, ...]:
+    """Derive only targets linked to an Exposure in this Assessment result."""
+    return _assessment_advisory_target_plan(result).requested
 
 
 class FirstPartyAdvisorySource(Protocol):
@@ -218,26 +256,8 @@ class FirstPartyAdvisoryCollector:
 
     def collect(self, result: AssessmentResult) -> AssessmentResult:
         records = {record.identity: record for record in result.evidence_records}
-        vulnerabilities = {record.identity: record for record in result.vulnerability_records}
-        targets_by_exposure: list[tuple[GitHubAdvisoryTarget, ...]] = []
-        unique_targets: dict[tuple[str, str, str], GitHubAdvisoryTarget] = {}
-        for exposure in result.exposures:
-            vulnerability = vulnerabilities[exposure.vulnerability_identity]
-            referenced = tuple(
-                records[reference.record_identity]
-                for reference in exposure.evidence
-                if reference.record_identity in records
-            )
-            targets = derive_first_party_advisory_targets(
-                referenced,
-                allowed_aliases=vulnerability.aliases,
-            )
-            targets_by_exposure.append(targets)
-            for target in targets:
-                key = (target.owner.lower(), target.repository.lower(), target.advisory_id)
-                unique_targets.setdefault(key, target)
-
-        requested = tuple(sorted(unique_targets.values()))
+        plan = _assessment_advisory_target_plan(result)
+        requested = plan.requested
         if not requested:
             return result
         captured = self._source.retrieve(requested)
@@ -255,7 +275,7 @@ class FirstPartyAdvisoryCollector:
 
         enriched_exposures = tuple(
             self._enrich_exposure(exposure, targets, records, captured_by_location)
-            for exposure, targets in zip(result.exposures, targets_by_exposure, strict=True)
+            for exposure, targets in zip(result.exposures, plan.by_exposure, strict=True)
         )
         return replace(
             result,
@@ -293,6 +313,14 @@ class FirstPartyAdvisoryCollector:
                     ),
                 )
             )
+        if conflict:
+            evidence = [
+                replace(reference, relationship=EvidenceRelationship.CONTRADICTS)
+                if records[reference.record_identity].source.identity
+                in {"osv", "github_repository_security_advisory"}
+                else reference
+                for reference in evidence
+            ]
         return replace(
             exposure,
             evidence=tuple(evidence),
@@ -444,14 +472,131 @@ def _guidance_conflicts(
     if not guidance:
         return True
     installed = _version(exposure.package.version)
-    if not any(
-        SpecifierSet(str(item["vulnerable_version_range"])).contains(installed, prereleases=True)
+    affected_ranges = tuple(
+        item.get("vulnerable_version_range")
         for item in guidance
+        if isinstance(item.get("vulnerable_version_range"), str)
+    )
+    if not affected_ranges or not any(
+        SpecifierSet(value).contains(installed, prereleases=True) for value in affected_ranges
     ):
+        return True
+    advisory_intervals = _advisory_affected_intervals(affected_ranges)
+    osv_intervals = _osv_affected_intervals(osv_records, exposure)
+    if advisory_intervals and osv_intervals and advisory_intervals != osv_intervals:
         return True
     advisory_fixes = _advisory_fixed_versions(guidance)
     osv_fixes = _osv_fixed_versions(osv_records, exposure)
     return bool(advisory_fixes and osv_fixes and min(advisory_fixes) != min(osv_fixes))
+
+
+@dataclass(frozen=True, slots=True)
+class _AffectedInterval:
+    lower: Version | None
+    lower_inclusive: bool
+    upper: Version | None
+    upper_inclusive: bool
+
+
+def _advisory_affected_intervals(
+    affected_ranges: Sequence[str],
+) -> frozenset[_AffectedInterval] | None:
+    intervals: set[_AffectedInterval] = set()
+    for affected_range in affected_ranges:
+        lower: Version | None = None
+        lower_inclusive = False
+        upper: Version | None = None
+        upper_inclusive = False
+        for specifier in SpecifierSet(affected_range):
+            if specifier.operator not in {">", ">=", "<", "<=", "=="}:
+                return None
+            if specifier.operator == "==" and specifier.version.endswith(".*"):
+                return None
+            boundary = _version(specifier.version)
+            if specifier.operator in {">", ">="}:
+                inclusive = specifier.operator == ">="
+                if (
+                    lower is None
+                    or boundary > lower
+                    or (boundary == lower and not inclusive and lower_inclusive)
+                ):
+                    lower, lower_inclusive = boundary, inclusive
+            elif specifier.operator in {"<", "<="}:
+                inclusive = specifier.operator == "<="
+                if (
+                    upper is None
+                    or boundary < upper
+                    or (boundary == upper and not inclusive and upper_inclusive)
+                ):
+                    upper, upper_inclusive = boundary, inclusive
+            else:
+                lower = upper = boundary
+                lower_inclusive = upper_inclusive = True
+        intervals.add(_AffectedInterval(lower, lower_inclusive, upper, upper_inclusive))
+    return frozenset(intervals)
+
+
+def _osv_affected_intervals(
+    records: tuple[EvidenceRecord, ...], exposure: Exposure
+) -> frozenset[_AffectedInterval] | None:
+    intervals: set[_AffectedInterval] = set()
+    try:
+        for record in records:
+            payload = load_captured_json(record.content)
+            if not isinstance(payload, Mapping):
+                continue
+            affected = payload.get("affected", [])
+            if not isinstance(affected, Sequence) or isinstance(affected, (str, bytes)):
+                continue
+            for item in affected:
+                if not _osv_package_matches(item, exposure):
+                    continue
+                assert isinstance(item, Mapping)
+                ranges = item.get("ranges", [])
+                if not isinstance(ranges, Sequence) or isinstance(ranges, (str, bytes)):
+                    continue
+                for affected_range in ranges:
+                    if (
+                        not isinstance(affected_range, Mapping)
+                        or affected_range.get("type") != "ECOSYSTEM"
+                    ):
+                        continue
+                    events = affected_range.get("events", [])
+                    if not isinstance(events, Sequence) or isinstance(events, (str, bytes)):
+                        continue
+                    lower: Version | None = None
+                    lower_inclusive = False
+                    active = False
+                    for event in events:
+                        if not isinstance(event, Mapping):
+                            return None
+                        if isinstance(event.get("introduced"), str):
+                            introduced = str(event["introduced"])
+                            lower = None if introduced == "0" else _version(introduced)
+                            lower_inclusive = lower is not None
+                            active = True
+                            continue
+                        for key, inclusive in (
+                            ("fixed", False),
+                            ("last_affected", True),
+                            ("limit", False),
+                        ):
+                            if isinstance(event.get(key), str):
+                                intervals.add(
+                                    _AffectedInterval(
+                                        lower,
+                                        lower_inclusive,
+                                        _version(str(event[key])),
+                                        inclusive,
+                                    )
+                                )
+                                active = False
+                                break
+                    if active:
+                        intervals.add(_AffectedInterval(lower, lower_inclusive, None, False))
+    except (CapturedJsonRejected, GitHubAdvisoryResponseRejected):
+        return None
+    return frozenset(intervals)
 
 
 def _advisory_payload(advisory: EvidenceRecord) -> Mapping[str, Any]:
@@ -498,7 +643,11 @@ def _advisory_fixed_versions(guidance: Sequence[object]) -> set[Version]:
             continue
         fixed = item.get("patched_versions")
         if isinstance(fixed, str):
-            versions.update(_version(value.strip()) for value in fixed.split(",") if value.strip())
+            for value in fixed.split(","):
+                try:
+                    versions.add(Version(value.strip()))
+                except InvalidVersion:
+                    continue
     return versions
 
 
@@ -580,28 +729,24 @@ def _validate_vulnerability(value: object) -> None:
             "Each GitHub advisory vulnerability must include ecosystem and package name"
         )
     affected_range = value.get("vulnerable_version_range")
-    if not isinstance(affected_range, str) or not affected_range.strip():
+    if affected_range is not None and (
+        not isinstance(affected_range, str) or not affected_range.strip()
+    ):
         raise GitHubAdvisoryResponseRejected(
-            "Each GitHub advisory vulnerability must include an affected range"
+            "GitHub advisory affected ranges must be non-empty strings or null"
         )
-    try:
-        SpecifierSet(affected_range)
-    except InvalidSpecifier as error:
-        raise GitHubAdvisoryResponseRejected(
-            "GitHub advisory contains an invalid affected range"
-        ) from error
+    if isinstance(affected_range, str) and ecosystem.lower() in {"pip", "pypi"}:
+        try:
+            SpecifierSet(affected_range)
+        except InvalidSpecifier as error:
+            raise GitHubAdvisoryResponseRejected(
+                "GitHub advisory contains an invalid Python affected range"
+            ) from error
     fixed = value.get("patched_versions")
     if fixed is not None and (not isinstance(fixed, str) or not fixed.strip()):
         raise GitHubAdvisoryResponseRejected(
             "GitHub advisory patched versions must be a non-empty string or null"
         )
-    if isinstance(fixed, str):
-        for version in fixed.split(","):
-            if not version.strip():
-                raise GitHubAdvisoryResponseRejected(
-                    "GitHub advisory patched versions must identify complete versions"
-                )
-            _version(version.strip())
 
 
 def _matches_target_url(value: object, target: GitHubAdvisoryTarget, *, api: bool) -> bool:

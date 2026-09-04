@@ -29,7 +29,7 @@ describe("InvestigationWorkbench", () => {
             authority: "Maintainer · Tier 1",
             affectedRange: ">=2.1.0, <2.4.3",
             fixedVersion: "2.4.3",
-            relationship: "supports" as const,
+            relationship: "contradicts" as const,
           },
           {
             source: "Synthetic public vulnerability record",

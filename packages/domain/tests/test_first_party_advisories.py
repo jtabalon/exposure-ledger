@@ -72,16 +72,35 @@ def test_advisory_targets_are_derived_only_from_allowlisted_osv_evidence() -> No
     )
 
     assert targets == (
-        GitHubAdvisoryTarget(
-            owner="acme",
-            repository="demo",
-            advisory_id="GHSA-2345-6789-CFGH",
+        GitHubAdvisoryTarget.from_osv_reference(
+            "https://github.com/acme/demo/security/advisories/GHSA-2345-6789-CFGH",
+            allowed_aliases=("GHSA-2345-6789-CFGH",),
             derived_from_evidence=evidence.identity,
         ),
     )
     assert targets[0].api_url == (
         "https://api.github.com/repos/acme/demo/security-advisories/GHSA-2345-6789-CFGH"
     )
+
+
+def test_advisory_target_accepts_the_complete_github_advisory_alphabet() -> None:
+    target = GitHubAdvisoryTarget.from_osv_reference(
+        "https://github.com/acme/demo/security/advisories/GHSA-2345-6789-CFGY",
+        allowed_aliases=("GHSA-2345-6789-CFGY",),
+        derived_from_evidence="sha256:osv-capture",
+    )
+
+    assert target.advisory_id == "GHSA-2345-6789-CFGY"
+
+
+def test_advisory_target_cannot_bypass_allowlisted_reference_derivation() -> None:
+    with pytest.raises(GitHubAdvisoryTargetRejected, match="allowlisted evidence"):
+        GitHubAdvisoryTarget(
+            owner="acme",
+            repository="demo",
+            advisory_id="GHSA-2345-6789-CFGH",
+            derived_from_evidence="sha256:unverified",
+        )
 
 
 @pytest.mark.parametrize(
@@ -163,6 +182,7 @@ def test_advisory_adapter_captures_immutable_maintainer_guidance() -> None:
     [
         (">= 1.0, < 2.0", "2.0", EvidenceRelationship.SUPPORTS, False),
         (">= 1.0, < 1.4", "1.4", EvidenceRelationship.CONTRADICTS, True),
+        (">= 1.4, < 2.0", "2.0", EvidenceRelationship.CONTRADICTS, True),
         (">= 1.0, < 2.0", "2.1", EvidenceRelationship.CONTRADICTS, True),
     ],
 )
@@ -268,8 +288,11 @@ def test_advisory_collection_preserves_conflicting_authoritative_guidance(
     }
     exposure = enriched.exposures[0]
     assert exposure.authoritative_conflict is expected_conflict
+    osv_relationship = (
+        EvidenceRelationship.CONTRADICTS if expected_conflict else EvidenceRelationship.SUPPORTS
+    )
     assert [(item.record_identity, item.relationship) for item in exposure.evidence] == [
-        (osv_evidence.identity, EvidenceRelationship.SUPPORTS),
+        (osv_evidence.identity, osv_relationship),
         (advisory_evidence.identity, expected_relationship),
     ]
     assert exposure.evidence[1].passage_identities == (
