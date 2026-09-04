@@ -10,6 +10,7 @@ export type EvidencePassage = {
   id: string
   identity: string
   kind: string
+  selector: string
   content: string
 }
 

@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC
 from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -15,7 +15,13 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from exposure_ledger.asset_snapshots import AssetSnapshot, PackageInstance
-from exposure_ledger.evidence import EvidencePassage, EvidenceRecord, Source, SourceAdapter
+from exposure_ledger.evidence import (
+    CapturedSourcePayload,
+    EvidencePassage,
+    EvidenceRecord,
+    Source,
+    SourceAdapter,
+)
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -72,9 +78,8 @@ class OsvBatchResponse:
         payload: Mapping[str, Any],
         *,
         expected_results: int,
-        captured_at: datetime | None = None,
         adapter: SourceAdapter | None = None,
-        captured_contents: Mapping[str, str] | None = None,
+        captured_payloads: Mapping[str, CapturedSourcePayload] | None = None,
     ) -> OsvBatchResponse:
         """Validate and freeze one provider response at the OSV source boundary."""
         results = payload.get("results")
@@ -83,7 +88,6 @@ class OsvBatchResponse:
         if len(results) != expected_results:
             raise OsvResponseRejected("OSV batch response must align with the requested packages")
         evidence_adapter = adapter or OsvSourceAdapter()
-        captured_time = captured_at or datetime.now(UTC)
         captured_results: list[tuple[OsvVulnerability, ...]] = []
         records: dict[str, EvidenceRecord] = {}
         for result in results:
@@ -91,15 +95,18 @@ class OsvBatchResponse:
             captured_vulnerabilities: list[OsvVulnerability] = []
             for vulnerability in vulnerabilities:
                 identifier = vulnerability.get("id")
-                captured_content = (
-                    captured_contents.get(identifier)
-                    if captured_contents is not None and isinstance(identifier, str)
+                capture = (
+                    captured_payloads.get(identifier)
+                    if captured_payloads is not None and isinstance(identifier, str)
                     else None
                 )
+                if capture is None:
+                    raise OsvResponseRejected(
+                        "Each OSV vulnerability must include captured Source content"
+                    )
                 evidence = evidence_adapter.capture(
                     vulnerability,
-                    captured_at=captured_time,
-                    content=captured_content,
+                    capture=capture,
                 )
                 records.setdefault(evidence.identity, evidence)
                 captured_vulnerabilities.append(
@@ -119,13 +126,12 @@ class OsvSourceAdapter:
         self,
         payload: Mapping[str, Any],
         *,
-        captured_at: datetime,
-        content: str | None = None,
+        capture: CapturedSourcePayload,
     ) -> EvidenceRecord:
         identifier = payload.get("id")
         if not isinstance(identifier, str) or not identifier.strip():
             raise OsvResponseRejected("Each OSV vulnerability must have an identifier")
-        if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+        if capture.captured_at.tzinfo is None or capture.captured_at.utcoffset() is None:
             raise OsvResponseRejected("Evidence capture time must include a timezone")
         aliases = payload.get("aliases", [])
         if not isinstance(aliases, Sequence) or isinstance(aliases, (str, bytes)):
@@ -142,14 +148,13 @@ class OsvSourceAdapter:
                 }
             )
         )
-        captured_content = content if content is not None else _canonical_json(payload)
-        if content is not None:
-            try:
-                parsed_content = json.loads(content)
-            except json.JSONDecodeError as error:
-                raise OsvResponseRejected("Captured OSV content must be valid JSON") from error
-            if parsed_content != payload:
-                raise OsvResponseRejected("Captured OSV content does not match its parsed payload")
+        captured_content = capture.content
+        try:
+            parsed_content = json.loads(captured_content)
+        except json.JSONDecodeError as error:
+            raise OsvResponseRejected("Captured OSV content must be valid JSON") from error
+        if parsed_content != payload:
+            raise OsvResponseRejected("Captured OSV content does not match its parsed payload")
         content_digest = f"sha256:{hashlib.sha256(captured_content.encode()).hexdigest()}"
         source = Source(
             identity="osv",
@@ -165,15 +170,17 @@ class OsvSourceAdapter:
             raise OsvResponseRejected("OSV affected packages must be an array")
         if not all(isinstance(item, Mapping) for item in affected):
             raise OsvResponseRejected("Each OSV affected package must be an object")
+        passage_contents = _affected_content_slices(captured_content)
+        if len(passage_contents) != len(affected):
+            raise OsvResponseRejected("Captured OSV affected passages do not match the payload")
         passages = tuple(
-            _evidence_passage(evidence_identity, index, item)
-            for index, item in enumerate(affected)
-            if isinstance(item, Mapping)
+            _evidence_passage(evidence_identity, index, passage_content)
+            for index, passage_content in enumerate(passage_contents)
         )
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
-            captured_at=captured_at.astimezone(UTC),
+            captured_at=capture.captured_at.astimezone(UTC),
             content_digest=content_digest,
             attribution="Open Source Vulnerabilities (OSV)",
             aliases=normalized_aliases,
@@ -453,25 +460,84 @@ def _capture_osv_affected(value: object, *, passage: EvidencePassage) -> OsvAffe
     )
 
 
-def _canonical_json(value: object) -> str:
-    try:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    except (TypeError, ValueError) as error:
-        raise OsvResponseRejected("OSV vulnerability payload must contain JSON values") from error
-
-
 def _evidence_passage(
     evidence_identity: str,
     index: int,
-    value: Mapping[str, Any],
+    content: str,
 ) -> EvidencePassage:
-    content = _canonical_json(value)
     identity_material = f"{evidence_identity}\naffected\n{index}\n{content}"
     return EvidencePassage(
         identity=f"sha256:{hashlib.sha256(identity_material.encode()).hexdigest()}",
         kind="affected",
+        selector=f"/affected/{index}",
         content=content,
     )
+
+
+def _affected_content_slices(content: str) -> tuple[str, ...]:
+    decoder = json.JSONDecoder()
+    index = _skip_json_whitespace(content, 0)
+    if index >= len(content) or content[index] != "{":
+        raise OsvResponseRejected("Captured OSV content must be a JSON object")
+    index += 1
+    while True:
+        index = _skip_json_whitespace(content, index)
+        if index >= len(content):
+            raise OsvResponseRejected("Captured OSV content is incomplete")
+        if content[index] == "}":
+            return ()
+        try:
+            key, key_end = decoder.raw_decode(content, index)
+        except json.JSONDecodeError as error:
+            raise OsvResponseRejected("Captured OSV content has an invalid object key") from error
+        index = _skip_json_whitespace(content, key_end)
+        if index >= len(content) or content[index] != ":":
+            raise OsvResponseRejected("Captured OSV content has an invalid object member")
+        value_start = _skip_json_whitespace(content, index + 1)
+        try:
+            _, value_end = decoder.raw_decode(content, value_start)
+        except json.JSONDecodeError as error:
+            raise OsvResponseRejected("Captured OSV content has an invalid object value") from error
+        if key == "affected":
+            return _json_array_item_slices(content, value_start)
+        index = _skip_json_whitespace(content, value_end)
+        if index >= len(content) or content[index] not in {",", "}"}:
+            raise OsvResponseRejected("Captured OSV content has an invalid object separator")
+        if content[index] == "}":
+            return ()
+        index += 1
+
+
+def _json_array_item_slices(content: str, start: int) -> tuple[str, ...]:
+    if start >= len(content) or content[start] != "[":
+        raise OsvResponseRejected("Captured OSV affected content must be an array")
+    decoder = json.JSONDecoder()
+    index = start + 1
+    slices: list[str] = []
+    while True:
+        index = _skip_json_whitespace(content, index)
+        if index >= len(content):
+            raise OsvResponseRejected("Captured OSV affected content is incomplete")
+        if content[index] == "]":
+            return tuple(slices)
+        item_start = index
+        try:
+            _, item_end = decoder.raw_decode(content, item_start)
+        except json.JSONDecodeError as error:
+            raise OsvResponseRejected("Captured OSV affected content is invalid") from error
+        slices.append(content[item_start:item_end])
+        index = _skip_json_whitespace(content, item_end)
+        if index >= len(content) or content[index] not in {",", "]"}:
+            raise OsvResponseRejected("Captured OSV affected content has an invalid separator")
+        if content[index] == "]":
+            return tuple(slices)
+        index += 1
+
+
+def _skip_json_whitespace(content: str, index: int) -> int:
+    while index < len(content) and content[index] in " \t\r\n":
+        index += 1
+    return index
 
 
 def _capture_osv_range(value: object) -> OsvRange:

@@ -187,7 +187,7 @@ export function ExposureQueuePanel({
                             {evidence.passages.map((passage) => (
                               <div key={passage.id}>
                                 <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-                                  Affected-range passage
+                                  Affected-range passage · {passage.selector}
                                 </div>
                                 <pre className="overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
                                   {passage.content}

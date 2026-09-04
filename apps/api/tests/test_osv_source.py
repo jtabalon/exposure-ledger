@@ -59,8 +59,9 @@ def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
     assert evidence.captured_at == datetime(2026, 9, 3, 12, 30, tzinfo=UTC)
     assert evidence.content_digest.startswith("sha256:")
     assert evidence.content == full_record_content
+    assert evidence.passages[0].selector == "/affected/0"
     assert evidence.passages[0].content == (
-        '{"package":{"ecosystem":"PyPI","name":"demo-pkg"},"versions":["1.0"]}'
+        '{"package": {"ecosystem": "PyPI", "name": "demo-pkg"}, "versions": ["1.0"]}'
     )
     assert [request.method for request in requests] == ["POST", "GET"]
     assert all(request.url.host == "api.osv.dev" for request in requests)
@@ -78,6 +79,36 @@ def test_osv_source_rejects_non_public_dns_resolution(
 
     with pytest.raises(OsvSourceUnavailable, match="non-public"):
         OsvApiSource().query_batch((OsvPackageQuery(name="demo-pkg", version="1.0"),))
+
+
+def test_osv_source_records_each_provider_response_capture_time() -> None:
+    captured_times = iter(
+        (
+            datetime(2026, 9, 3, 12, 30, tzinfo=UTC),
+            datetime(2026, 9, 3, 12, 31, tzinfo=UTC),
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/querybatch":
+            return httpx.Response(
+                200,
+                json={"results": [{"vulns": [{"id": "PYSEC-2026-50"}, {"id": "PYSEC-2026-51"}]}]},
+            )
+        identifier = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"id": identifier, "aliases": [], "affected": []})
+
+    response = OsvApiSource(
+        transport=httpx.MockTransport(handler),
+        capture_clock=lambda: next(captured_times),
+    ).query_batch((OsvPackageQuery(name="demo-pkg", version="1.0"),))
+
+    assert {
+        record.payload_identity: record.captured_at for record in response.evidence_records
+    } == {
+        "PYSEC-2026-50": datetime(2026, 9, 3, 12, 30, tzinfo=UTC),
+        "PYSEC-2026-51": datetime(2026, 9, 3, 12, 31, tzinfo=UTC),
+    }
 
 
 def test_osv_source_rejects_redirects() -> None:

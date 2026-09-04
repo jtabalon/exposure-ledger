@@ -54,6 +54,7 @@ describe("ExposureQueuePanel", () => {
                     id: "91126ae4-09df-4212-a5f0-e78bb02edee5",
                     identity: "sha256:affected-feature-lib",
                     kind: "affected",
+                    selector: "/affected/0",
                     content:
                       '{"package":{"ecosystem":"PyPI","name":"feature_lib"},"ranges":[{"events":[{"introduced":"5.0"},{"fixed":"5.2"}],"type":"ECOSYSTEM"}]}',
                   },

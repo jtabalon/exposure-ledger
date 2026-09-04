@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -7,6 +8,7 @@ import pytest
 from exposure_ledger import (
     Architecture,
     AssetSnapshot,
+    CapturedSourcePayload,
     EnvironmentProfile,
     ExposureDiscovery,
     OperatingSystem,
@@ -24,7 +26,19 @@ class CapturedOsvSource:
 
     def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         self.queries = queries
-        return OsvBatchResponse.capture(self.response, expected_results=len(queries))
+        captured_payloads = {
+            str(vulnerability["id"]): CapturedSourcePayload(
+                content=json.dumps(vulnerability, separators=(",", ":"), sort_keys=True),
+                captured_at=datetime(2026, 9, 3, 20, 0, tzinfo=UTC),
+            )
+            for result in self.response["results"]
+            for vulnerability in result.get("vulns", [])
+        }
+        return OsvBatchResponse.capture(
+            self.response,
+            expected_results=len(queries),
+            captured_payloads=captured_payloads,
+        )
 
 
 def snapshot_with(*packages: PackageInstance) -> AssetSnapshot:

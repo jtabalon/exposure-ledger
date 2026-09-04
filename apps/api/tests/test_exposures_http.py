@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import zipfile
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -10,6 +11,7 @@ import psycopg
 import pytest
 from exposure_ledger import (
     AssessmentResult,
+    CapturedSourcePayload,
     OsvBatchResponse,
     OsvPackageQuery,
     OsvSourceUnavailable,
@@ -52,56 +54,81 @@ class CapturedOsvSource:
             OsvPackageQuery(name="platform-only", version="4.0.0"),
         )
         shared_aliases = ["CVE-2026-4000", "GHSA-4444-5555-6666"]
+        payload = {
+            "results": [
+                {
+                    "vulns": [
+                        {
+                            "id": "PYSEC-2026-40",
+                            "aliases": shared_aliases,
+                            "database_specific": {"severity": "HIGH"},
+                            "affected": [
+                                {
+                                    "package": {
+                                        "ecosystem": "PyPI",
+                                        "name": "feature_lib",
+                                    },
+                                    "ranges": [
+                                        {
+                                            "type": "ECOSYSTEM",
+                                            "events": [
+                                                {"introduced": "5.0"},
+                                                {"fixed": "5.2"},
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                {
+                    "vulns": [
+                        {
+                            "id": "GHSA-4444-5555-6666",
+                            "aliases": ["CVE-2026-4000", "PYSEC-2026-40"],
+                            "database_specific": {"severity": "HIGH"},
+                            "affected": [
+                                {
+                                    "package": {"ecosystem": "PyPI", "name": "http-x"},
+                                    "versions": ["2.3.0"],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                {
+                    "vulns": [
+                        {
+                            "id": "PYSEC-2026-99",
+                            "aliases": [],
+                            "affected": [
+                                {
+                                    "package": {
+                                        "ecosystem": "PyPI",
+                                        "name": "leaf-lib",
+                                    },
+                                    "versions": ["9.9.0"],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                {},
+            ]
+        }
+        captured_payloads = {
+            str(vulnerability["id"]): CapturedSourcePayload(
+                content=json.dumps(vulnerability, separators=(",", ":"), sort_keys=True),
+                captured_at=self._captured_at,
+            )
+            for result in payload["results"]
+            for vulnerability in result.get("vulns", [])
+        }
         response = OsvBatchResponse.capture(
-            {
-                "results": [
-                    {
-                        "vulns": [
-                            {
-                                "id": "PYSEC-2026-40",
-                                "aliases": shared_aliases,
-                                "database_specific": {"severity": "HIGH"},
-                                "affected": [
-                                    {
-                                        "package": {
-                                            "ecosystem": "PyPI",
-                                            "name": "feature_lib",
-                                        },
-                                        "ranges": [
-                                            {
-                                                "type": "ECOSYSTEM",
-                                                "events": [
-                                                    {"introduced": "5.0"},
-                                                    {"fixed": "5.2"},
-                                                ],
-                                            }
-                                        ],
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                    {
-                        "vulns": [
-                            {
-                                "id": "GHSA-4444-5555-6666",
-                                "aliases": ["CVE-2026-4000", "PYSEC-2026-40"],
-                                "database_specific": {"severity": "HIGH"},
-                                "affected": [
-                                    {
-                                        "package": {"ecosystem": "PyPI", "name": "http-x"},
-                                        "versions": ["2.3.0"],
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                    {},
-                    {},
-                ]
-            },
+            payload,
             expected_results=len(queries),
-            captured_at=self._captured_at,
+            captured_payloads=captured_payloads,
         )
         self._captured_at += timedelta(minutes=1)
         return response
@@ -192,6 +219,7 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
                 "id": feature_evidence[0]["passages"][0]["id"],
                 "identity": feature_evidence[0]["passages"][0]["identity"],
                 "kind": "affected",
+                "selector": "/affected/0",
                 "content": (
                     '{"package":{"ecosystem":"PyPI","name":"feature_lib"},'
                     '"ranges":[{"events":[{"introduced":"5.0"},{"fixed":"5.2"}],'
@@ -199,6 +227,8 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
                 ),
             }
         ]
+        with psycopg.connect(database_url) as connection:
+            assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (3,)
         with (
             psycopg.connect(database_url) as connection,
             pytest.raises(

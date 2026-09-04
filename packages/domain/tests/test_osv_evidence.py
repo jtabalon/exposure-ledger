@@ -4,7 +4,12 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-from exposure_ledger import OsvResponseRejected, OsvSourceAdapter
+from exposure_ledger import (
+    CapturedSourcePayload,
+    OsvBatchResponse,
+    OsvResponseRejected,
+    OsvSourceAdapter,
+)
 
 
 def test_osv_adapter_captures_stable_immutable_evidence_provenance() -> None:
@@ -25,11 +30,23 @@ def test_osv_adapter_captures_stable_immutable_evidence_provenance() -> None:
         ],
     }
     captured_at = datetime(2026, 9, 3, 12, 30, tzinfo=UTC)
+    captured_content = (
+        '{"affected":[{"package":{"ecosystem":"PyPI","name":"demo-pkg"},'
+        '"ranges":[{"events":[{"introduced":"0"},{"fixed":"1.1"}],'
+        '"type":"ECOSYSTEM"}]}],"aliases":["CVE-2026-5000"],'
+        '"id":"PYSEC-2026-50"}'
+    )
 
-    evidence = adapter.capture(payload, captured_at=captured_at)
+    evidence = adapter.capture(
+        payload,
+        capture=CapturedSourcePayload(content=captured_content, captured_at=captured_at),
+    )
     reordered = adapter.capture(
         {"affected": payload["affected"], "id": payload["id"], "aliases": payload["aliases"]},
-        captured_at=datetime(2026, 9, 3, 12, 31, tzinfo=UTC),
+        capture=CapturedSourcePayload(
+            content=captured_content,
+            captured_at=datetime(2026, 9, 3, 12, 31, tzinfo=UTC),
+        ),
     )
 
     assert evidence.source.identity == "osv"
@@ -45,6 +62,7 @@ def test_osv_adapter_captures_stable_immutable_evidence_provenance() -> None:
     assert evidence.identity == reordered.identity
     assert evidence.content_digest == reordered.content_digest
     assert evidence.passages[0].kind == "affected"
+    assert evidence.passages[0].selector == "/affected/0"
     assert evidence.passages[0].content == (
         '{"package":{"ecosystem":"PyPI","name":"demo-pkg"},"ranges":'
         '[{"events":[{"introduced":"0"},{"fixed":"1.1"}],"type":"ECOSYSTEM"}]}'
@@ -58,5 +76,16 @@ def test_osv_adapter_rejects_payload_without_provider_identity() -> None:
     with pytest.raises(OsvResponseRejected, match="identifier"):
         OsvSourceAdapter().capture(
             {"affected": []},
-            captured_at=datetime(2026, 9, 3, tzinfo=UTC),
+            capture=CapturedSourcePayload(
+                content='{"affected":[]}',
+                captured_at=datetime(2026, 9, 3, tzinfo=UTC),
+            ),
+        )
+
+
+def test_osv_batch_rejects_parsed_records_without_captured_source_content() -> None:
+    with pytest.raises(OsvResponseRejected, match="captured Source content"):
+        OsvBatchResponse.capture(
+            {"results": [{"vulns": [{"id": "PYSEC-2026-50", "affected": []}]}]},
+            expected_results=1,
         )

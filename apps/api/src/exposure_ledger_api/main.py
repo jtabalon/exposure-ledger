@@ -265,6 +265,7 @@ class EvidencePassageResponse(ApiModel):
     id: UUID
     identity: str
     kind: str
+    selector: str
     content: str
 
     @classmethod

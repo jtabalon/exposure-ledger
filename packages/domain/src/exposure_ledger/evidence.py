@@ -19,6 +19,7 @@ class Source:
 class EvidencePassage:
     identity: str
     kind: str
+    selector: str
     content: str
 
 
@@ -35,6 +36,12 @@ class EvidenceRecord:
     passages: tuple[EvidencePassage, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class CapturedSourcePayload:
+    content: str
+    captured_at: datetime
+
+
 class SourceAdapter(Protocol):
     """Convert one captured provider payload into immutable evidence."""
 
@@ -42,6 +49,5 @@ class SourceAdapter(Protocol):
         self,
         payload: Mapping[str, Any],
         *,
-        captured_at: datetime,
-        content: str | None = None,
+        capture: CapturedSourcePayload,
     ) -> EvidenceRecord: ...

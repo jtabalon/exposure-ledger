@@ -36,7 +36,7 @@ function formatTimestamp(value: string): string {
   return `${utcTimestamp.format(new Date(value))} UTC`
 }
 
-function assetSnapshotFailureGuidance(code: AssessmentRunErrorCode): string {
+function assessmentRunFailureGuidance(code: AssessmentRunErrorCode): string {
   if (code === "osv_unavailable") {
     return "Verify the OSV Source is reachable, then create a new Assessment Run. No evidence was substituted."
   }
@@ -91,11 +91,10 @@ function assetSnapshotFailureGuidance(code: AssessmentRunErrorCode): string {
 }
 
 function failureHeading(code: AssessmentRunErrorCode): string {
-  return code === "osv_unavailable" ||
-    code === "invalid_osv_response" ||
-    code === "osv_lookup_policy_blocked"
-    ? "OSV Source unavailable"
-    : "Asset Snapshot rejected"
+  if (code === "osv_unavailable") return "OSV Source unavailable"
+  if (code === "invalid_osv_response") return "OSV Source response rejected"
+  if (code === "osv_lookup_policy_blocked") return "OSV lookup blocked by Policy Decision"
+  return "Asset Snapshot rejected"
 }
 
 function DetailRow({ label, value }: { label: string; value: ReactNode }) {
@@ -255,7 +254,7 @@ export function AssessmentRunPanel({
                   <div className="font-semibold">{failureHeading(selected.errorCode)}</div>
                   <div className="mt-1 font-mono text-[10px]">{selected.errorCode}</div>
                   {selected.errorMessage ? <p className="mt-1">{selected.errorMessage}</p> : null}
-                  <p className="mt-2">{assetSnapshotFailureGuidance(selected.errorCode)}</p>
+                  <p className="mt-2">{assessmentRunFailureGuidance(selected.errorCode)}</p>
                 </div>
               ) : selected.errorMessage ? (
                 <p className="mt-3 text-xs text-red-800">{selected.errorMessage}</p>

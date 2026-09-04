@@ -13,7 +13,12 @@ from urllib.parse import quote, urlsplit
 
 import httpcore
 import httpx
-from exposure_ledger import OsvBatchResponse, OsvPackageQuery, OsvSourceUnavailable
+from exposure_ledger import (
+    CapturedSourcePayload,
+    OsvBatchResponse,
+    OsvPackageQuery,
+    OsvSourceUnavailable,
+)
 
 _OSV_ORIGIN = "https://api.osv.dev"
 _MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -115,7 +120,7 @@ class OsvApiSource:
                     raise OsvSourceUnavailable("OSV pagination exceeded the bounded page limit.")
 
                 records: dict[str, dict[str, Any]] = {}
-                captured_contents: dict[str, str] = {}
+                captured_payloads: dict[str, CapturedSourcePayload] = {}
                 for identifier in sorted(set[str]().union(*vulnerability_ids)):
                     record, captured_content = _request_json(
                         client,
@@ -124,12 +129,16 @@ class OsvApiSource:
                         deadline=deadline,
                         clock=self._clock,
                     )
+                    captured_at = self._capture_clock()
                     if record.get("id") != identifier:
                         raise OsvSourceUnavailable(
                             "OSV returned a vulnerability record with a mismatched identifier."
                         )
                     records[identifier] = record
-                    captured_contents[identifier] = captured_content
+                    captured_payloads[identifier] = CapturedSourcePayload(
+                        content=captured_content,
+                        captured_at=captured_at,
+                    )
         except httpx.HTTPError as error:
             raise OsvSourceUnavailable("The public OSV API could not be retrieved.") from error
 
@@ -142,8 +151,7 @@ class OsvApiSource:
         return OsvBatchResponse.capture(
             payload,
             expected_results=len(queries),
-            captured_at=self._capture_clock(),
-            captured_contents=captured_contents,
+            captured_payloads=captured_payloads,
         )
 
 

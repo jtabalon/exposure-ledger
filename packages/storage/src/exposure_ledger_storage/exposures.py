@@ -35,6 +35,7 @@ class EvidencePassageRecord:
     id: UUID
     identity: str
     kind: str
+    selector: str
     content: str
 
 
@@ -107,9 +108,9 @@ class ExposureRepository:
                 raise ValueError("Exposure discovery references unavailable Evidence Records")
             evidence_ids: dict[str, UUID] = {}
             passage_ids: dict[str, UUID] = {}
-            for identity in sorted(referenced_evidence):
-                evidence_id, stored_passages = self._evidence_id(
-                    connection, evidence_by_identity[identity]
+            for identity, domain_evidence in sorted(evidence_by_identity.items()):
+                evidence_id, stored_passages = self._persist_immutable_evidence(
+                    connection, domain_evidence
                 )
                 evidence_ids[identity] = evidence_id
                 passage_ids.update(stored_passages)
@@ -173,8 +174,8 @@ class ExposureRepository:
                         exposure.ranking.score,
                     ),
                 )
-                for evidence in exposure.evidence:
-                    evidence_id = evidence_ids[evidence.record_identity]
+                for evidence_reference in exposure.evidence:
+                    evidence_id = evidence_ids[evidence_reference.record_identity]
                     connection.execute(
                         """
                         INSERT INTO assessment_run_exposure_evidence (
@@ -199,7 +200,7 @@ class ExposureRepository:
                                     evidence_id,
                                     passage_ids[passage_identity],
                                 )
-                                for passage_identity in evidence.passage_identities
+                                for passage_identity in evidence_reference.passage_identities
                             ],
                         )
             connection.execute(
@@ -260,7 +261,7 @@ class ExposureRepository:
             return [self._from_row(connection, row) for row in rows]
 
     @staticmethod
-    def _evidence_id(
+    def _persist_immutable_evidence(
         connection: psycopg.Connection[Any], evidence: DomainEvidenceRecord
     ) -> tuple[UUID, dict[str, UUID]]:
         source_inserted = connection.execute(
@@ -341,17 +342,24 @@ class ExposureRepository:
             passage_inserted = connection.execute(
                 """
                 INSERT INTO evidence_passages (
-                    id, evidence_record_id, identity_key, kind, content
-                ) VALUES (%s, %s, %s, %s, %s)
+                    id, evidence_record_id, identity_key, kind, selector, content
+                ) VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (identity_key) DO NOTHING
                 RETURNING id
                 """,
-                (uuid4(), evidence_id, passage.identity, passage.kind, passage.content),
+                (
+                    uuid4(),
+                    evidence_id,
+                    passage.identity,
+                    passage.kind,
+                    passage.selector,
+                    passage.content,
+                ),
             ).fetchone()
             if passage_inserted is None:
                 passage_row = connection.execute(
                     """
-                    SELECT id, evidence_record_id, kind, content
+                    SELECT id, evidence_record_id, kind, selector, content
                     FROM evidence_passages WHERE identity_key = %s
                     """,
                     (passage.identity,),
@@ -361,7 +369,8 @@ class ExposureRepository:
                     UUID(str(passage_row[1])),
                     str(passage_row[2]),
                     str(passage_row[3]),
-                ) != (evidence_id, passage.kind, passage.content):
+                    str(passage_row[4]),
+                ) != (evidence_id, passage.kind, passage.selector, passage.content):
                     raise ValueError("Evidence Passage identity conflicts with immutable content")
                 passage_id = UUID(str(passage_row[0]))
             else:
@@ -539,7 +548,8 @@ class ExposureRepository:
             passages = connection.execute(
                 """
                 SELECT evidence_passages.id, evidence_passages.identity_key,
-                       evidence_passages.kind, evidence_passages.content
+                       evidence_passages.kind, evidence_passages.selector,
+                       evidence_passages.content
                 FROM assessment_run_exposure_passages
                 JOIN evidence_passages
                   ON evidence_passages.id = assessment_run_exposure_passages.passage_id
@@ -570,6 +580,7 @@ class ExposureRepository:
                             id=UUID(str(passage["id"])),
                             identity=str(passage["identity_key"]),
                             kind=str(passage["kind"]),
+                            selector=str(passage["selector"]),
                             content=str(passage["content"]),
                         )
                         for passage in passages

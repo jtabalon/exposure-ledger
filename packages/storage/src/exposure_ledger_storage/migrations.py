@@ -504,6 +504,7 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                 REFERENCES evidence_records(id) ON DELETE RESTRICT,
             identity_key text NOT NULL UNIQUE,
             kind text NOT NULL,
+            selector text NOT NULL,
             content text NOT NULL,
             UNIQUE (id, evidence_record_id)
         );
