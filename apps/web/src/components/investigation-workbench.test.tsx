@@ -67,20 +67,25 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain("2.4.2")
   })
 
-  it("presents the exact retrieval query and only lexical ranking", () => {
+  it("presents hybrid component ranks and the complete Embedding Space identity", () => {
     const html = renderToStaticMarkup(
       <InvestigationWorkbench investigation={demoInvestigation} {...workbenchProps} />,
     )
 
     expect(html).toContain(demoInvestigation.retrieval.query)
-    expect(html).toContain("Lexical · top")
-    expect(html).toContain("Lexical rank")
-    expect(html).toContain("PostgreSQL full-text search")
-    expect(html).toContain("Rank 1 is the strongest lexical match")
+    expect(html).toContain("Hybrid · RRF")
+    expect(html).toContain("Full-text rank")
+    expect(html).toContain("Vector rank")
+    expect(html).toContain("Fused rank")
+    expect(html).toContain("PostgreSQL full-text + pgvector")
+    expect(html).toContain("Rank 1 is the strongest fused result")
     expect(html).toContain(demoInvestigation.retrieval.configurationVersion)
-    expect(html).not.toContain("RRF")
-    expect(html).not.toContain("Vector")
-    expect(html).not.toContain("Fused")
-    expect(html).not.toContain("qwen3-embedding")
+    expect(html).toContain("Embedding Space")
+    expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.identity)
+    expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.modelArtifact)
+    expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.artifactDigest)
+    expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.retrievalInstruction)
+    expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.normalizer)
+    expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.passageConstructionVersion)
   })
 })

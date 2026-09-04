@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 
     database_url: str = DEFAULT_DATABASE_URL
     event_poll_seconds: float = Field(default=0.25, gt=0, le=10)
+    ollama_base_url: str = "http://localhost:11434"
+    embedding_model: str = "qwen3-embedding:0.6b"
 
     @field_validator("database_url")
     @classmethod

@@ -344,6 +344,7 @@ version = "0.1.0"
 source = { editable = "packages/storage" }
 dependencies = [
     { name = "exposure-ledger-domain" },
+    { name = "httpx" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
 ]
@@ -351,6 +352,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "exposure-ledger-domain", editable = "packages/domain" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic-settings", specifier = ">=2.8" },
 ]

@@ -44,7 +44,12 @@ from exposure_ledger_storage import (
     AssessmentRunRepository,
     AssessmentScenario,
     AssetSnapshotRepository,
+    EmbeddingIndexUnavailable,
+    EmbeddingProvider,
+    EmbeddingProviderUnavailable,
+    EvidenceRetriever,
     ExposureRepository,
+    OllamaEmbeddingProvider,
     normalize_database_url,
 )
 from pydantic import Field, field_validator
@@ -126,6 +131,8 @@ class WorkerSettings(BaseSettings):
     database_url: str = DEFAULT_DATABASE_URL
     worker_poll_seconds: float = Field(default=0.5, gt=0, le=30)
     worker_lease_seconds: float = Field(default=30, ge=1, le=3600)
+    ollama_base_url: str = "http://localhost:11434"
+    embedding_model: str = "qwen3-embedding:0.6b"
 
     @field_validator("database_url")
     @classmethod
@@ -172,6 +179,7 @@ def process_next_assessment(
     kev_source: CisaKevSource | None = None,
     epss_source: EpssSource | None = None,
     advisory_source: FirstPartyAdvisorySource | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
     repository = AssessmentRunRepository(database_url)
@@ -348,6 +356,31 @@ def process_next_assessment(
                         asset_snapshot_id=snapshot.id,
                         result=result,
                     )
+                    if embedding_provider is not None:
+                        try:
+                            EvidenceRetriever(
+                                database_url,
+                                embedding_provider=embedding_provider,
+                            ).index_assessment(assessment_run.id)
+                        except EmbeddingProviderUnavailable as error:
+                            detail = error.readiness.message
+                            if error.readiness.setup is not None:
+                                detail = f"{detail} {error.readiness.setup}"
+                            repository.fail(
+                                assessment_run.id,
+                                claim_id=assessment_run.claim_id,
+                                code=error.readiness.code or "embedding_provider_unavailable",
+                                message=detail,
+                            )
+                            return True
+                        except (EmbeddingIndexUnavailable, ValueError) as error:
+                            repository.fail(
+                                assessment_run.id,
+                                claim_id=assessment_run.claim_id,
+                                code="embedding_index_failed",
+                                message=str(error),
+                            )
+                            return True
                 except OsvSourceUnavailable as error:
                     repository.fail(
                         assessment_run.id,
@@ -385,6 +418,10 @@ def main() -> None:
     settings = WorkerSettings()
     repository = AssessmentRunRepository(settings.database_url)
     repository.check_ready()
+    embedding_provider = OllamaEmbeddingProvider(
+        base_url=settings.ollama_base_url,
+        model_artifact=settings.embedding_model,
+    )
     logger.info("Exposure Ledger worker ready")
 
     try:
@@ -392,6 +429,7 @@ def main() -> None:
             if not process_next_assessment(
                 database_url=settings.database_url,
                 stale_after_seconds=settings.worker_lease_seconds,
+                embedding_provider=embedding_provider,
             ):
                 time.sleep(settings.worker_poll_seconds)
     except KeyboardInterrupt:

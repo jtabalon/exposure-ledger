@@ -19,6 +19,7 @@ from exposure_ledger import (
     AuthorizationStatus,
     CaptureAssetSnapshot,
     CyberPolicy,
+    EmbeddingSpace,
     EnvironmentProfile,
     ExposureRanking,
     ExposureSeverity,
@@ -28,7 +29,7 @@ from exposure_ledger import (
     validate_asset_snapshot_request,
 )
 from exposure_ledger_storage import (
-    LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
+    HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
     SOURCE_POLICY_VERSION,
     AssessmentEvent,
     AssessmentMode,
@@ -38,15 +39,22 @@ from exposure_ledger_storage import (
     AssessmentStatus,
     AssetSnapshotRecord,
     AssetSnapshotRepository,
+    EmbeddingIndexUnavailable,
+    EmbeddingProvider,
+    EmbeddingProviderUnavailable,
+    EmbeddingReadiness,
+    EmbeddingSpaceNotCurrent,
     EvidencePassageRecord,
     EvidenceRecordRecord,
     EvidenceRetriever,
     ExposureRecord,
     ExposureRepository,
     ExposureRetrievalScopeNotFound,
+    OllamaEmbeddingProvider,
     PackageInstanceRecord,
     PolicyDecisionRecord,
     RetrievalConfigurationNotCurrent,
+    RetrievalEvaluationReport,
     RetrievalQuery,
     RetrievalResult,
     RetrievedCapture,
@@ -76,11 +84,58 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(alias_generator=_to_camel, populate_by_name=True)
 
 
+class EmbeddingSpaceResponse(ApiModel):
+    identity: str
+    provider: str
+    model_artifact: str
+    artifact_digest: str
+    dimensions: int
+    retrieval_instruction: str
+    normalizer: str
+    passage_construction_version: str
+
+    @classmethod
+    def from_domain(cls, space: EmbeddingSpace) -> "EmbeddingSpaceResponse":
+        return cls(
+            identity=space.identity,
+            provider=space.provider,
+            model_artifact=space.model_artifact,
+            artifact_digest=space.artifact_digest,
+            dimensions=space.dimensions,
+            retrieval_instruction=space.retrieval_instruction,
+            normalizer=space.normalizer,
+            passage_construction_version=space.passage_construction_version,
+        )
+
+
+class EmbeddingReadinessResponse(ApiModel):
+    status: Literal["ready", "unavailable"]
+    code: str | None
+    message: str
+    setup: str | None
+    space: EmbeddingSpaceResponse | None
+
+    @classmethod
+    def from_record(cls, readiness: EmbeddingReadiness) -> "EmbeddingReadinessResponse":
+        return cls(
+            status=readiness.status,
+            code=readiness.code,
+            message=readiness.message,
+            setup=readiness.setup,
+            space=(
+                EmbeddingSpaceResponse.from_domain(readiness.space)
+                if readiness.space is not None
+                else None
+            ),
+        )
+
+
 class HealthResponse(BaseModel):
-    status: Literal["ok"]
+    status: Literal["ok", "degraded"]
     service: Literal["exposure-ledger-api"]
     version: str
     inference_mode: Literal["local"]
+    embeddings: EmbeddingReadinessResponse
 
 
 class AssessmentPolicyContext(ApiModel):
@@ -395,6 +450,7 @@ class RetrievalQueryContextResponse(ApiModel):
     source_policy: RetrievalSourcePolicyResponse
     evidence_types: list[str]
     retrieval_configuration_version: str
+    embedding_space: EmbeddingSpaceResponse | None
     limit: int
 
 
@@ -434,8 +490,12 @@ class RetrievedPassageResponse(ApiModel):
 
 
 class RetrievedEvidencePassageResponse(ApiModel):
-    lexical_rank: int
-    lexical_score: float
+    full_text_rank: int | None
+    full_text_score: float | None
+    vector_rank: int | None
+    vector_score: float | None
+    fused_rank: int | None
+    fused_score: float | None
     passage: RetrievedPassageResponse
     source: RetrievedSourceResponse
     capture: RetrievedCaptureResponse
@@ -445,8 +505,12 @@ class RetrievedEvidencePassageResponse(ApiModel):
     @classmethod
     def from_record(cls, retrieved: RetrievedEvidencePassage) -> "RetrievedEvidencePassageResponse":
         return cls(
-            lexical_rank=retrieved.lexical_rank,
-            lexical_score=retrieved.lexical_score,
+            full_text_rank=retrieved.full_text_rank,
+            full_text_score=retrieved.full_text_score,
+            vector_rank=retrieved.vector_rank,
+            vector_score=retrieved.vector_score,
+            fused_rank=retrieved.fused_rank,
+            fused_score=retrieved.fused_score,
             passage=RetrievedPassageResponse.from_record(retrieved.passage),
             source=RetrievedSourceResponse.from_record(retrieved.source),
             capture=RetrievedCaptureResponse.from_record(retrieved.capture),
@@ -474,6 +538,7 @@ class RetrievedExposureContextResponse(ApiModel):
 class RetrievalResponse(ApiModel):
     query_context: RetrievalQueryContextResponse
     items: list[RetrievedEvidencePassageResponse]
+    evaluation: "RetrievalEvaluationResponse | None"
 
     @classmethod
     def from_result(cls, result: RetrievalResult) -> "RetrievalResponse":
@@ -490,9 +555,37 @@ class RetrievalResponse(ApiModel):
                 ),
                 evidence_types=list(result.query.evidence_types),
                 retrieval_configuration_version=(result.query.retrieval_configuration_version),
+                embedding_space=(
+                    EmbeddingSpaceResponse.from_domain(result.embedding_space)
+                    if result.embedding_space is not None
+                    else None
+                ),
                 limit=result.query.limit,
             ),
             items=[RetrievedEvidencePassageResponse.from_record(item) for item in result.passages],
+            evaluation=(
+                RetrievalEvaluationResponse.from_record(result.evaluation)
+                if result.evaluation is not None
+                else None
+            ),
+        )
+
+
+class RetrievalEvaluationResponse(ApiModel):
+    k: int
+    expected_count: int
+    retrieved_count: int
+    matched_passage_identities: list[str]
+    recall_at_k: float
+
+    @classmethod
+    def from_record(cls, report: RetrievalEvaluationReport) -> "RetrievalEvaluationResponse":
+        return cls(
+            k=report.k,
+            expected_count=report.expected_count,
+            retrieved_count=report.retrieved_count,
+            matched_passage_identities=list(report.matched_passage_identities),
+            recall_at_k=report.recall_at_k,
         )
 
 
@@ -533,12 +626,21 @@ def _encode_sse(event: AssessmentEvent) -> str:
 
 def create_app(
     settings: Settings | None = None,
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> FastAPI:
     configured_settings = settings or Settings()
     repository = AssessmentRunRepository(configured_settings.database_url)
     snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
     exposure_repository = ExposureRepository(configured_settings.database_url)
-    evidence_retriever = EvidenceRetriever(configured_settings.database_url)
+    configured_embedding_provider = embedding_provider or OllamaEmbeddingProvider(
+        base_url=configured_settings.ollama_base_url,
+        model_artifact=configured_settings.embedding_model,
+    )
+    evidence_retriever = EvidenceRetriever(
+        configured_settings.database_url,
+        embedding_provider=configured_embedding_provider,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -622,11 +724,13 @@ def create_app(
 
     @application.get("/health", response_model=HealthResponse, tags=["operations"])
     def health() -> HealthResponse:
+        embedding_readiness = configured_embedding_provider.check_readiness()
         return HealthResponse(
-            status="ok",
+            status="ok" if embedding_readiness.status == "ready" else "degraded",
             service="exposure-ledger-api",
             version=APP_VERSION,
             inference_mode="local",
+            embeddings=EmbeddingReadinessResponse.from_record(embedding_readiness),
         )
 
     @application.get(
@@ -832,7 +936,13 @@ def create_app(
         evidence_type: Annotated[list[str], Query(alias="evidenceType", min_length=1)],
         retrieval_configuration_version: Annotated[
             str, Query(alias="retrievalConfigurationVersion")
-        ] = LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
+        ] = HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
+        embedding_space_identity: Annotated[
+            str | None, Query(alias="embeddingSpaceIdentity")
+        ] = None,
+        expected_passage_identity: Annotated[
+            list[str] | None, Query(alias="expectedPassageIdentity")
+        ] = None,
         limit: Annotated[int, Query(ge=1, le=100)] = 10,
     ) -> RetrievalResponse:
         if repository.get(assessment_run_id) is None:
@@ -847,6 +957,8 @@ def create_app(
             ),
             evidence_types=tuple(evidence_type),
             retrieval_configuration_version=retrieval_configuration_version,
+            embedding_space_identity=embedding_space_identity,
+            expected_passage_identities=tuple(expected_passage_identity or ()),
             limit=limit,
         )
         try:
@@ -857,7 +969,7 @@ def create_app(
                 detail={
                     "code": "retrieval_configuration_not_current",
                     "message": str(error),
-                    "currentVersion": LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
+                    "currentVersion": HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
                 },
             ) from error
         except ExposureRetrievalScopeNotFound as error:
@@ -866,6 +978,38 @@ def create_app(
                 detail={
                     "code": "exposure_not_found",
                     "message": str(error),
+                },
+            ) from error
+        except EmbeddingSpaceNotCurrent as error:
+            current = configured_embedding_provider.check_readiness().space
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "embedding_space_not_current",
+                    "message": str(error),
+                    "currentEmbeddingSpaceIdentity": (
+                        current.identity if current is not None else None
+                    ),
+                },
+            ) from error
+        except EmbeddingProviderUnavailable as error:
+            readiness = EmbeddingReadinessResponse.from_record(error.readiness)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": error.readiness.code,
+                    "message": error.readiness.message,
+                    "setup": error.readiness.setup,
+                    "embeddings": readiness.model_dump(mode="json", by_alias=True),
+                },
+            ) from error
+        except EmbeddingIndexUnavailable as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "embedding_index_unavailable",
+                    "message": str(error),
+                    "setup": "Run a new Assessment after `make models` succeeds.",
                 },
             ) from error
         except ValueError as error:

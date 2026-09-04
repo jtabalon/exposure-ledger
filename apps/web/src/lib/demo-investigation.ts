@@ -19,8 +19,12 @@ export type DemoEvidenceRecord = {
   relationship: EvidenceRelationship
   claimIds: string[]
   passage: string
-  lexicalRank: number
-  lexicalScore: number
+  fullTextRank: number | null
+  fullTextScore: number | null
+  vectorRank: number | null
+  vectorScore: number | null
+  fusedRank: number
+  fusedScore: number
   digest: string
 }
 
@@ -76,6 +80,16 @@ export type DemoInvestigation = {
     configurationVersion: string
     sourcePolicyVersion: string
     evidenceTypes: string[]
+    embeddingSpace: {
+      identity: string
+      provider: string
+      modelArtifact: string
+      artifactDigest: string
+      dimensions: number
+      retrievalInstruction: string
+      normalizer: string
+      passageConstructionVersion: string
+    }
   }
   stages: InvestigationStage[]
   claims: InvestigationClaim[]
@@ -139,16 +153,27 @@ export const demoInvestigation: DemoInvestigation = {
   },
   retrieval: {
     query: "cipherleaf 2.4.1 affected fixed upgrade",
-    configurationVersion: "postgres-lexical-v1",
+    configurationVersion: "postgres-hybrid-rrf-v1",
     sourcePolicyVersion: "explicit-source-allowlist-v1",
     evidenceTypes: ["dependency", "affected", "remediation", "exploitation", "usage"],
+    embeddingSpace: {
+      identity: "sha256:7eb54bd7f75166528a13264eec28f37aba439cd090aec84bb9a7f1d12f4736c1",
+      provider: "ollama-local",
+      modelArtifact: "qwen3-embedding:0.6b",
+      artifactDigest:
+        "sha256:84a319513af54a65d1ad379f244411b221a26b3477055f823cfef7743bcf4f9e",
+      dimensions: 1024,
+      retrievalInstruction: "Represent this cybersecurity query for evidence passage retrieval: ",
+      normalizer: "l2-v1",
+      passageConstructionVersion: "source-aware-passage-v1",
+    },
   },
   stages: [
     { label: "Matched", mode: "deterministic", detail: "Version range and aliases normalized" },
     {
       label: "Retrieved",
       mode: "retrieval",
-      detail: "PostgreSQL full-text search completed",
+      detail: "PostgreSQL full-text + pgvector retrieval fused with deterministic RRF",
     },
     { label: "Interpreted", mode: "model", detail: "Claims synthesized locally" },
     { label: "Validated", mode: "policy", detail: "Citations and safety policy passed" },
@@ -189,8 +214,12 @@ export const demoInvestigation: DemoInvestigation = {
       relationship: "supports",
       claimIds: ["claim-version"],
       passage: 'name = "cipherleaf" · version = "2.4.1" · via auth-gateway',
-      lexicalRank: 1,
-      lexicalScore: 0.941,
+      fullTextRank: 1,
+      fullTextScore: 0.941,
+      vectorRank: 3,
+      vectorScore: 0.812,
+      fusedRank: 2,
+      fusedScore: 0.0323,
       digest: "sha256:65bc…8a20",
     },
     {
@@ -202,8 +231,12 @@ export const demoInvestigation: DemoInvestigation = {
       claimIds: ["claim-version", "claim-fix"],
       passage:
         "Releases from 2.1.0 through 2.4.2 are affected. Consumers should upgrade to cipherleaf 2.4.3 or later.",
-      lexicalRank: 2,
-      lexicalScore: 0.887,
+      fullTextRank: 2,
+      fullTextScore: 0.887,
+      vectorRank: 1,
+      vectorScore: 0.936,
+      fusedRank: 1,
+      fusedScore: 0.0325,
       digest: "sha256:21df…0c91",
     },
     {
@@ -215,8 +248,12 @@ export const demoInvestigation: DemoInvestigation = {
       claimIds: ["claim-version", "claim-fix"],
       passage:
         "The public record lists releases before 2.4.2 as affected and names 2.4.2 as fixed.",
-      lexicalRank: 3,
-      lexicalScore: 0.844,
+      fullTextRank: 3,
+      fullTextScore: 0.844,
+      vectorRank: 2,
+      vectorScore: 0.901,
+      fusedRank: 3,
+      fusedScore: 0.0320,
       digest: "sha256:44ea…a1c2",
     },
     {
@@ -228,8 +265,12 @@ export const demoInvestigation: DemoInvestigation = {
       claimIds: ["claim-priority"],
       passage:
         "This synthetic record exists only to demonstrate how known-exploitation evidence changes investigation priority.",
-      lexicalRank: 4,
-      lexicalScore: 0.802,
+      fullTextRank: 4,
+      fullTextScore: 0.802,
+      vectorRank: null,
+      vectorScore: null,
+      fusedRank: 4,
+      fusedScore: 0.0156,
       digest: "sha256:8aa1…9f13",
     },
     {
@@ -240,8 +281,12 @@ export const demoInvestigation: DemoInvestigation = {
       relationship: "contextual",
       claimIds: ["claim-usage"],
       passage: "from cipherleaf.tokens import verify_session",
-      lexicalRank: 5,
-      lexicalScore: 0.734,
+      fullTextRank: null,
+      fullTextScore: null,
+      vectorRank: 4,
+      vectorScore: 0.774,
+      fusedRank: 5,
+      fusedScore: 0.0156,
       digest: "sha256:d10c…4b27",
     },
   ],

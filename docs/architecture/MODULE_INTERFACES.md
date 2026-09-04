@@ -49,5 +49,8 @@ These seams were agreed during design and are the only initial surfaces tested d
 5. **Source adapter contract:** each adapter turns captured provider responses into immutable Evidence Records under shared provenance rules.
 6. **HTTP contract:** FastAPI exposes health, versioned resources, job creation, and SSE progress through OpenAPI.
 7. **Workbench flow:** an operator can follow Exposure → Claim → Evidence and distinguish precomputed from live content.
+8. **Retrieval:** an Exposure-scoped, metadata-filtered query and one explicit Embedding Space
+   produce deterministic full-text, vector, and fused ranks, or a typed unavailable result. Known
+   answers report recall@k without changing rank order.
 
 Tests cross these interfaces and avoid assertions against private graph nodes, SQL layout, or internal helper calls.

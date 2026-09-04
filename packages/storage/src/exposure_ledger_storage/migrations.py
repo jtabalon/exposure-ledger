@@ -657,6 +657,93 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                 CHECK (relationship IN ('supports', 'contradicts', 'contextual'));
         """,
     ),
+    (
+        13,
+        """
+        CREATE EXTENSION IF NOT EXISTS vector;
+
+        ALTER TABLE retrieval_configurations
+            ADD COLUMN fusion_algorithm text NOT NULL DEFAULT 'none',
+            ADD COLUMN rrf_rank_constant integer NOT NULL DEFAULT 60
+                CHECK (rrf_rank_constant > 0),
+            ADD COLUMN full_text_candidate_limit integer NOT NULL DEFAULT 100
+                CHECK (full_text_candidate_limit > 0),
+            ADD COLUMN vector_candidate_limit integer NOT NULL DEFAULT 100
+                CHECK (vector_candidate_limit > 0);
+
+        INSERT INTO retrieval_configurations (
+            version, text_search_configuration, ranking_algorithm,
+            passage_construction_version, fusion_algorithm, rrf_rank_constant,
+            full_text_candidate_limit, vector_candidate_limit
+        ) VALUES (
+            'postgres-hybrid-rrf-v1', 'simple', 'ts_rank_cd-32',
+            'source-aware-passage-v1', 'reciprocal-rank-fusion-v1', 60, 100, 100
+        );
+
+        CREATE TABLE embedding_spaces (
+            id uuid PRIMARY KEY,
+            identity_key text NOT NULL UNIQUE CHECK (identity_key LIKE 'sha256:%'),
+            provider text NOT NULL,
+            model_artifact text NOT NULL,
+            artifact_digest text NOT NULL CHECK (artifact_digest LIKE 'sha256:%'),
+            dimensions integer NOT NULL CHECK (dimensions > 0),
+            retrieval_instruction text NOT NULL,
+            normalizer text NOT NULL,
+            passage_construction_version text NOT NULL,
+            UNIQUE (
+                provider, model_artifact, artifact_digest, dimensions,
+                retrieval_instruction, normalizer, passage_construction_version
+            )
+        );
+
+        CREATE TABLE passage_embeddings (
+            passage_id uuid NOT NULL REFERENCES evidence_passages(id) ON DELETE RESTRICT,
+            embedding_space_id uuid NOT NULL REFERENCES embedding_spaces(id) ON DELETE RESTRICT,
+            representation vector NOT NULL,
+            PRIMARY KEY (passage_id, embedding_space_id)
+        );
+
+        CREATE INDEX passage_embeddings_space_idx
+            ON passage_embeddings (embedding_space_id, passage_id);
+
+        CREATE FUNCTION validate_embedding_dimensions()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            expected_dimensions integer;
+        BEGIN
+            SELECT dimensions INTO expected_dimensions
+            FROM embedding_spaces WHERE id = NEW.embedding_space_id;
+            IF vector_dims(NEW.representation) <> expected_dimensions THEN
+                RAISE EXCEPTION 'Representation dimensions do not match the Embedding Space';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER passage_embeddings_validate_dimensions
+        BEFORE INSERT ON passage_embeddings
+        FOR EACH ROW EXECUTE FUNCTION validate_embedding_dimensions();
+
+        CREATE FUNCTION reject_embedding_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Embedding Spaces and representations are immutable';
+        END;
+        $$;
+
+        CREATE TRIGGER embedding_spaces_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON embedding_spaces
+        FOR EACH ROW EXECUTE FUNCTION reject_embedding_mutation();
+
+        CREATE TRIGGER passage_embeddings_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON passage_embeddings
+        FOR EACH ROW EXECUTE FUNCTION reject_embedding_mutation();
+        """,
+    ),
 )
 
 

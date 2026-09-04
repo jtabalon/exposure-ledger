@@ -62,6 +62,11 @@ Local model downloads remain explicit and are not needed for the synthetic Asses
 make models
 ```
 
+`GET /health` reports local embedding readiness. If Ollama is stopped or the configured artifact is
+missing, health is `degraded` and includes the exact local setup command; the application never
+calls Ollama's pull endpoint and never substitutes a hosted provider. `OLLAMA_BASE_URL` must be an
+HTTP loopback URL, and `:cloud` embedding models are rejected.
+
 Create and inspect the tracer Assessment Run through the versioned API:
 
 ```bash
@@ -129,6 +134,20 @@ with unknown dependency provenance contributing no directness or proximity point
 visible in the response. Stable vulnerability aliases and package identity are used as tie-breakers.
 No generation model participates in matching, identity, ranking, or selection.
 
+After evidence capture, the worker records passage representations in PostgreSQL under an immutable
+Embedding Space. Its identity covers the local provider, model artifact and immutable digest,
+dimensions, retrieval instruction, normalizer, and passage-construction version. A changed input
+creates a different space and requires re-embedding; representations are never compared across
+spaces.
+
+Evidence retrieval defaults to `postgres-hybrid-rrf-v1`: metadata filters are applied before both
+PostgreSQL full-text and pgvector ranking, then the two candidate lists are combined with
+deterministic reciprocal-rank fusion (`k=60`). Each result exposes nullable `fullTextRank` and
+`vectorRank`, its `fusedRank`, component scores, and the complete Embedding Space identity. An
+optional repeated `expectedPassageIdentity` query parameter adds a recall@limit report for
+known-answer evaluation without affecting ranking. The legacy `postgres-lexical-v1` configuration
+remains explicitly queryable for comparison.
+
 SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
 
 Every Assessment request is classified by application-owned rules before a run is queued. The
@@ -152,7 +171,10 @@ make test
 make check
 ```
 
-`make test` starts PostgreSQL and creates an isolated database for the API integration test. The real-model evaluation is a separate release gate because hosted CI does not assume access to the pinned local models.
+`make test` starts PostgreSQL and creates isolated databases for API integration tests. Deterministic
+known-answer providers verify fusion, isolation, outage behavior, and recall reporting. A real-model
+evaluation remains a separate release gate because CI does not download or assume access to the
+pinned local artifact.
 
 ## Core documentation
 
