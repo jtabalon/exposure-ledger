@@ -89,3 +89,24 @@ def test_osv_batch_rejects_parsed_records_without_captured_source_content() -> N
             {"results": [{"vulns": [{"id": "PYSEC-2026-50", "affected": []}]}]},
             expected_results=1,
         )
+
+
+def test_osv_adapter_rejects_duplicate_affected_members() -> None:
+    content = (
+        '{"id":"PYSEC-2026-50","affected":[{"package":{"ecosystem":"PyPI",'
+        '"name":"wrong"}}],"affected":[{"package":{"ecosystem":"PyPI",'
+        '"name":"demo-pkg"}}]}'
+    )
+    payload = {
+        "id": "PYSEC-2026-50",
+        "affected": [{"package": {"ecosystem": "PyPI", "name": "demo-pkg"}}],
+    }
+
+    with pytest.raises(OsvResponseRejected, match="repeats the 'affected' member"):
+        OsvSourceAdapter().capture(
+            payload,
+            capture=CapturedSourcePayload(
+                content=content,
+                captured_at=datetime(2026, 9, 3, tzinfo=UTC),
+            ),
+        )

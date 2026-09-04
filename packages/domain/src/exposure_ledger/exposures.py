@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -59,12 +59,19 @@ class OsvAffectedPackage:
 
 
 @dataclass(frozen=True, slots=True)
+class ExposureEvidence:
+    record_identity: str
+    passage_identities: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class OsvVulnerability:
     identifier: str
     aliases: tuple[str, ...]
     severity: str | None
     affected: tuple[OsvAffectedPackage, ...]
     evidence_identity: str
+    query_evidence: tuple[ExposureEvidence, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +87,9 @@ class OsvBatchResponse:
         expected_results: int,
         adapter: SourceAdapter | None = None,
         captured_payloads: Mapping[str, CapturedSourcePayload] | None = None,
+        additional_evidence_records: Sequence[EvidenceRecord] = (),
+        query_evidence_by_vulnerability: Mapping[tuple[int, str], tuple[ExposureEvidence, ...]]
+        | None = None,
     ) -> OsvBatchResponse:
         """Validate and freeze one provider response at the OSV source boundary."""
         results = payload.get("results")
@@ -89,8 +99,8 @@ class OsvBatchResponse:
             raise OsvResponseRejected("OSV batch response must align with the requested packages")
         evidence_adapter = adapter or OsvSourceAdapter()
         captured_results: list[tuple[OsvVulnerability, ...]] = []
-        records: dict[str, EvidenceRecord] = {}
-        for result in results:
+        records = {record.identity: record for record in additional_evidence_records}
+        for result_index, result in enumerate(results):
             vulnerabilities = _raw_osv_vulnerabilities(result)
             captured_vulnerabilities: list[OsvVulnerability] = []
             for vulnerability in vulnerabilities:
@@ -110,7 +120,15 @@ class OsvBatchResponse:
                 )
                 records.setdefault(evidence.identity, evidence)
                 captured_vulnerabilities.append(
-                    _capture_osv_vulnerability(vulnerability, evidence=evidence)
+                    _capture_osv_vulnerability(
+                        vulnerability,
+                        evidence=evidence,
+                        query_evidence=(
+                            query_evidence_by_vulnerability.get((result_index, str(identifier)), ())
+                            if query_evidence_by_vulnerability is not None
+                            else ()
+                        ),
+                    )
                 )
             captured_results.append(tuple(captured_vulnerabilities))
         return cls(
@@ -131,8 +149,6 @@ class OsvSourceAdapter:
         identifier = payload.get("id")
         if not isinstance(identifier, str) or not identifier.strip():
             raise OsvResponseRejected("Each OSV vulnerability must have an identifier")
-        if capture.captured_at.tzinfo is None or capture.captured_at.utcoffset() is None:
-            raise OsvResponseRejected("Evidence capture time must include a timezone")
         aliases = payload.get("aliases", [])
         if not isinstance(aliases, Sequence) or isinstance(aliases, (str, bytes)):
             raise OsvResponseRejected("OSV vulnerability aliases must be an array")
@@ -148,45 +164,87 @@ class OsvSourceAdapter:
                 }
             )
         )
-        captured_content = capture.content
-        try:
-            parsed_content = json.loads(captured_content)
-        except json.JSONDecodeError as error:
-            raise OsvResponseRejected("Captured OSV content must be valid JSON") from error
-        if parsed_content != payload:
-            raise OsvResponseRejected("Captured OSV content does not match its parsed payload")
-        content_digest = f"sha256:{hashlib.sha256(captured_content.encode()).hexdigest()}"
+        captured_content, content_digest, captured_at = _validated_capture(payload, capture)
         source = Source(
             identity="osv",
             authority="Open Source Vulnerabilities",
             location=f"https://api.osv.dev/v1/vulns/{quote(identifier, safe='')}",
         )
-        identity_material = "\n".join(
-            (source.identity, source.location, identifier, content_digest)
-        )
-        evidence_identity = f"sha256:{hashlib.sha256(identity_material.encode()).hexdigest()}"
+        evidence_identity = _evidence_identity(source, identifier, content_digest)
         affected = payload.get("affected", [])
         if not isinstance(affected, Sequence) or isinstance(affected, (str, bytes)):
             raise OsvResponseRejected("OSV affected packages must be an array")
         if not all(isinstance(item, Mapping) for item in affected):
             raise OsvResponseRejected("Each OSV affected package must be an object")
-        passage_contents = _affected_content_slices(captured_content)
+        passage_contents = _top_level_array_item_slices(captured_content, "affected")
         if len(passage_contents) != len(affected):
             raise OsvResponseRejected("Captured OSV affected passages do not match the payload")
         passages = tuple(
-            _evidence_passage(evidence_identity, index, passage_content)
+            _evidence_passage(
+                evidence_identity,
+                kind="affected",
+                selector=f"/affected/{index}",
+                content=passage_content,
+            )
             for index, passage_content in enumerate(passage_contents)
         )
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
-            captured_at=capture.captured_at.astimezone(UTC),
+            captured_at=captured_at,
             content_digest=content_digest,
             attribution="Open Source Vulnerabilities (OSV)",
             aliases=normalized_aliases,
             payload_identity=identifier,
             content=captured_content,
             passages=passages,
+        )
+
+
+class OsvQueryBatchSourceAdapter:
+    """Capture one OSV query-batch page and its package-aligned result passages."""
+
+    def __init__(self, *, payload_identity: str) -> None:
+        self._payload_identity = payload_identity
+
+    def capture(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        capture: CapturedSourcePayload,
+    ) -> EvidenceRecord:
+        captured_content, content_digest, captured_at = _validated_capture(payload, capture)
+        results = payload.get("results")
+        if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+            raise OsvResponseRejected("OSV batch response must contain a results array")
+        passage_contents = _top_level_array_item_slices(captured_content, "results")
+        if len(passage_contents) != len(results):
+            raise OsvResponseRejected("Captured OSV query passages do not match the payload")
+        source = Source(
+            identity="osv",
+            authority="Open Source Vulnerabilities",
+            location="https://api.osv.dev/v1/querybatch",
+        )
+        evidence_identity = _evidence_identity(source, self._payload_identity, content_digest)
+        aliases = tuple(sorted(_batch_vulnerability_identifiers(results)))
+        return EvidenceRecord(
+            identity=evidence_identity,
+            source=source,
+            captured_at=captured_at,
+            content_digest=content_digest,
+            attribution="Open Source Vulnerabilities (OSV)",
+            aliases=aliases,
+            payload_identity=self._payload_identity,
+            content=captured_content,
+            passages=tuple(
+                _evidence_passage(
+                    evidence_identity,
+                    kind="query_result",
+                    selector=f"/results/{index}",
+                    content=passage_content,
+                )
+                for index, passage_content in enumerate(passage_contents)
+            ),
         )
 
 
@@ -215,12 +273,6 @@ class ExposureRanking:
     dependency_depth: int | None
     fixed_version_available: bool
     score: int
-
-
-@dataclass(frozen=True, slots=True)
-class ExposureEvidence:
-    record_identity: str
-    passage_identities: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +326,12 @@ class ExposureDiscovery:
             raise OsvResponseRejected("OSV batch response must align with the requested packages")
 
         raw_candidates: list[
-            tuple[PackageInstance, tuple[str, ...], ExposureRanking, ExposureEvidence]
+            tuple[
+                PackageInstance,
+                tuple[str, ...],
+                ExposureRanking,
+                tuple[ExposureEvidence, ...],
+            ]
         ] = []
         for package, vulnerabilities in zip(packages, response.results, strict=True):
             for vulnerability in vulnerabilities:
@@ -291,11 +348,14 @@ class ExposureDiscovery:
                         package,
                         aliases,
                         _ranking(vulnerability, package),
-                        ExposureEvidence(
-                            record_identity=vulnerability.evidence_identity,
-                            passage_identities=tuple(
-                                item.evidence_passage_identity for item in matching_affected
+                        (
+                            ExposureEvidence(
+                                record_identity=vulnerability.evidence_identity,
+                                passage_identities=tuple(
+                                    item.evidence_passage_identity for item in matching_affected
+                                ),
                             ),
+                            *vulnerability.query_evidence,
                         ),
                     )
                 )
@@ -306,7 +366,7 @@ class ExposureDiscovery:
             tuple[PackageInstance, str],
             tuple[PackageInstance, VulnerabilityRecord, ExposureRanking, dict[str, set[str]]],
         ] = {}
-        for package, aliases, ranking, evidence in raw_candidates:
+        for package, aliases, ranking, evidence_references in raw_candidates:
             merged_aliases = coalesced[frozenset(aliases)]
             identity = _vulnerability_identity(merged_aliases)
             record = records.setdefault(
@@ -316,9 +376,10 @@ class ExposureDiscovery:
             exposure_key = (package, identity)
             previous = candidate_by_exposure.get(exposure_key)
             evidence_by_record = previous[3] if previous is not None else {}
-            evidence_by_record.setdefault(evidence.record_identity, set()).update(
-                evidence.passage_identities
-            )
+            for evidence in evidence_references:
+                evidence_by_record.setdefault(evidence.record_identity, set()).update(
+                    evidence.passage_identities
+                )
             selected_ranking = (
                 ranking if previous is None or ranking.score > previous[2].score else previous[2]
             )
@@ -407,6 +468,7 @@ def _capture_osv_vulnerability(
     value: object,
     *,
     evidence: EvidenceRecord,
+    query_evidence: tuple[ExposureEvidence, ...],
 ) -> OsvVulnerability:
     if not isinstance(value, Mapping):
         raise OsvResponseRejected("Each OSV vulnerability must be an object")
@@ -432,6 +494,7 @@ def _capture_osv_vulnerability(
             for index, item in enumerate(affected)
         ),
         evidence_identity=evidence.identity,
+        query_evidence=query_evidence,
     )
 
 
@@ -462,19 +525,21 @@ def _capture_osv_affected(value: object, *, passage: EvidencePassage) -> OsvAffe
 
 def _evidence_passage(
     evidence_identity: str,
-    index: int,
+    *,
+    kind: str,
+    selector: str,
     content: str,
 ) -> EvidencePassage:
-    identity_material = f"{evidence_identity}\naffected\n{index}\n{content}"
+    identity_material = f"{evidence_identity}\n{kind}\n{selector}\n{content}"
     return EvidencePassage(
         identity=f"sha256:{hashlib.sha256(identity_material.encode()).hexdigest()}",
-        kind="affected",
-        selector=f"/affected/{index}",
+        kind=kind,
+        selector=selector,
         content=content,
     )
 
 
-def _affected_content_slices(content: str) -> tuple[str, ...]:
+def _top_level_array_item_slices(content: str, member: str) -> tuple[str, ...]:
     decoder = json.JSONDecoder()
     index = _skip_json_whitespace(content, 0)
     if index >= len(content) or content[index] != "{":
@@ -498,7 +563,7 @@ def _affected_content_slices(content: str) -> tuple[str, ...]:
             _, value_end = decoder.raw_decode(content, value_start)
         except json.JSONDecodeError as error:
             raise OsvResponseRejected("Captured OSV content has an invalid object value") from error
-        if key == "affected":
+        if key == member:
             return _json_array_item_slices(content, value_start)
         index = _skip_json_whitespace(content, value_end)
         if index >= len(content) or content[index] not in {",", "}"}:
@@ -538,6 +603,54 @@ def _skip_json_whitespace(content: str, index: int) -> int:
     while index < len(content) and content[index] in " \t\r\n":
         index += 1
     return index
+
+
+def _validated_capture(
+    payload: Mapping[str, Any], capture: CapturedSourcePayload
+) -> tuple[str, str, datetime]:
+    if capture.captured_at.tzinfo is None or capture.captured_at.utcoffset() is None:
+        raise OsvResponseRejected("Evidence capture time must include a timezone")
+    try:
+        parsed_content = json.loads(capture.content, object_pairs_hook=_unique_json_object)
+    except json.JSONDecodeError as error:
+        raise OsvResponseRejected("Captured OSV content must be valid JSON") from error
+    if parsed_content != payload:
+        raise OsvResponseRejected("Captured OSV content does not match its parsed payload")
+    content_digest = f"sha256:{hashlib.sha256(capture.content.encode()).hexdigest()}"
+    return capture.content, content_digest, capture.captured_at.astimezone(UTC)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise OsvResponseRejected(f"Captured OSV content repeats the {key!r} member")
+        result[key] = value
+    return result
+
+
+def _evidence_identity(source: Source, payload_identity: str, content_digest: str) -> str:
+    identity_material = "\n".join(
+        (source.identity, source.location, payload_identity, content_digest)
+    )
+    return f"sha256:{hashlib.sha256(identity_material.encode()).hexdigest()}"
+
+
+def _batch_vulnerability_identifiers(results: Sequence[object]) -> set[str]:
+    identifiers: set[str] = set()
+    for result in results:
+        if not isinstance(result, Mapping):
+            raise OsvResponseRejected("Each OSV batch result must be an object")
+        vulnerabilities = result.get("vulns", [])
+        if not isinstance(vulnerabilities, Sequence) or isinstance(vulnerabilities, (str, bytes)):
+            raise OsvResponseRejected("OSV vulnerabilities must be an array")
+        for vulnerability in vulnerabilities:
+            if not isinstance(vulnerability, Mapping):
+                raise OsvResponseRejected("Each OSV vulnerability must be an object")
+            identifier = vulnerability.get("id")
+            if isinstance(identifier, str) and identifier:
+                identifiers.add(identifier.upper())
+    return identifiers
 
 
 def _capture_osv_range(value: object) -> OsvRange:

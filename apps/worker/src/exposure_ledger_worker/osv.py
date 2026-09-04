@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import socket
@@ -15,8 +16,11 @@ import httpcore
 import httpx
 from exposure_ledger import (
     CapturedSourcePayload,
+    EvidenceRecord,
+    ExposureEvidence,
     OsvBatchResponse,
     OsvPackageQuery,
+    OsvQueryBatchSourceAdapter,
     OsvSourceUnavailable,
 )
 
@@ -56,6 +60,8 @@ class OsvApiSource:
             _remaining_time(deadline, self._clock)
             transport = _PinnedOsvTransport(address)
         vulnerability_ids: list[set[str]] = [set() for _ in queries]
+        query_evidence_records: list[EvidenceRecord] = []
+        query_evidence_by_vulnerability: dict[tuple[int, str], list[ExposureEvidence]] = {}
         pending: list[tuple[int, OsvPackageQuery, str | None]] = [
             (index, query, None) for index, query in enumerate(queries)
         ]
@@ -70,23 +76,25 @@ class OsvApiSource:
                 for _ in range(_MAX_PAGES):
                     if not pending:
                         break
-                    response_payload, _ = _request_json(
+                    request_payload: dict[str, object] = {
+                        "queries": [
+                            {
+                                "package": {"ecosystem": "PyPI", "name": query.name},
+                                "version": query.version,
+                                **({"page_token": token} if token else {}),
+                            }
+                            for _, query, token in pending
+                        ]
+                    }
+                    response_payload, captured_content = _request_json(
                         client,
                         "POST",
                         f"{_OSV_ORIGIN}/v1/querybatch",
-                        json_body={
-                            "queries": [
-                                {
-                                    "package": {"ecosystem": "PyPI", "name": query.name},
-                                    "version": query.version,
-                                    **({"page_token": token} if token else {}),
-                                }
-                                for _, query, token in pending
-                            ]
-                        },
+                        json_body=request_payload,
                         deadline=deadline,
                         clock=self._clock,
                     )
+                    captured_at = self._capture_clock()
                     page_results = response_payload.get("results")
                     if not isinstance(page_results, Sequence) or isinstance(
                         page_results, (str, bytes)
@@ -94,8 +102,28 @@ class OsvApiSource:
                         raise OsvSourceUnavailable("OSV returned an invalid batch response.")
                     if len(page_results) != len(pending):
                         raise OsvSourceUnavailable("OSV returned a misaligned batch response.")
+                    request_digest = hashlib.sha256(
+                        json.dumps(
+                            request_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode()
+                    ).hexdigest()
+                    query_evidence = OsvQueryBatchSourceAdapter(
+                        payload_identity=f"querybatch:sha256:{request_digest}"
+                    ).capture(
+                        response_payload,
+                        capture=CapturedSourcePayload(
+                            content=captured_content,
+                            captured_at=captured_at,
+                        ),
+                    )
+                    query_evidence_records.append(query_evidence)
                     next_pending: list[tuple[int, OsvPackageQuery, str | None]] = []
-                    for (index, query, _), result in zip(pending, page_results, strict=True):
+                    for page_index, ((index, query, _), result) in enumerate(
+                        zip(pending, page_results, strict=True)
+                    ):
                         if not isinstance(result, Mapping):
                             raise OsvSourceUnavailable("OSV returned an invalid query result.")
                         vulns = result.get("vulns", [])
@@ -108,6 +136,16 @@ class OsvApiSource:
                                 identifier = vulnerability.get("id")
                                 if isinstance(identifier, str) and identifier:
                                     vulnerability_ids[index].add(identifier)
+                                    query_evidence_by_vulnerability.setdefault(
+                                        (index, identifier), []
+                                    ).append(
+                                        ExposureEvidence(
+                                            record_identity=query_evidence.identity,
+                                            passage_identities=(
+                                                query_evidence.passages[page_index].identity,
+                                            ),
+                                        )
+                                    )
                         token = result.get("next_page_token")
                         if isinstance(token, str) and token:
                             next_pending.append((index, query, token))
@@ -152,6 +190,10 @@ class OsvApiSource:
             payload,
             expected_results=len(queries),
             captured_payloads=captured_payloads,
+            additional_evidence_records=tuple(query_evidence_records),
+            query_evidence_by_vulnerability={
+                key: tuple(value) for key, value in query_evidence_by_vulnerability.items()
+            },
         )
 
 
@@ -185,12 +227,21 @@ def _request_json(
                 raise OsvSourceUnavailable("The public OSV response exceeds the size limit.")
     try:
         captured_content = content.decode("utf-8")
-        payload = json.loads(captured_content)
+        payload = json.loads(captured_content, object_pairs_hook=_unique_json_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise OsvSourceUnavailable("The public OSV API returned invalid JSON.") from error
     if not isinstance(payload, dict):
         raise OsvSourceUnavailable("The public OSV API returned an invalid JSON object.")
     return payload, captured_content
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise OsvSourceUnavailable(f"OSV returned JSON with a duplicate {key!r} member.")
+        result[key] = value
+    return result
 
 
 def _remaining_time(deadline: float, clock: Callable[[], float]) -> float:
