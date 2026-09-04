@@ -106,7 +106,10 @@ export function InvestigationWorkbench({
     { label: "Evaluations", icon: FlaskConical, count: "v0.3" },
   ]
   const relatedEvidence = useMemo(
-    () => evidenceForClaim(investigation.evidence, selectedClaimId),
+    () =>
+      evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
+        (left, right) => left.fusedRank - right.fusedRank,
+      ),
     [investigation.evidence, selectedClaimId],
   )
 

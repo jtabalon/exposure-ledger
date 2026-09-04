@@ -12,6 +12,9 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE retrieval_query_embeddings")
+    connection.execute("DROP TABLE embedding_provider_observations")
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 14")
     connection.execute("DROP TABLE passage_embeddings")
     connection.execute("DROP TABLE embedding_spaces")
     connection.execute("DROP FUNCTION validate_embedding_dimensions")
@@ -434,5 +437,6 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         11,
         12,
         13,
+        14,
     ]
     assert enforcement_point == ("enforcement_point",)

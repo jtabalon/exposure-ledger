@@ -40,8 +40,6 @@ from exposure_ledger_storage import (
     AssetSnapshotRecord,
     AssetSnapshotRepository,
     EmbeddingIndexUnavailable,
-    EmbeddingProvider,
-    EmbeddingProviderUnavailable,
     EmbeddingReadiness,
     EmbeddingSpaceNotCurrent,
     EvidencePassageRecord,
@@ -50,7 +48,6 @@ from exposure_ledger_storage import (
     ExposureRecord,
     ExposureRepository,
     ExposureRetrievalScopeNotFound,
-    OllamaEmbeddingProvider,
     PackageInstanceRecord,
     PolicyDecisionRecord,
     RetrievalConfigurationNotCurrent,
@@ -63,6 +60,7 @@ from exposure_ledger_storage import (
     RetrievedPassageIdentity,
     RetrievedSource,
     SourcePolicy,
+    build_exposure_retrieval_query,
 )
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -400,6 +398,7 @@ class ExposureResponse(ApiModel):
     kev: KevSignalResponse
     epss: EpssSignalResponse
     evidence_records: list[EvidenceRecordResponse]
+    retrieval_query: str
 
     @classmethod
     def from_record(cls, exposure: ExposureRecord) -> "ExposureResponse":
@@ -431,6 +430,11 @@ class ExposureResponse(ApiModel):
             evidence_records=[
                 EvidenceRecordResponse.from_record(item) for item in exposure.evidence_records
             ],
+            retrieval_query=build_exposure_retrieval_query(
+                exposure.package.name,
+                exposure.package.version,
+                exposure.vulnerability_record.aliases,
+            ),
         )
 
 
@@ -624,23 +628,12 @@ def _encode_sse(event: AssessmentEvent) -> str:
     )
 
 
-def create_app(
-    settings: Settings | None = None,
-    *,
-    embedding_provider: EmbeddingProvider | None = None,
-) -> FastAPI:
+def create_app(settings: Settings | None = None) -> FastAPI:
     configured_settings = settings or Settings()
     repository = AssessmentRunRepository(configured_settings.database_url)
     snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
     exposure_repository = ExposureRepository(configured_settings.database_url)
-    configured_embedding_provider = embedding_provider or OllamaEmbeddingProvider(
-        base_url=configured_settings.ollama_base_url,
-        model_artifact=configured_settings.embedding_model,
-    )
-    evidence_retriever = EvidenceRetriever(
-        configured_settings.database_url,
-        embedding_provider=configured_embedding_provider,
-    )
+    evidence_retriever = EvidenceRetriever(configured_settings.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -724,7 +717,7 @@ def create_app(
 
     @application.get("/health", response_model=HealthResponse, tags=["operations"])
     def health() -> HealthResponse:
-        embedding_readiness = configured_embedding_provider.check_readiness()
+        embedding_readiness = evidence_retriever.embedding_readiness()
         return HealthResponse(
             status="ok" if embedding_readiness.status == "ready" else "degraded",
             service="exposure-ledger-api",
@@ -981,26 +974,12 @@ def create_app(
                 },
             ) from error
         except EmbeddingSpaceNotCurrent as error:
-            current = configured_embedding_provider.check_readiness().space
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
                     "code": "embedding_space_not_current",
                     "message": str(error),
-                    "currentEmbeddingSpaceIdentity": (
-                        current.identity if current is not None else None
-                    ),
-                },
-            ) from error
-        except EmbeddingProviderUnavailable as error:
-            readiness = EmbeddingReadinessResponse.from_record(error.readiness)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": error.readiness.code,
-                    "message": error.readiness.message,
-                    "setup": error.readiness.setup,
-                    "embeddings": readiness.model_dump(mode="json", by_alias=True),
+                    "currentEmbeddingSpaceIdentity": None,
                 },
             ) from error
         except EmbeddingIndexUnavailable as error:

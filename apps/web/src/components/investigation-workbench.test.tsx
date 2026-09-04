@@ -87,5 +87,8 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.retrievalInstruction)
     expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.normalizer)
     expect(html).toContain(demoInvestigation.retrieval.embeddingSpace.passageConstructionVersion)
+    expect(html.indexOf("sha256:21df…0c91")).toBeLessThan(
+      html.indexOf("sha256:65bc…8a20"),
+    )
   })
 })

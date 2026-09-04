@@ -77,6 +77,7 @@ export type Exposure = {
   kev: KevSignal
   epss: EpssSignal
   evidenceRecords: EvidenceRecord[]
+  retrievalQuery?: string
 }
 
 export type ExposureCollection = {

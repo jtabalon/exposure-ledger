@@ -34,6 +34,7 @@ from exposure_ledger_storage.local_embeddings import (
 )
 from exposure_ledger_storage.migrations import apply_migrations
 from exposure_ledger_storage.retrieval import (
+    EMBEDDING_READINESS_MAX_AGE_SECONDS,
     HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
     LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
     SOURCE_POLICY_VERSION,
@@ -52,6 +53,7 @@ from exposure_ledger_storage.retrieval import (
     RetrievedPassageIdentity,
     RetrievedSource,
     SourcePolicy,
+    build_exposure_retrieval_query,
     evaluate_retrieval_recall,
 )
 
@@ -70,6 +72,7 @@ __all__ = [
     "EvidenceRecordRecord",
     "EvidenceRetriever",
     "EmbeddingIndexUnavailable",
+    "EMBEDDING_READINESS_MAX_AGE_SECONDS",
     "EmbeddingProvider",
     "EmbeddingProviderUnavailable",
     "EmbeddingReadiness",
@@ -96,6 +99,7 @@ __all__ = [
     "SourcePolicy",
     "VulnerabilityRecordRecord",
     "apply_migrations",
+    "build_exposure_retrieval_query",
     "evaluate_retrieval_recall",
     "normalize_database_url",
 ]

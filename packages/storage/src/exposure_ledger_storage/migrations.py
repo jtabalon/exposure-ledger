@@ -744,6 +744,53 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         FOR EACH ROW EXECUTE FUNCTION reject_embedding_mutation();
         """,
     ),
+    (
+        14,
+        """
+        ALTER TABLE policy_decisions
+            DROP CONSTRAINT policy_decisions_enforcement_point_check,
+            ADD CONSTRAINT policy_decisions_enforcement_point_check
+                CHECK (enforcement_point IN ('request', 'tool_call', 'retrieved_content'));
+
+        CREATE TABLE embedding_provider_observations (
+            singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+            observed_at timestamptz NOT NULL DEFAULT now(),
+            status text NOT NULL CHECK (status IN ('ready', 'unavailable')),
+            code text,
+            message text NOT NULL,
+            setup text,
+            embedding_space_id uuid REFERENCES embedding_spaces(id) ON DELETE RESTRICT,
+            CHECK (
+                (status = 'ready' AND code IS NULL AND setup IS NULL
+                    AND embedding_space_id IS NOT NULL)
+                OR
+                (status = 'unavailable' AND code IS NOT NULL
+                    AND embedding_space_id IS NULL)
+            )
+        );
+
+        CREATE TABLE retrieval_query_embeddings (
+            assessment_run_id uuid NOT NULL
+                REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
+            query_digest text NOT NULL CHECK (query_digest LIKE 'sha256:%'),
+            query_text text NOT NULL,
+            embedding_space_id uuid NOT NULL REFERENCES embedding_spaces(id) ON DELETE RESTRICT,
+            representation vector NOT NULL,
+            PRIMARY KEY (
+                assessment_run_id, exposure_id, query_digest, embedding_space_id
+            )
+        );
+
+        CREATE TRIGGER retrieval_query_embeddings_validate_dimensions
+        BEFORE INSERT ON retrieval_query_embeddings
+        FOR EACH ROW EXECUTE FUNCTION validate_embedding_dimensions();
+
+        CREATE TRIGGER retrieval_query_embeddings_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON retrieval_query_embeddings
+        FOR EACH ROW EXECUTE FUNCTION reject_embedding_mutation();
+        """,
+    ),
 )
 
 

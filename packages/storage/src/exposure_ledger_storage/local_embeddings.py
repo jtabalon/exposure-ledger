@@ -58,7 +58,7 @@ class OllamaEmbeddingProvider:
             raise ValueError("OLLAMA_BASE_URL must be an unauthenticated HTTP loopback URL")
         if not model_artifact.strip():
             raise ValueError("EMBEDDING_MODEL must not be blank")
-        if model_artifact.casefold().endswith(":cloud"):
+        if re.search(r"(?:^|[:_-])cloud$", model_artifact.casefold()) is not None:
             raise ValueError("EMBEDDING_MODEL must not select an Ollama cloud model")
         self._base_url = base_url.rstrip("/")
         self._model_artifact = model_artifact
@@ -88,6 +88,23 @@ class OllamaEmbeddingProvider:
                     setup=f"Run `ollama pull {self._model_artifact}`, then retry.",
                     space=None,
                 )
+            if (
+                installed.get("remote_model") is not None
+                or installed.get("remote_host") is not None
+            ):
+                return EmbeddingReadiness(
+                    status="unavailable",
+                    code="embedding_cloud_model_rejected",
+                    message=(
+                        f"Configured artifact {self._model_artifact} is remote; "
+                        "only an installed local artifact is permitted."
+                    ),
+                    setup=(
+                        "Configure a non-cloud Ollama embedding artifact, run `make models`, "
+                        "then retry."
+                    ),
+                    space=None,
+                )
             digest = installed.get("digest")
             if not isinstance(digest, str) or _HEX_DIGEST.fullmatch(digest) is None:
                 return self._invalid_response("Ollama returned an invalid model artifact digest.")
@@ -95,6 +112,20 @@ class OllamaEmbeddingProvider:
             details = self._request_json(
                 "POST", "/api/show", json={"model": self._model_artifact, "verbose": False}
             )
+            if details.get("remote_model") is not None or details.get("remote_host") is not None:
+                return EmbeddingReadiness(
+                    status="unavailable",
+                    code="embedding_cloud_model_rejected",
+                    message=(
+                        f"Configured artifact {self._model_artifact} resolves remotely; "
+                        "only an installed local artifact is permitted."
+                    ),
+                    setup=(
+                        "Configure a non-cloud Ollama embedding artifact, run `make models`, "
+                        "then retry."
+                    ),
+                    space=None,
+                )
             capabilities = details.get("capabilities")
             if not isinstance(capabilities, list) or "embedding" not in capabilities:
                 return self._invalid_response(
@@ -189,10 +220,30 @@ class OllamaEmbeddingProvider:
                 raise ValueError("Ollama returned the wrong number of embeddings")
             if any(not isinstance(vector, list) for vector in raw_embeddings):
                 raise ValueError("Ollama returned an invalid embedding collection")
-            return tuple(
+            normalized = tuple(
                 self._normalize(cast(list[object], vector), dimensions=space.dimensions)
                 for vector in raw_embeddings
             )
+            final_space = self.require_space()
+            if final_space.identity != space.identity:
+                raise EmbeddingProviderUnavailable(
+                    EmbeddingReadiness(
+                        status="unavailable",
+                        code="embedding_artifact_changed",
+                        message=(
+                            "The local embedding artifact changed during embedding generation; "
+                            "the generated representations were discarded."
+                        ),
+                        setup=(
+                            "Restore the artifact pinned by the requested Embedding Space or "
+                            "retry in a new space."
+                        ),
+                        space=None,
+                    )
+                )
+            return normalized
+        except EmbeddingProviderUnavailable:
+            raise
         except (httpx.HTTPError, ValueError) as error:
             raise EmbeddingProviderUnavailable(
                 EmbeddingReadiness(

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -12,11 +13,15 @@ import psycopg
 from exposure_ledger import EmbeddingSpace
 from psycopg.rows import dict_row
 
-from exposure_ledger_storage.local_embeddings import EmbeddingReadiness
+from exposure_ledger_storage.local_embeddings import (
+    EmbeddingProviderUnavailable,
+    EmbeddingReadiness,
+)
 
 LEXICAL_RETRIEVAL_CONFIGURATION_VERSION = "postgres-lexical-v1"
 HYBRID_RETRIEVAL_CONFIGURATION_VERSION = "postgres-hybrid-rrf-v1"
 SOURCE_POLICY_VERSION = "explicit-source-allowlist-v1"
+EMBEDDING_READINESS_MAX_AGE_SECONDS = 30
 _EXPECTED_CONFIGURATIONS: dict[str, dict[str, object]] = {
     LEXICAL_RETRIEVAL_CONFIGURATION_VERSION: {
         "text_search_configuration": "simple",
@@ -65,6 +70,17 @@ class EmbeddingProvider(Protocol):
     def embed_passages(
         self, texts: tuple[str, ...], space: EmbeddingSpace
     ) -> tuple[tuple[float, ...], ...]: ...
+
+
+def build_exposure_retrieval_query(
+    package_name: str, package_version: str, vulnerability_aliases: tuple[str, ...]
+) -> str:
+    """Build the versioned default semantic query generated inside the worker boundary."""
+    aliases = " ".join(sorted(vulnerability_aliases))
+    return (
+        f"package {package_name} version {package_version} vulnerabilities {aliases} "
+        "affected fixed upgrade"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,13 +217,24 @@ class EvidenceRetriever:
         if not available:
             raise RuntimeError("The current hybrid retrieval configuration is unavailable.")
 
-    def index_assessment(self, assessment_run_id: UUID) -> EmbeddingSpace:
+    def index_assessment(
+        self,
+        assessment_run_id: UUID,
+        *,
+        space: EmbeddingSpace | None = None,
+    ) -> EmbeddingSpace:
         """Create every missing passage representation for one Assessment Run and one space."""
         if self._embedding_provider is None:
             raise EmbeddingIndexUnavailable("No local embedding provider is configured.")
-        space = self._embedding_provider.require_space()
+        if space is None:
+            readiness = self._embedding_provider.check_readiness()
+            self.record_embedding_readiness(readiness)
+            if readiness.space is None:
+                raise EmbeddingProviderUnavailable(readiness)
+            space = readiness.space
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
             space_id = self._store_space(connection, space)
+            self._require_content_policy(connection, assessment_run_id, space)
             rows = connection.execute(
                 """
                 SELECT DISTINCT evidence_passages.id, evidence_passages.content
@@ -223,33 +250,185 @@ class EvidenceRetriever:
                 """,
                 (space_id, assessment_run_id),
             ).fetchall()
-        if not rows:
-            return space
-
-        representations = self._embedding_provider.embed_passages(
-            tuple(str(row["content"]) for row in rows), space
-        )
-        if len(representations) != len(rows):
-            raise ValueError("Embedding provider returned the wrong number of representations")
-        vectors = tuple(self._validate_vector(vector, space) for vector in representations)
-        with (
-            psycopg.connect(self._database_url) as insert_connection,
-            insert_connection.transaction(),
-            insert_connection.cursor() as cursor,
-        ):
-            cursor.executemany(
+            exposure_rows = connection.execute(
                 """
-                INSERT INTO passage_embeddings (
-                    passage_id, embedding_space_id, representation
-                ) VALUES (%s, %s, %s::vector)
-                ON CONFLICT DO NOTHING
+                SELECT assessment_run_exposures.exposure_id, package_instances.name,
+                       package_instances.version,
+                       array_agg(vulnerability_aliases.identifier
+                                 ORDER BY vulnerability_aliases.identifier) AS aliases
+                FROM assessment_run_exposures
+                JOIN exposures ON exposures.id = assessment_run_exposures.exposure_id
+                JOIN package_instances
+                  ON package_instances.id = exposures.package_instance_id
+                JOIN vulnerability_aliases
+                  ON vulnerability_aliases.vulnerability_record_id =
+                     exposures.vulnerability_record_id
+                WHERE assessment_run_exposures.assessment_run_id = %s
+                GROUP BY assessment_run_exposures.exposure_id,
+                         package_instances.name, package_instances.version
+                ORDER BY assessment_run_exposures.exposure_id
                 """,
-                [
-                    (row["id"], space_id, self._vector_literal(vector))
-                    for row, vector in zip(rows, vectors, strict=True)
-                ],
-            )
+                (assessment_run_id,),
+            ).fetchall()
+            existing_queries = {
+                (UUID(str(row["exposure_id"])), str(row["query_digest"]))
+                for row in connection.execute(
+                    """
+                    SELECT exposure_id, query_digest FROM retrieval_query_embeddings
+                    WHERE assessment_run_id = %s AND embedding_space_id = %s
+                    """,
+                    (assessment_run_id, space_id),
+                ).fetchall()
+            }
+
+        try:
+            if rows:
+                representations = self._embedding_provider.embed_passages(
+                    tuple(str(row["content"]) for row in rows), space
+                )
+                if len(representations) != len(rows):
+                    raise ValueError(
+                        "Embedding provider returned the wrong number of representations"
+                    )
+                vectors = tuple(self._validate_vector(vector, space) for vector in representations)
+                with (
+                    psycopg.connect(self._database_url) as insert_connection,
+                    insert_connection.transaction(),
+                    insert_connection.cursor() as cursor,
+                ):
+                    cursor.executemany(
+                        """
+                        INSERT INTO passage_embeddings (
+                            passage_id, embedding_space_id, representation
+                        ) VALUES (%s, %s, %s::vector)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        [
+                            (row["id"], space_id, self._vector_literal(vector))
+                            for row, vector in zip(rows, vectors, strict=True)
+                        ],
+                    )
+
+            for exposure_row in exposure_rows:
+                query_text = build_exposure_retrieval_query(
+                    str(exposure_row["name"]),
+                    str(exposure_row["version"]),
+                    tuple(str(alias) for alias in exposure_row["aliases"]),
+                )
+                query_digest = self._query_digest(query_text)
+                if (UUID(str(exposure_row["exposure_id"])), query_digest) in existing_queries:
+                    continue
+                query_vector = self._validate_vector(
+                    self._embedding_provider.embed_query(query_text, space), space
+                )
+                with psycopg.connect(self._database_url) as query_connection:
+                    query_connection.execute(
+                        """
+                        INSERT INTO retrieval_query_embeddings (
+                            assessment_run_id, exposure_id, query_digest, query_text,
+                            embedding_space_id, representation
+                        ) VALUES (%s, %s, %s, %s, %s, %s::vector)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            assessment_run_id,
+                            exposure_row["exposure_id"],
+                            query_digest,
+                            query_text,
+                            space_id,
+                            self._vector_literal(query_vector),
+                        ),
+                    )
+                    query_connection.commit()
+        except EmbeddingProviderUnavailable as error:
+            self.record_embedding_readiness(error.readiness)
+            raise
         return space
+
+    def record_embedding_readiness(self, readiness: EmbeddingReadiness) -> None:
+        """Record the worker-owned readiness observation used by API health reporting."""
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            space_id = (
+                self._store_space(connection, readiness.space)
+                if readiness.space is not None
+                else None
+            )
+            connection.execute(
+                """
+                INSERT INTO embedding_provider_observations (
+                    singleton, observed_at, status, code, message, setup, embedding_space_id
+                ) VALUES (true, now(), %s, %s, %s, %s, %s)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    observed_at = EXCLUDED.observed_at,
+                    status = EXCLUDED.status,
+                    code = EXCLUDED.code,
+                    message = EXCLUDED.message,
+                    setup = EXCLUDED.setup,
+                    embedding_space_id = EXCLUDED.embedding_space_id
+                """,
+                (
+                    readiness.status,
+                    readiness.code,
+                    readiness.message,
+                    readiness.setup,
+                    space_id,
+                ),
+            )
+            connection.commit()
+
+    def embedding_readiness(
+        self, *, max_age_seconds: float = EMBEDDING_READINESS_MAX_AGE_SECONDS
+    ) -> EmbeddingReadiness:
+        """Read the latest worker observation without crossing the model trust boundary."""
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                """
+                SELECT observation.observed_at, observation.status, observation.code,
+                       observation.message,
+                       observation.setup, space.provider, space.model_artifact,
+                       space.artifact_digest, space.dimensions, space.retrieval_instruction,
+                       space.normalizer, space.passage_construction_version
+                FROM embedding_provider_observations AS observation
+                LEFT JOIN embedding_spaces AS space
+                  ON space.id = observation.embedding_space_id
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return EmbeddingReadiness(
+                status="unavailable",
+                code="embedding_readiness_not_observed",
+                message="No worker has reported local embedding readiness yet.",
+                setup="Start Ollama locally, run `make models`, then run an Assessment.",
+                space=None,
+            )
+        observed_at = cast(datetime, row["observed_at"])
+        if (datetime.now(UTC) - observed_at).total_seconds() > max_age_seconds:
+            return EmbeddingReadiness(
+                status="unavailable",
+                code="embedding_readiness_stale",
+                message="The worker's local embedding readiness observation is stale.",
+                setup="Check that the worker and Ollama are running, then retry.",
+                space=None,
+            )
+        space = None
+        if row["provider"] is not None:
+            space = EmbeddingSpace(
+                provider=str(row["provider"]),
+                model_artifact=str(row["model_artifact"]),
+                artifact_digest=str(row["artifact_digest"]),
+                dimensions=int(row["dimensions"]),
+                retrieval_instruction=str(row["retrieval_instruction"]),
+                normalizer=str(row["normalizer"]),
+                passage_construction_version=str(row["passage_construction_version"]),
+            )
+        return EmbeddingReadiness(
+            status=cast(Any, row["status"]),
+            code=cast(str | None, row["code"]),
+            message=str(row["message"]),
+            setup=cast(str | None, row["setup"]),
+            space=space,
+        )
 
     def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
         self._validate_query(query)
@@ -265,28 +444,41 @@ class EvidenceRetriever:
                 passages = self._retrieve_full_text(connection, query)
                 return self._result(query, passages, embedding_space=None)
 
-        if self._embedding_provider is None:
-            raise EmbeddingIndexUnavailable(
-                "Hybrid retrieval requires the explicitly configured local embedding provider."
-            )
-        space = self._embedding_provider.require_space()
-        if (
-            query.embedding_space_identity is not None
-            and query.embedding_space_identity != space.identity
-        ):
+        if query.embedding_space_identity is None:
             raise EmbeddingSpaceNotCurrent(
-                "The requested Embedding Space is not the configured local Embedding Space."
+                "Hybrid retrieval requires one explicit Embedding Space identity."
             )
-        vector = self._validate_vector(
-            self._embedding_provider.embed_query(query.text.strip(), space), space
-        )
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
-            stored_space_id = self._stored_space_id(connection, space)
-            if stored_space_id is None:
-                raise EmbeddingIndexUnavailable(
-                    "No passage representations exist in the configured Embedding Space. "
-                    "Run a new Assessment after local embedding setup is ready."
+            stored_space = self._stored_space_by_identity(
+                connection, query.embedding_space_identity
+            )
+            if stored_space is None:
+                raise EmbeddingSpaceNotCurrent(
+                    "The requested Embedding Space is not stored by this installation."
                 )
+            stored_space_id, space = stored_space
+            query_vector_row = connection.execute(
+                """
+                SELECT query_text, representation::text AS representation
+                FROM retrieval_query_embeddings
+                WHERE assessment_run_id = %s AND exposure_id = %s
+                  AND query_digest = %s AND embedding_space_id = %s
+                """,
+                (
+                    query.assessment_run_id,
+                    query.exposure_id,
+                    self._query_digest(query.text.strip()),
+                    stored_space_id,
+                ),
+            ).fetchone()
+            if query_vector_row is None or query_vector_row["query_text"] != query.text.strip():
+                raise EmbeddingIndexUnavailable(
+                    "No worker-generated query representation exists for this query and "
+                    "Embedding Space. Use the exposure's indexed retrieval query."
+                )
+            vector = self._validate_vector(
+                self._parse_vector(str(query_vector_row["representation"])), space
+            )
             self._require_complete_index(connection, query, stored_space_id)
             passages = self._retrieve_hybrid(connection, query, stored_space_id, vector)
         return self._result(query, passages, embedding_space=space)
@@ -605,6 +797,57 @@ class EvidenceRetriever:
         return UUID(str(row["id"]))
 
     @staticmethod
+    def _stored_space_by_identity(
+        connection: psycopg.Connection[dict[str, Any]], identity: str
+    ) -> tuple[UUID, EmbeddingSpace] | None:
+        row = connection.execute(
+            """
+            SELECT id, provider, model_artifact, artifact_digest, dimensions,
+                   retrieval_instruction, normalizer, passage_construction_version
+            FROM embedding_spaces WHERE identity_key = %s
+            """,
+            (identity,),
+        ).fetchone()
+        if row is None:
+            return None
+        return (
+            UUID(str(row["id"])),
+            EmbeddingSpace(
+                provider=str(row["provider"]),
+                model_artifact=str(row["model_artifact"]),
+                artifact_digest=str(row["artifact_digest"]),
+                dimensions=int(row["dimensions"]),
+                retrieval_instruction=str(row["retrieval_instruction"]),
+                normalizer=str(row["normalizer"]),
+                passage_construction_version=str(row["passage_construction_version"]),
+            ),
+        )
+
+    @staticmethod
+    def _require_content_policy(
+        connection: psycopg.Connection[dict[str, Any]],
+        assessment_run_id: UUID,
+        space: EmbeddingSpace,
+    ) -> None:
+        target_scope = f"assessment:{assessment_run_id};embedding-space:{space.identity}"
+        row = connection.execute(
+            """
+            SELECT 1 FROM policy_decisions
+            WHERE assessment_run_id = %s
+              AND enforcement_point = 'retrieved_content'
+              AND target_scope = %s
+              AND result = 'allowed'
+            LIMIT 1
+            """,
+            (assessment_run_id, target_scope),
+        ).fetchone()
+        if row is None:
+            raise EmbeddingIndexUnavailable(
+                "An allowed, target-scoped retrieved-content Policy Decision is required "
+                "before evidence can enter the embedding model."
+            )
+
+    @staticmethod
     def _require_complete_index(
         connection: psycopg.Connection[dict[str, Any]],
         query: RetrievalQuery,
@@ -657,6 +900,14 @@ class EvidenceRetriever:
     @staticmethod
     def _vector_literal(vector: tuple[float, ...]) -> str:
         return "[" + ",".join(format(value, ".17g") for value in vector) + "]"
+
+    @staticmethod
+    def _parse_vector(value: str) -> tuple[float, ...]:
+        return tuple(float(item) for item in value.removeprefix("[").removesuffix("]").split(","))
+
+    @staticmethod
+    def _query_digest(text: str) -> str:
+        return "sha256:" + sha256(text.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> RetrievedEvidencePassage:

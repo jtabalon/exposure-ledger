@@ -10,10 +10,14 @@ from uuid import UUID
 import psycopg
 import pytest
 from exposure_ledger import (
+    AssessmentOperation,
+    AssessmentRequest,
     AssessmentResult,
+    AuthorizationStatus,
     CapturedSourcePayload,
     CisaKevCatalog,
     CisaKevSource,
+    CyberPolicy,
     EmbeddingSpace,
     EpssResponseRejected,
     EpssSource,
@@ -34,10 +38,13 @@ from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_storage import (
     HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
+    AssessmentRunRepository,
+    EmbeddingIndexUnavailable,
     EmbeddingProviderUnavailable,
     EmbeddingReadiness,
     EvidenceRetriever,
     ExposureRepository,
+    build_exposure_retrieval_query,
     evaluate_retrieval_recall,
 )
 from exposure_ledger_worker.main import process_next_assessment
@@ -110,6 +117,20 @@ class UnavailableEmbeddingProvider:
         self, texts: tuple[str, ...], space: EmbeddingSpace
     ) -> tuple[tuple[float, ...], ...]:
         raise AssertionError("Unavailable provider must not embed passages")
+
+
+class InterruptOnceEmbeddingProvider(KnownAnswerEmbeddingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self._interrupted = False
+
+    def embed_passages(
+        self, texts: tuple[str, ...], space: EmbeddingSpace
+    ) -> tuple[tuple[float, ...], ...]:
+        if not self._interrupted:
+            self._interrupted = True
+            raise KeyboardInterrupt("simulated worker interruption after evidence commit")
+        return super().embed_passages(texts, space)
 
 
 class FixtureArchiveSource:
@@ -619,7 +640,7 @@ def test_embedding_provider_outage_preserves_evidence_and_explicit_setup(
     database_url: str,
 ) -> None:
     provider = UnavailableEmbeddingProvider()
-    app = create_app(Settings(database_url=database_url), embedding_provider=provider)
+    app = create_app(Settings(database_url=database_url))
     with TestClient(app) as client:
         run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
 
@@ -781,7 +802,7 @@ def test_hybrid_retrieval_is_deterministic_space_isolated_and_reports_recall(
 ) -> None:
     fixture = json.loads(LEXICAL_FIXTURE.read_text())
     first_provider = KnownAnswerEmbeddingProvider()
-    app = create_app(Settings(database_url=database_url), embedding_provider=first_provider)
+    app = create_app(Settings(database_url=database_url))
     with TestClient(app) as client:
         run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
     assert process_next_assessment(
@@ -792,14 +813,37 @@ def test_hybrid_retrieval_is_deterministic_space_isolated_and_reports_recall(
     )
 
     second_provider = KnownAnswerEmbeddingProvider(digest_character="b", reverse=True)
+    with pytest.raises(EmbeddingIndexUnavailable, match="retrieved-content Policy Decision"):
+        EvidenceRetriever(database_url, embedding_provider=second_provider).index_assessment(
+            UUID(run["id"])
+        )
+    AssessmentRunRepository(database_url).record_retrieved_content_policy_decision(
+        UUID(run["id"]),
+        CyberPolicy.decide(
+            AssessmentRequest(
+                operation=AssessmentOperation.EMBED_RETRIEVED_EVIDENCE,
+                target_scope=(
+                    f"assessment:{run['id']};embedding-space:{second_provider.space.identity}"
+                ),
+                authorization_scope="local operator",
+                authorization_status=AuthorizationStatus.CONFIRMED,
+            )
+        ),
+    )
     EvidenceRetriever(database_url, embedding_provider=second_provider).index_assessment(
         UUID(run["id"])
     )
 
     with TestClient(app) as client:
         target = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"][0]
+        query_text = build_exposure_retrieval_query(
+            target["package"]["name"],
+            target["package"]["version"],
+            tuple(target["vulnerabilityRecord"]["aliases"]),
+        )
+        assert target["retrievalQuery"] == query_text
         params = [
-            ("query", "upgrade"),
+            ("query", query_text),
             ("sourceIdentity", "osv"),
             ("evidenceType", "affected"),
             ("evidenceType", "query_result"),
@@ -861,21 +905,20 @@ def test_hybrid_retrieval_is_deterministic_space_isolated_and_reports_recall(
         wrong_space = client.get(
             f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
             params={
-                "query": "upgrade",
+                "query": query_text,
                 "sourceIdentity": "osv",
                 "evidenceType": "affected",
-                "embeddingSpaceIdentity": second_provider.space.identity,
+                "embeddingSpaceIdentity": "sha256:" + "c" * 64,
             },
         )
         assert wrong_space.status_code == 409
         assert wrong_space.json()["detail"]["code"] == "embedding_space_not_current"
 
-    second_app = create_app(Settings(database_url=database_url), embedding_provider=second_provider)
-    with TestClient(second_app) as client:
+    with TestClient(app) as client:
         second = client.get(
             f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
             params=[
-                ("query", "upgrade"),
+                ("query", query_text),
                 ("sourceIdentity", "osv"),
                 ("evidenceType", "affected"),
                 ("evidenceType", "query_result"),
@@ -900,32 +943,74 @@ def test_hybrid_retrieval_is_deterministic_space_isolated_and_reports_recall(
     assert report.recall_at_k == 0.5
     assert report.matched_passage_identities == ("expected-a",)
 
-    unavailable_app = create_app(
-        Settings(database_url=database_url),
-        embedding_provider=UnavailableEmbeddingProvider(),
-    )
-    with TestClient(unavailable_app) as client:
+    with TestClient(app) as client:
         unavailable = client.get(
             f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
             params={
-                "query": "upgrade",
+                "query": "not generated by the worker",
                 "sourceIdentity": "osv",
                 "evidenceType": "affected",
+                "embeddingSpaceIdentity": first_provider.space.identity,
             },
         )
     assert unavailable.status_code == 503
     assert unavailable.json()["detail"] == {
-        "code": "embedding_runtime_unavailable",
-        "message": "Local Ollama embedding runtime is unavailable.",
-        "setup": "Start Ollama locally and run `make models`, then retry.",
-        "embeddings": {
-            "status": "unavailable",
-            "code": "embedding_runtime_unavailable",
-            "message": "Local Ollama embedding runtime is unavailable.",
-            "setup": "Start Ollama locally and run `make models`, then retry.",
-            "space": None,
-        },
+        "code": "embedding_index_unavailable",
+        "message": (
+            "No worker-generated query representation exists for this query and "
+            "Embedding Space. Use the exposure's indexed retrieval query."
+        ),
+        "setup": "Run a new Assessment after `make models` succeeds.",
     }
+
+
+def test_recovered_worker_indexes_existing_evidence_before_completion(
+    database_url: str,
+) -> None:
+    provider = InterruptOnceEmbeddingProvider()
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    with pytest.raises(KeyboardInterrupt, match="simulated worker interruption"):
+        process_next_assessment(
+            database_url=database_url,
+            archive_source=FixtureArchiveSource(),
+            osv_source=CapturedOsvSource(include_query_capture=True),
+            embedding_provider=provider,
+        )
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "UPDATE assessment_runs SET claimed_at = now() - interval '1 minute' WHERE id = %s",
+            (run["id"],),
+        )
+        connection.commit()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        stale_after_seconds=1,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(include_query_capture=True),
+        embedding_provider=provider,
+    )
+
+    with psycopg.connect(database_url) as connection:
+        status_row = connection.execute(
+            "SELECT status FROM assessment_runs WHERE id = %s", (run["id"],)
+        ).fetchone()
+        embedding_count = connection.execute("SELECT count(*) FROM passage_embeddings").fetchone()
+        content_policy_count = connection.execute(
+            """
+            SELECT count(*) FROM policy_decisions
+            WHERE assessment_run_id = %s AND enforcement_point = 'retrieved_content'
+            """,
+            (run["id"],),
+        ).fetchone()
+
+    assert status_row == ("completed",)
+    assert embedding_count is not None and embedding_count[0] > 0
+    assert content_policy_count == (2,)
 
 
 def test_enrichment_failures_complete_with_explicit_partial_states(database_url: str) -> None:

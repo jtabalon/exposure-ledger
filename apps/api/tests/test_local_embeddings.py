@@ -57,7 +57,7 @@ def test_local_provider_pins_space_and_applies_the_versioned_query_instruction()
     assert readiness.space.passage_construction_version == "source-aware-passage-v1"
 
     assert provider.embed_query("patched release", readiness.space) == (0.6, 0.0, 0.8)
-    embed_payload = requests[-1][2]
+    embed_payload = next(payload for _, path, payload in requests if path == "/api/embed")
     assert embed_payload == {
         "model": "qwen3-embedding:0.6b",
         "input": readiness.space.retrieval_instruction + "patched release",
@@ -100,3 +100,71 @@ def test_local_provider_rejects_hosted_or_cloud_configuration() -> None:
             base_url="http://localhost:11434",
             model_artifact="qwen3-embedding:cloud",
         )
+    with pytest.raises(ValueError, match="cloud model"):
+        OllamaEmbeddingProvider(
+            base_url="http://localhost:11434",
+            model_artifact="gpt-oss:120b-cloud",
+        )
+
+
+def test_local_provider_rejects_remote_inventory_entries() -> None:
+    provider = OllamaEmbeddingProvider(
+        base_url="http://localhost:11434",
+        model_artifact="qwen3-embedding:0.6b",
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "qwen3-embedding:0.6b",
+                            "digest": "a" * 64,
+                            "remote_model": "qwen3-embedding:0.6b",
+                            "remote_host": "https://ollama.com",
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+
+    readiness = provider.check_readiness()
+
+    assert readiness.status == "unavailable"
+    assert readiness.code == "embedding_cloud_model_rejected"
+    assert readiness.space is None
+
+
+def test_local_provider_discards_vectors_when_artifact_digest_changes_during_generation() -> None:
+    tag_calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal tag_calls
+        if request.url.path == "/api/tags":
+            tag_calls += 1
+            digest = ("a" if tag_calls < 3 else "b") * 64
+            return httpx.Response(
+                200,
+                json={"models": [{"name": "qwen3-embedding:0.6b", "digest": digest}]},
+            )
+        if request.url.path == "/api/show":
+            return httpx.Response(
+                200,
+                json={
+                    "capabilities": ["embedding"],
+                    "model_info": {"qwen3embedding.embedding_length": 3},
+                },
+            )
+        if request.url.path == "/api/embed":
+            return httpx.Response(200, json={"embeddings": [[1.0, 0.0, 0.0]]})
+        raise AssertionError(f"Unexpected request: {request.url}")
+
+    provider = OllamaEmbeddingProvider(
+        base_url="http://localhost:11434",
+        model_artifact="qwen3-embedding:0.6b",
+        transport=httpx.MockTransport(respond),
+    )
+    space = provider.require_space()
+
+    with pytest.raises(EmbeddingProviderUnavailable, match="changed during embedding generation"):
+        provider.embed_query("patched release", space)
