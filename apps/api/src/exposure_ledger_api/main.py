@@ -20,6 +20,7 @@ from exposure_ledger import (
     CaptureAssetSnapshot,
     CyberPolicy,
     EnvironmentProfile,
+    ExposureRanking,
     OperatingSystem,
     PolicyResult,
     validate_asset_snapshot_request,
@@ -33,6 +34,8 @@ from exposure_ledger_storage import (
     AssessmentStatus,
     AssetSnapshotRecord,
     AssetSnapshotRepository,
+    ExposureRecord,
+    ExposureRepository,
     PackageInstanceRecord,
     PolicyDecisionRecord,
 )
@@ -226,6 +229,54 @@ class AssetSnapshotListResponse(ApiModel):
     items: list[AssetSnapshotResponse]
 
 
+class VulnerabilityRecordResponse(ApiModel):
+    id: UUID
+    aliases: list[str]
+
+
+class ExposureRankingResponse(ApiModel):
+    severity: Literal["critical", "high", "moderate", "low", "unknown"]
+    direct_dependency: bool
+    dependency_depth: int
+    fixed_version_available: bool
+    score: int
+
+    @classmethod
+    def from_domain(cls, ranking: ExposureRanking) -> "ExposureRankingResponse":
+        return cls.model_validate(ranking, from_attributes=True)
+
+
+class ExposureResponse(ApiModel):
+    id: UUID
+    assessment_run_id: UUID
+    asset_snapshot_id: UUID
+    vulnerability_record: VulnerabilityRecordResponse
+    package: PackageInstanceResponse
+    ranking: ExposureRankingResponse
+    rank: int
+    selected_for_investigation: bool
+
+    @classmethod
+    def from_record(cls, exposure: ExposureRecord) -> "ExposureResponse":
+        return cls(
+            id=exposure.id,
+            assessment_run_id=exposure.assessment_run_id,
+            asset_snapshot_id=exposure.asset_snapshot_id,
+            vulnerability_record=VulnerabilityRecordResponse(
+                id=exposure.vulnerability_record.id,
+                aliases=list(exposure.vulnerability_record.aliases),
+            ),
+            package=PackageInstanceResponse.from_record(exposure.package),
+            ranking=ExposureRankingResponse.from_domain(exposure.ranking),
+            rank=exposure.rank,
+            selected_for_investigation=exposure.selected_for_investigation,
+        )
+
+
+class ExposureListResponse(ApiModel):
+    items: list[ExposureResponse]
+
+
 def _not_found(assessment_run_id: UUID) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -267,11 +318,13 @@ def create_app(
     configured_settings = settings or Settings()
     repository = AssessmentRunRepository(configured_settings.database_url)
     snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
+    exposure_repository = ExposureRepository(configured_settings.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         repository.check_ready()
         snapshot_repository.check_ready()
+        exposure_repository.check_ready()
         yield
 
     application = FastAPI(
@@ -462,6 +515,22 @@ def create_app(
         if assessment_run is None:
             raise _not_found(assessment_run_id)
         return _assessment_response(repository, assessment_run)
+
+    @application.get(
+        "/api/v1/assessment-runs/{assessment_run_id}/exposures",
+        response_model=ExposureListResponse,
+        response_model_by_alias=True,
+        tags=["exposures"],
+    )
+    def list_assessment_exposures(assessment_run_id: UUID) -> ExposureListResponse:
+        if repository.get(assessment_run_id) is None:
+            raise _not_found(assessment_run_id)
+        return ExposureListResponse(
+            items=[
+                ExposureResponse.from_record(item)
+                for item in exposure_repository.list_for_assessment(assessment_run_id)
+            ]
+        )
 
     @application.get(
         "/api/v1/assessment-runs/{assessment_run_id}/events",

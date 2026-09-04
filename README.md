@@ -102,6 +102,16 @@ runs builds or hooks, or executes repository content. `GET /api/v1/asset-snapsho
 pinned scope, digest, Environment Profile, normalized packages, and Dependency Paths shown in the
 workbench.
 
+After capture, the worker records a separate OSV-read Policy Decision, submits one normalized PyPI
+version batch to the fixed public OSV origin, hydrates the returned identifiers into full retrieved
+records, and re-evaluates affected versions locally with PEP 440 ordering. Aliases are coalesced into
+one Vulnerability Record while Exposures remain unique by Asset Snapshot, Vulnerability Record, and
+package. `GET /api/v1/assessment-runs/<assessment-run-id>/exposures` returns their deterministic
+ordering and top-five Investigation selection. The workbench explains the score inputs: OSV severity
+(0/10/20/30/40), direct dependency (20), published fix (10), and dependency proximity (up to 10),
+with stable vulnerability aliases and package identity used as tie-breakers. No generation model
+participates in matching, identity, ranking, or selection.
+
 SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
 
 Every Assessment request is classified by application-owned rules before a run is queued. The

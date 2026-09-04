@@ -337,6 +337,76 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             WHERE enforcement_point = 'request' AND assessment_run_id IS NOT NULL;
         """,
     ),
+    (
+        7,
+        """
+        CREATE TABLE vulnerability_records (
+            id uuid PRIMARY KEY,
+            identity_key text NOT NULL UNIQUE
+        );
+
+        CREATE TABLE vulnerability_aliases (
+            identifier text PRIMARY KEY,
+            vulnerability_record_id uuid NOT NULL
+                REFERENCES vulnerability_records(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX vulnerability_aliases_record_idx
+            ON vulnerability_aliases (vulnerability_record_id, identifier);
+
+        CREATE TABLE exposures (
+            id uuid PRIMARY KEY,
+            asset_snapshot_id uuid NOT NULL
+                REFERENCES asset_snapshots(id) ON DELETE RESTRICT,
+            vulnerability_record_id uuid NOT NULL
+                REFERENCES vulnerability_records(id) ON DELETE RESTRICT,
+            package_instance_id uuid NOT NULL
+                REFERENCES package_instances(id) ON DELETE RESTRICT,
+            UNIQUE (asset_snapshot_id, vulnerability_record_id, package_instance_id)
+        );
+
+        CREATE TABLE assessment_run_exposures (
+            assessment_run_id uuid NOT NULL
+                REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
+            rank integer NOT NULL CHECK (rank > 0),
+            selected_for_investigation boolean NOT NULL,
+            severity text NOT NULL
+                CHECK (severity IN ('critical', 'high', 'moderate', 'low', 'unknown')),
+            direct_dependency boolean NOT NULL,
+            dependency_depth integer NOT NULL CHECK (dependency_depth >= 0),
+            fixed_version_available boolean NOT NULL,
+            ranking_score integer NOT NULL CHECK (ranking_score >= 0),
+            PRIMARY KEY (assessment_run_id, exposure_id),
+            UNIQUE (assessment_run_id, rank)
+        );
+
+        CREATE FUNCTION reject_exposure_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Exposure discovery records are immutable';
+        END;
+        $$;
+
+        CREATE TRIGGER vulnerability_records_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON vulnerability_records
+        FOR EACH ROW EXECUTE FUNCTION reject_exposure_mutation();
+
+        CREATE TRIGGER vulnerability_aliases_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON vulnerability_aliases
+        FOR EACH ROW EXECUTE FUNCTION reject_exposure_mutation();
+
+        CREATE TRIGGER exposures_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON exposures
+        FOR EACH ROW EXECUTE FUNCTION reject_exposure_mutation();
+
+        CREATE TRIGGER assessment_run_exposures_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON assessment_run_exposures
+        FOR EACH ROW EXECUTE FUNCTION reject_exposure_mutation();
+        """,
+    ),
 )
 
 

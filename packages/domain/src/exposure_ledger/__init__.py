@@ -27,6 +27,17 @@ from exposure_ledger.cyber_policy import (
     PolicyDecision,
     PolicyResult,
 )
+from exposure_ledger.exposures import (
+    AssessmentResult,
+    Exposure,
+    ExposureDiscovery,
+    ExposureRanking,
+    OsvPackageQuery,
+    OsvResponseRejected,
+    OsvSource,
+    OsvSourceUnavailable,
+    VulnerabilityRecord,
+)
 from exposure_ledger.recommendations import (
     EvidenceState,
     Recommendation,
@@ -42,6 +53,7 @@ __all__ = [
     "AssistanceClass",
     "AssessmentOperation",
     "AssessmentRequest",
+    "AssessmentResult",
     "AssetSnapshot",
     "AssetSnapshotCapture",
     "AssetSnapshotRejected",
@@ -50,6 +62,13 @@ __all__ = [
     "CyberPolicy",
     "EnvironmentProfile",
     "EvidenceState",
+    "Exposure",
+    "ExposureDiscovery",
+    "ExposureRanking",
+    "OsvPackageQuery",
+    "OsvResponseRejected",
+    "OsvSource",
+    "OsvSourceUnavailable",
     "PolicyDecision",
     "PolicyResult",
     "OperatingSystem",
@@ -62,4 +81,5 @@ __all__ = [
     "RepositoryArchiveSource",
     "RepositoryArchiveUnavailable",
     "validate_asset_snapshot_request",
+    "VulnerabilityRecord",
 ]

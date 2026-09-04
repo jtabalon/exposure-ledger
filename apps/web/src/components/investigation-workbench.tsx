@@ -32,8 +32,10 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { AssessmentRunPanel } from "@/components/assessment-run-panel"
 import { AssetSnapshotPanel } from "@/components/asset-snapshot-panel"
+import { ExposureQueuePanel } from "@/components/exposure-queue-panel"
 import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
 import type { AssetSnapshot } from "@/lib/asset-snapshots"
+import type { Exposure } from "@/lib/exposures"
 import { evidenceForClaim } from "@/lib/evidence"
 import type {
   DemoInvestigation,
@@ -78,6 +80,8 @@ export function InvestigationWorkbench({
   assessmentRunsError,
   assetSnapshots,
   assetSnapshotsError,
+  exposures,
+  exposuresError,
   policyDecisions,
   policyDecisionsError,
 }: {
@@ -86,6 +90,8 @@ export function InvestigationWorkbench({
   assessmentRunsError: string | null
   assetSnapshots: AssetSnapshot[]
   assetSnapshotsError: string | null
+  exposures: Exposure[]
+  exposuresError: string | null
   policyDecisions: PolicyDecision[]
   policyDecisionsError: string | null
 }) {
@@ -95,7 +101,7 @@ export function InvestigationWorkbench({
   const navigation = [
     { label: "Assessment Runs", icon: Activity, count: String(assessmentRuns.length), active: true },
     { label: "Asset Snapshots", icon: Database, count: String(assetSnapshots.length) },
-    { label: "Exposures", icon: Radar, count: "28" },
+    { label: "Exposures", icon: Radar, count: String(exposures.length) },
     { label: "Investigations", icon: FileSearch, count: "8" },
     { label: "Evaluations", icon: FlaskConical, count: "v0.3" },
   ]
@@ -193,6 +199,8 @@ export function InvestigationWorkbench({
         </div>
 
         <AssetSnapshotPanel snapshots={assetSnapshots} error={assetSnapshotsError} />
+
+        <ExposureQueuePanel exposures={exposures} error={exposuresError} />
 
         <AssessmentRunPanel
           assessmentRuns={assessmentRuns}
