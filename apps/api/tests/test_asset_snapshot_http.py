@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import zipfile
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -8,6 +10,7 @@ from uuid import UUID, uuid4
 import psycopg
 import pytest
 from exposure_ledger import (
+    CapturedSourcePayload,
     OsvBatchResponse,
     OsvPackageQuery,
     RepositoryArchive,
@@ -143,26 +146,24 @@ class RequirementsOsvSource:
             OsvPackageQuery(name="http-x", version="2.3.0"),
             OsvPackageQuery(name="leaf-lib", version="1.0.0"),
         )
+        vulnerability = {
+            "id": "PYSEC-2026-42",
+            "affected": [
+                {
+                    "package": {"ecosystem": "PyPI", "name": "http-x"},
+                    "versions": ["2.3.0"],
+                }
+            ],
+        }
         return OsvBatchResponse.capture(
-            {
-                "results": [
-                    {
-                        "vulns": [
-                            {
-                                "id": "PYSEC-2026-42",
-                                "affected": [
-                                    {
-                                        "package": {"ecosystem": "PyPI", "name": "http-x"},
-                                        "versions": ["2.3.0"],
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                    {},
-                ]
-            },
+            {"results": [{"vulns": [vulnerability]}, {}]},
             expected_results=len(queries),
+            captured_payloads={
+                "PYSEC-2026-42": CapturedSourcePayload(
+                    content=json.dumps(vulnerability, separators=(",", ":"), sort_keys=True),
+                    captured_at=datetime(2026, 9, 3, 20, 0, tzinfo=UTC),
+                )
+            },
         )
 
 
