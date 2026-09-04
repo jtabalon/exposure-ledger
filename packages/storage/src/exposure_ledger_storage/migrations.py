@@ -61,8 +61,8 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             id uuid PRIMARY KEY,
             assessment_run_id uuid UNIQUE REFERENCES assessment_runs(id) ON DELETE RESTRICT,
             standard_version text NOT NULL,
-            assistance_class text CHECK (assistance_class IN ('C0', 'C1', 'C2', 'C3')),
-            action_level text CHECK (action_level IN ('A0', 'A1', 'A2', 'A3', 'A4')),
+            assistance_class text NOT NULL CHECK (assistance_class IN ('C0', 'C1', 'C2', 'C3')),
+            action_level text NOT NULL CHECK (action_level IN ('A0', 'A1', 'A2', 'A3', 'A4')),
             target_scope text,
             authorization_scope text,
             result text NOT NULL CHECK (result IN ('allowed', 'restricted', 'blocked')),
@@ -78,9 +78,11 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             id, assessment_run_id, standard_version, assistance_class, action_level,
             target_scope, authorization_scope, result, rule_version, reason, created_at
         )
-        SELECT gen_random_uuid(), id, '0.1', NULL, NULL, NULL,
+        SELECT gen_random_uuid(), id, '0.1', 'C3', 'A4', NULL,
                NULL, 'blocked', 'assessment-request-v1',
-               'Legacy Assessment Run predates request-gate classification and is blocked.', now()
+               'Legacy Assessment Run predates request-gate classification; it is ' ||
+               'conservatively classified C3/A4 and blocked.',
+               now()
         FROM assessment_runs;
 
         INSERT INTO assessment_events (

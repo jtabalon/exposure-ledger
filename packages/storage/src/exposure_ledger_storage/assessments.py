@@ -80,8 +80,8 @@ class PolicyDecisionRecord:
     id: UUID
     assessment_run_id: UUID | None
     standard_version: str
-    assistance_class: AssistanceClass | None
-    action_level: ActionLevel | None
+    assistance_class: AssistanceClass
+    action_level: ActionLevel
     target_scope: str | None
     authorization_scope: str | None
     result: PolicyResult

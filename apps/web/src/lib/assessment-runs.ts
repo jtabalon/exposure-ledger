@@ -5,8 +5,8 @@ export type PolicyDecision = {
   id: string
   assessmentRunId: string | null
   standardVersion: string
-  assistanceClass: "C0" | "C1" | "C2" | "C3" | null
-  actionLevel: "A0" | "A1" | "A2" | "A3" | "A4" | null
+  assistanceClass: "C0" | "C1" | "C2" | "C3"
+  actionLevel: "A0" | "A1" | "A2" | "A3" | "A4"
   targetScope: string | null
   authorizationScope: string | null
   result: PolicyResult

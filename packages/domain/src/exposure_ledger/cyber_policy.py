@@ -57,8 +57,8 @@ class AssessmentRequest:
 @dataclass(frozen=True, slots=True)
 class PolicyDecision:
     standard_version: str
-    assistance_class: AssistanceClass | None
-    action_level: ActionLevel | None
+    assistance_class: AssistanceClass
+    action_level: ActionLevel
     target_scope: str | None
     authorization_scope: str | None
     result: PolicyResult
@@ -109,21 +109,35 @@ class CyberPolicy:
             _classify_operation(operation)
             for operation in (request.operation, *request.operation_chain)
         )
+        known_classifications = tuple(
+            classification for classification in classifications if classification is not None
+        )
+        assistance_class = max(
+            (classification.assistance_class for classification in known_classifications),
+            key=_ASSISTANCE_ORDER.__getitem__,
+            default=AssistanceClass.C3,
+        )
+        action_level = max(
+            (classification.action_level for classification in known_classifications),
+            key=_ACTION_ORDER.__getitem__,
+            default=ActionLevel.A4,
+        )
         if any(classification is None for classification in classifications):
             return _decision(
                 request,
-                assistance_class=None,
-                action_level=None,
+                assistance_class=assistance_class,
+                action_level=action_level,
                 result=PolicyResult.BLOCKED,
                 reason=(
-                    "Assistance Class is materially uncertain; the Assessment request is blocked."
+                    "Assistance Class or Action Level is materially uncertain; the Assessment "
+                    "request is conservatively classified C3/A4 and blocked."
                 ),
             )
         if not request.target_scope or not request.target_scope.strip():
             return _decision(
                 request,
-                assistance_class=None,
-                action_level=None,
+                assistance_class=assistance_class,
+                action_level=action_level,
                 result=PolicyResult.BLOCKED,
                 reason="Target scope is materially uncertain; the Assessment request is blocked.",
             )
@@ -134,16 +148,16 @@ class CyberPolicy:
         ):
             return _decision(
                 request,
-                assistance_class=None,
-                action_level=None,
+                assistance_class=assistance_class,
+                action_level=action_level,
                 result=PolicyResult.BLOCKED,
                 reason="Authorization is materially uncertain; the Assessment request is blocked.",
             )
         if request.authorization_status is AuthorizationStatus.DENIED:
             return _decision(
                 request,
-                assistance_class=None,
-                action_level=None,
+                assistance_class=assistance_class,
+                action_level=action_level,
                 result=PolicyResult.BLOCKED,
                 reason=(
                     "Authorization is denied for the target scope; the Assessment request is "
@@ -151,17 +165,6 @@ class CyberPolicy:
                 ),
             )
 
-        known_classifications = tuple(
-            classification for classification in classifications if classification is not None
-        )
-        assistance_class = max(
-            (classification.assistance_class for classification in known_classifications),
-            key=_ASSISTANCE_ORDER.__getitem__,
-        )
-        action_level = max(
-            (classification.action_level for classification in known_classifications),
-            key=_ACTION_ORDER.__getitem__,
-        )
         result = _result_for(assistance_class, action_level)
         return _decision(
             request,
@@ -221,8 +224,8 @@ def _reason_for(
 def _decision(
     request: AssessmentRequest,
     *,
-    assistance_class: AssistanceClass | None,
-    action_level: ActionLevel | None,
+    assistance_class: AssistanceClass,
+    action_level: ActionLevel,
     result: PolicyResult,
     reason: str,
 ) -> PolicyDecision:

@@ -171,7 +171,7 @@ export function AssessmentRunPanel({
                 />
                 <DetailRow
                   label="Policy"
-                  value={`${selected.policyDecision.assistanceClass ?? "Uncertain"} / ${selected.policyDecision.actionLevel ?? "Uncertain"} · ${selected.policyDecision.result}`}
+                  value={`${selected.policyDecision.assistanceClass} / ${selected.policyDecision.actionLevel} · ${selected.policyDecision.result}`}
                 />
                 <DetailRow
                   label="Scope"
@@ -221,9 +221,9 @@ export function AssessmentRunPanel({
                 <li key={decision.id} className="rounded-md border bg-card p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2 font-mono text-xs">
-                      <span>{decision.assistanceClass ?? "Uncertain"}</span>
+                      <span>{decision.assistanceClass}</span>
                       <span aria-hidden="true">/</span>
-                      <span>{decision.actionLevel ?? "Uncertain"}</span>
+                      <span>{decision.actionLevel}</span>
                     </div>
                     <Badge
                       variant="outline"

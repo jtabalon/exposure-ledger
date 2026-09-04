@@ -1,5 +1,6 @@
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import psycopg
@@ -204,7 +205,10 @@ def test_synthetic_assessment_survives_restart_and_replays_progress(
         (
             {"operationChain": ["unrecognized_operation"]},
             "blocked",
-            "Assistance Class is materially uncertain; the Assessment request is blocked.",
+            (
+                "Assistance Class or Action Level is materially uncertain; the Assessment "
+                "request is conservatively classified C3/A4 and blocked."
+            ),
         ),
         (
             {
@@ -267,5 +271,36 @@ def test_client_cannot_assert_its_own_authorization(database_url: str) -> None:
 
         assert response.status_code == 422
         assert client.get("/api/v1/assessment-runs").json()["items"] == []
+
+    assert process_next_assessment(database_url=database_url) is False
+
+
+def test_migration_fails_legacy_ungated_work_closed(database_url: str) -> None:
+    legacy_id = uuid4()
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute("DROP TABLE policy_decisions")
+        connection.execute("DROP FUNCTION reject_policy_decision_mutation")
+        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 4")
+        connection.execute(
+            """
+            INSERT INTO assessment_runs (
+                id, mode, scenario, label, synthetic, status, created_at
+            ) VALUES (%s, 'synthetic', 'complete', 'Synthetic Assessment Run', true,
+                      'queued', %s)
+            """,
+            (legacy_id, datetime.now(UTC)),
+        )
+
+    apply_migrations(database_url)
+
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        response = client.get(f"/api/v1/assessment-runs/{legacy_id}")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "failed"
+        assert response.json()["errorCode"] == "policy_gate_unavailable"
+        assert response.json()["policyDecision"]["result"] == "blocked"
+        assert response.json()["policyDecision"]["assistanceClass"] == "C3"
+        assert response.json()["policyDecision"]["actionLevel"] == "A4"
 
     assert process_next_assessment(database_url=database_url) is False
