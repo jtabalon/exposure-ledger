@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from exposure_ledger import InvestigationEvent
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_storage import AssessmentRunRepository, apply_migrations
@@ -12,6 +13,12 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE investigation_operations")
+    connection.execute("DROP INDEX policy_decisions_idempotency_idx")
+    connection.execute("ALTER TABLE policy_decisions DROP COLUMN idempotency_key")
+    connection.execute("DROP INDEX assessment_events_idempotency_idx")
+    connection.execute("ALTER TABLE assessment_events DROP COLUMN idempotency_key")
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 18")
     connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 17")
     connection.execute("DROP TABLE dispositions")
     connection.execute("DROP FUNCTION validate_disposition_scope")
@@ -262,6 +269,48 @@ def test_synthetic_assessment_survives_restart_and_replays_progress(
         assert "event: assessment.completed" in resumed_events_response.text
 
 
+def test_investigation_progress_is_idempotent_and_replayable(database_url: str) -> None:
+    settings = Settings(database_url=database_url)
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/api/v1/assessment-runs", json={"mode": "synthetic"}).json()
+
+    assessment_id = UUID(created["id"])
+    repository = AssessmentRunRepository(database_url)
+    claimed = repository.claim_next(stale_after_seconds=30)
+    assert claimed is not None and claimed.claim_id is not None
+    operation_id = uuid4()
+    event = InvestigationEvent(
+        stage="retrieve_passages",
+        mode="retrieval",
+        detail="Run Exposure-scoped hybrid retrieval.",
+        occurred_at=datetime.now(UTC),
+    )
+
+    assert repository.record_investigation_progress(
+        assessment_id,
+        claim_id=claimed.claim_id,
+        operation_id=operation_id,
+        exposure_id=uuid4(),
+        event=event,
+    )
+    assert repository.record_investigation_progress(
+        assessment_id,
+        claim_id=claimed.claim_id,
+        operation_id=operation_id,
+        exposure_id=uuid4(),
+        event=event,
+    )
+
+    with TestClient(create_app(settings)) as restarted_client:
+        response = restarted_client.get(
+            f"/api/v1/assessment-runs/{assessment_id}/events?after=2&follow=false"
+        )
+
+    assert response.status_code == 200
+    assert response.text.count("event: investigation.progress") == 1
+    assert '"stage":"retrieve_passages"' in response.text
+
+
 @pytest.mark.parametrize(
     ("policy_context", "expected_result", "expected_reason"),
     [
@@ -458,5 +507,6 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         15,
         16,
         17,
+        18,
     ]
     assert enforcement_point == ("enforcement_point",)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -76,6 +77,26 @@ class InvestigationRevisionRecord:
     revision: InvestigationRevision
 
 
+class InvestigationOperationStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True)
+class InvestigationOperation:
+    id: UUID
+    assessment_run_id: UUID
+    exposure_id: UUID
+    asset_snapshot_id: UUID
+    status: InvestigationOperationStatus
+    revision_id: UUID | None
+    started_at: datetime
+    completed_at: datetime | None
+    error_code: str | None
+    error_message: str | None
+
+
 class AssessmentClaimLost(RuntimeError):
     """The Assessment worker no longer owns the claim required to append a Revision."""
 
@@ -98,7 +119,8 @@ class InvestigationRepository:
                 connection.execute(
                     """
                     SELECT EXISTS (SELECT 1 FROM investigation_revisions),
-                           EXISTS (SELECT 1 FROM dispositions)
+                           EXISTS (SELECT 1 FROM dispositions),
+                           EXISTS (SELECT 1 FROM investigation_operations)
                     """
                 )
         except psycopg.Error as error:
@@ -188,6 +210,156 @@ class InvestigationRepository:
             setup=str(row["setup"]) if row["setup"] is not None else None,
             model=model,
         )
+
+    def begin_operation(self, command: RunInvestigation) -> InvestigationOperation:
+        """Create or reload the durable idempotency identity for one graph execution."""
+        started_at = datetime.now(UTC)
+        with (
+            psycopg.connect(self._database_url, row_factory=dict_row) as connection,
+            connection.transaction(),
+        ):
+            if self._assessment_claim_id is not None:
+                current_claim = connection.execute(
+                    """
+                    SELECT 1 FROM assessment_runs
+                    WHERE id = %s AND status = 'running' AND claim_id = %s
+                    FOR UPDATE
+                    """,
+                    (command.assessment_run_id, self._assessment_claim_id),
+                ).fetchone()
+                if current_claim is None:
+                    raise AssessmentClaimLost(
+                        "Assessment claim was lost before the Investigation operation started"
+                    )
+            connection.execute(
+                """
+                INSERT INTO investigation_operations (
+                    id, assessment_run_id, exposure_id, asset_snapshot_id, status, started_at
+                ) VALUES (%s, %s, %s, %s, 'running', %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    command.operation_id,
+                    command.assessment_run_id,
+                    command.exposure_id,
+                    command.asset_snapshot_id,
+                    started_at,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM investigation_operations
+                WHERE assessment_run_id = %s AND exposure_id = %s
+                FOR UPDATE
+                """,
+                (command.assessment_run_id, command.exposure_id),
+            ).fetchone()
+            assert row is not None
+            operation = _operation_from_row(row)
+            if (
+                operation.id != command.operation_id
+                or operation.asset_snapshot_id != command.asset_snapshot_id
+            ):
+                raise ValueError(
+                    "Investigation operation idempotency identity was reused for another scope"
+                )
+            return operation
+
+    def complete_operation(self, command: RunInvestigation, *, revision_id: UUID) -> bool:
+        """Link a finished graph operation to its one immutable Revision."""
+        completed_at = datetime.now(UTC)
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            if self._assessment_claim_id is not None:
+                current_claim = connection.execute(
+                    """
+                    SELECT 1 FROM assessment_runs
+                    WHERE id = %s AND status = 'running' AND claim_id = %s
+                    FOR UPDATE
+                    """,
+                    (command.assessment_run_id, self._assessment_claim_id),
+                ).fetchone()
+                if current_claim is None:
+                    raise AssessmentClaimLost(
+                        "Assessment claim was lost before the Investigation operation completed"
+                    )
+            result = connection.execute(
+                """
+                UPDATE investigation_operations
+                SET status = 'completed', revision_id = %s, completed_at = %s
+                WHERE id = %s AND status = 'running'
+                """,
+                (revision_id, completed_at, command.operation_id),
+            )
+            if result.rowcount == 1:
+                connection.commit()
+                return True
+            existing = connection.execute(
+                """
+                SELECT revision_id FROM investigation_operations
+                WHERE id = %s AND status = 'completed'
+                """,
+                (command.operation_id,),
+            ).fetchone()
+            connection.commit()
+            return existing is not None and UUID(str(existing["revision_id"])) == revision_id
+
+    def fail_operation(self, command: RunInvestigation, *, code: str, message: str) -> bool:
+        """Record an explicit terminal graph-state failure without creating a Revision."""
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            if self._assessment_claim_id is not None:
+                current_claim = connection.execute(
+                    """
+                    SELECT 1 FROM assessment_runs
+                    WHERE id = %s AND status = 'running' AND claim_id = %s
+                    FOR UPDATE
+                    """,
+                    (command.assessment_run_id, self._assessment_claim_id),
+                ).fetchone()
+                if current_claim is None:
+                    raise AssessmentClaimLost(
+                        "Assessment claim was lost before the Investigation operation failed"
+                    )
+            result = connection.execute(
+                """
+                UPDATE investigation_operations
+                SET status = 'failed', completed_at = %s, error_code = %s, error_message = %s
+                WHERE id = %s AND status = 'running'
+                """,
+                (datetime.now(UTC), code, message, command.operation_id),
+            )
+            return result.rowcount == 1
+
+    def fail_running_operations(
+        self,
+        assessment_run_id: UUID,
+        *,
+        code: str,
+        message: str,
+    ) -> int:
+        """Mark every interrupted operation terminal when its Assessment cannot resume."""
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            if self._assessment_claim_id is not None:
+                current_claim = connection.execute(
+                    """
+                    SELECT 1 FROM assessment_runs
+                    WHERE id = %s AND status = 'running' AND claim_id = %s
+                    FOR UPDATE
+                    """,
+                    (assessment_run_id, self._assessment_claim_id),
+                ).fetchone()
+                if current_claim is None:
+                    raise AssessmentClaimLost(
+                        "Assessment claim was lost before its Investigation operations failed"
+                    )
+            result = connection.execute(
+                """
+                UPDATE investigation_operations
+                SET status = 'failed', completed_at = %s, error_code = %s, error_message = %s
+                WHERE assessment_run_id = %s AND status = 'running'
+                """,
+                (datetime.now(UTC), code, message, assessment_run_id),
+            )
+            return result.rowcount
 
     def acquire(
         self, command: RunInvestigation, *, timeout_seconds: float
@@ -434,6 +606,30 @@ class InvestigationRepository:
             psycopg.connect(self._database_url, row_factory=dict_row) as connection,
             connection.transaction(),
         ):
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (str(revision.id),),
+            )
+            if (
+                connection.execute(
+                    "SELECT 1 FROM investigation_revisions WHERE id = %s",
+                    (revision.id,),
+                ).fetchone()
+                is not None
+            ):
+                existing = next(
+                    (
+                        record.revision
+                        for record in self.list_for_assessment(revision.assessment_run_id)
+                        if record.revision.id == revision.id
+                    ),
+                    None,
+                )
+                if existing != revision:
+                    raise ValueError(
+                        "Investigation Revision idempotency identity was reused with different data"
+                    )
+                return existing
             if self._assessment_claim_id is not None:
                 current_claim_row = connection.execute(
                     """
@@ -600,6 +796,18 @@ class InvestigationRepository:
                 (exposure_id,),
             ).fetchone()
         return self.list_for_investigation(UUID(str(row["id"]))) if row is not None else []
+
+    def get(self, revision_id: UUID) -> InvestigationRevision | None:
+        """Load one authoritative immutable Revision by its idempotency identity."""
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                "SELECT investigation_id FROM investigation_revisions WHERE id = %s",
+                (revision_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        record = self.get_revision(UUID(str(row["investigation_id"])), revision_id)
+        return record.revision if record is not None else None
 
     def list_for_investigation(self, investigation_id: UUID) -> list[InvestigationRevisionRecord]:
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
@@ -1279,6 +1487,21 @@ def _stored_stopping_reason(row: dict[str, Any]) -> str | None:
             "were recorded."
         )
     return None
+
+
+def _operation_from_row(row: dict[str, Any]) -> InvestigationOperation:
+    return InvestigationOperation(
+        id=UUID(str(row["id"])),
+        assessment_run_id=UUID(str(row["assessment_run_id"])),
+        exposure_id=UUID(str(row["exposure_id"])),
+        asset_snapshot_id=UUID(str(row["asset_snapshot_id"])),
+        status=InvestigationOperationStatus(str(row["status"])),
+        revision_id=(UUID(str(row["revision_id"])) if row["revision_id"] is not None else None),
+        started_at=cast(datetime, row["started_at"]),
+        completed_at=cast(datetime | None, row["completed_at"]),
+        error_code=str(row["error_code"]) if row["error_code"] is not None else None,
+        error_message=(str(row["error_message"]) if row["error_message"] is not None else None),
+    )
 
 
 def _retrieved_passages_json(evidence: RetrievedInvestigationEvidence) -> list[dict[str, object]]:

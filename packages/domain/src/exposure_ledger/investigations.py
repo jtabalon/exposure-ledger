@@ -269,6 +269,7 @@ class InvestigationBudget:
 
 @dataclass(frozen=True, slots=True)
 class RunInvestigation:
+    operation_id: UUID
     assessment_run_id: UUID
     exposure_id: UUID
     asset_snapshot_id: UUID

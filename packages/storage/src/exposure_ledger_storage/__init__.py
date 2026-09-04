@@ -29,6 +29,9 @@ from exposure_ledger_storage.exposures import (
 )
 from exposure_ledger_storage.investigations import (
     GENERATION_READINESS_MAX_AGE_SECONDS,
+    AssessmentClaimLost,
+    InvestigationOperation,
+    InvestigationOperationStatus,
     InvestigationRepository,
     InvestigationRevisionRecord,
 )
@@ -64,6 +67,7 @@ from exposure_ledger_storage.retrieval import (
 
 __all__ = [
     "AssessmentEvent",
+    "AssessmentClaimLost",
     "AssessmentEventType",
     "AssessmentMode",
     "AssessmentRun",
@@ -90,6 +94,8 @@ __all__ = [
     "HYBRID_RETRIEVAL_CONFIGURATION_VERSION",
     "GENERATION_READINESS_MAX_AGE_SECONDS",
     "InvestigationRepository",
+    "InvestigationOperation",
+    "InvestigationOperationStatus",
     "InvestigationRevisionRecord",
     "LEXICAL_RETRIEVAL_CONFIGURATION_VERSION",
     "OllamaEmbeddingProvider",

@@ -1010,7 +1010,7 @@ def test_recovered_worker_indexes_existing_evidence_before_completion(
 
     assert status_row == ("completed",)
     assert embedding_count is not None and embedding_count[0] > 0
-    assert content_policy_count == (2,)
+    assert content_policy_count == (1,)
 
 
 def test_enrichment_failures_complete_with_explicit_partial_states(database_url: str) -> None:

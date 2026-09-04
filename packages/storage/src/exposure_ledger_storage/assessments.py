@@ -1,9 +1,11 @@
 """Durable Assessment Run records and ordered progress events."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import psycopg
@@ -13,6 +15,7 @@ from exposure_ledger import (
     AssistanceClass,
     CaptureAssetSnapshot,
     EnvironmentProfile,
+    InvestigationEvent,
     OperatingSystem,
     PolicyDecision,
     PolicyResult,
@@ -59,6 +62,7 @@ class AssessmentEventType(StrEnum):
     ASSET_SNAPSHOT_CAPTURED = "assessment.asset_snapshot_captured"
     COMPLETED = "assessment.completed"
     FAILED = "assessment.failed"
+    INVESTIGATION_PROGRESS = "investigation.progress"
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +252,7 @@ class AssessmentRunRepository:
     def record_policy_decision(self, decision: PolicyDecision) -> PolicyDecisionRecord:
         created_at = datetime.now(UTC)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            decision_id = self._insert_policy_decision(
+            decision_id, created_at = self._insert_policy_decision(
                 connection,
                 decision,
                 assessment_run_id=None,
@@ -275,12 +279,13 @@ class AssessmentRunRepository:
     ) -> PolicyDecisionRecord:
         created_at = datetime.now(UTC)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            decision_id = self._insert_policy_decision(
+            decision_id, created_at = self._insert_policy_decision(
                 connection,
                 decision,
                 assessment_run_id=assessment_run_id,
                 created_at=created_at,
                 enforcement_point="tool_call",
+                idempotency_key=_policy_idempotency_key("tool_call", decision),
             )
         return PolicyDecisionRecord(
             id=decision_id,
@@ -303,12 +308,13 @@ class AssessmentRunRepository:
         """Record policy enforcement before untrusted evidence enters a local model."""
         created_at = datetime.now(UTC)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            decision_id = self._insert_policy_decision(
+            decision_id, created_at = self._insert_policy_decision(
                 connection,
                 decision,
                 assessment_run_id=assessment_run_id,
                 created_at=created_at,
                 enforcement_point="retrieved_content",
+                idempotency_key=_policy_idempotency_key("retrieved_content", decision),
             )
         return PolicyDecisionRecord(
             id=decision_id,
@@ -411,6 +417,37 @@ class AssessmentRunRepository:
                     (assessment_run_id, after),
                 ).fetchall()
             )
+
+    def record_investigation_progress(
+        self,
+        assessment_run_id: UUID,
+        *,
+        claim_id: UUID,
+        operation_id: UUID,
+        exposure_id: UUID,
+        event: InvestigationEvent,
+    ) -> bool:
+        """Append one fenced graph-stage event exactly once for an Investigation operation."""
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            if not self._owns_claim(connection, assessment_run_id, claim_id=claim_id):
+                return False
+            self._insert_event(
+                connection,
+                assessment_run_id,
+                sequence=self._next_sequence(connection, assessment_run_id),
+                event_type=AssessmentEventType.INVESTIGATION_PROGRESS,
+                payload={
+                    "status": AssessmentStatus.RUNNING,
+                    "operationId": str(operation_id),
+                    "exposureId": str(exposure_id),
+                    "stage": event.stage,
+                    "mode": event.mode,
+                    "message": event.detail,
+                },
+                occurred_at=event.occurred_at,
+                idempotency_key=f"investigation:{operation_id}:stage:{event.stage}",
+            )
+            return True
 
     def claim_next(self, *, stale_after_seconds: float) -> AssessmentRun | None:
         claimed_at = datetime.now(UTC)
@@ -517,6 +554,26 @@ class AssessmentRunRepository:
             completed_message="Repository Assessment Run completed.",
             asset_snapshot_id=asset_snapshot_id,
         )
+
+    def record_asset_snapshot(
+        self,
+        assessment_run_id: UUID,
+        *,
+        claim_id: UUID,
+        asset_snapshot_id: UUID,
+    ) -> bool:
+        """Persist a completed Asset Snapshot so reclaimed work does not fetch it again."""
+        with psycopg.connect(self._database_url) as connection:
+            result = connection.execute(
+                """
+                UPDATE assessment_runs
+                SET asset_snapshot_id = %s
+                WHERE id = %s AND status = 'running' AND claim_id = %s
+                  AND (asset_snapshot_id IS NULL OR asset_snapshot_id = %s)
+                """,
+                (asset_snapshot_id, assessment_run_id, claim_id, asset_snapshot_id),
+            )
+            return result.rowcount == 1
 
     def _complete(
         self,
@@ -625,15 +682,18 @@ class AssessmentRunRepository:
         assessment_run_id: UUID | None,
         created_at: datetime,
         enforcement_point: str,
-    ) -> UUID:
+        idempotency_key: str | None = None,
+    ) -> tuple[UUID, datetime]:
         decision_id = uuid4()
-        connection.execute(
+        row = connection.execute(
             """
             INSERT INTO policy_decisions (
                 id, assessment_run_id, standard_version, assistance_class, action_level,
                 target_scope, authorization_scope, result, rule_version, reason, created_at,
-                enforcement_point
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                enforcement_point, idempotency_key
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (assessment_run_id, idempotency_key) DO NOTHING
+            RETURNING id, created_at
             """,
             (
                 decision_id,
@@ -648,9 +708,20 @@ class AssessmentRunRepository:
                 decision.reason,
                 created_at,
                 enforcement_point,
+                idempotency_key,
             ),
-        )
-        return decision_id
+        ).fetchone()
+        if row is None:
+            assert idempotency_key is not None
+            row = connection.execute(
+                """
+                SELECT id, created_at FROM policy_decisions
+                WHERE assessment_run_id = %s AND idempotency_key = %s
+                """,
+                (assessment_run_id, idempotency_key),
+            ).fetchone()
+        assert row is not None
+        return UUID(str(row[0])), cast(datetime, row[1])
 
     @staticmethod
     def _owns_claim(
@@ -696,12 +767,40 @@ class AssessmentRunRepository:
         event_type: AssessmentEventType,
         payload: dict[str, Any],
         occurred_at: datetime,
-    ) -> None:
-        connection.execute(
+        idempotency_key: str | None = None,
+    ) -> bool:
+        result = connection.execute(
             """
             INSERT INTO assessment_events (
-                assessment_run_id, sequence, event_type, payload, occurred_at
-            ) VALUES (%s, %s, %s, %s, %s)
+                assessment_run_id, sequence, event_type, payload, occurred_at, idempotency_key
+            ) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (assessment_run_id, idempotency_key) DO NOTHING
             """,
-            (assessment_run_id, sequence, event_type, Jsonb(payload), occurred_at),
+            (
+                assessment_run_id,
+                sequence,
+                event_type,
+                Jsonb(payload),
+                occurred_at,
+                idempotency_key,
+            ),
         )
+        return result.rowcount == 1
+
+
+def _policy_idempotency_key(enforcement_point: str, decision: PolicyDecision) -> str:
+    encoded = json.dumps(
+        (
+            enforcement_point,
+            decision.standard_version,
+            decision.rule_version,
+            decision.assistance_class,
+            decision.action_level,
+            decision.target_scope or "",
+            decision.authorization_scope or "",
+            decision.result,
+            decision.reason,
+        ),
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"

@@ -52,6 +52,7 @@ Crossing any limit stops evidence, retrieval, and model work and produces an inc
 
 One Revision may follow one authorized Evidence Gap by narrowing the already indexed Exposure query
 to one captured Source and one enumerated evidence type. Retrieved text remains untrusted data and
-cannot alter the tool vocabulary or target. Within-Revision checkpoint resumption remains deferred;
-interrupted work is reclaimed through the PostgreSQL Assessment lease and starts a new immutable
-Revision.
+cannot alter the tool vocabulary or target. Every completed graph step is synchronously checkpointed
+in PostgreSQL under the durable Investigation operation identity. Reclaimed Assessment work resumes
+the same operation and Revision identity after validating the stored command scope. A completed final
+checkpoint reloads the authoritative immutable Revision instead of executing the graph again.

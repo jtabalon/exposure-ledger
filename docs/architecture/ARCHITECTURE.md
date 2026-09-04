@@ -56,8 +56,14 @@ Each module is deep: callers cross a small interface while the volatile source, 
 
 ## Reliability invariants
 
-- PostgreSQL is authoritative for jobs, events, Evidence Records, and domain history. Future graph checkpoints will use the same store.
-- Every retry is idempotent and cannot mutate a prior Evidence Record or Investigation Revision.
+- PostgreSQL is authoritative for jobs, Investigation operations, graph checkpoints, progress events,
+  Evidence Records, and domain history.
+- Every retry reuses a stable operation identity and cannot mutate or duplicate a prior Evidence
+  Record, Policy Decision, progress event, or Investigation Revision.
+- Reclaimed workers reuse the persisted Asset Snapshot and resume the latest valid graph checkpoint;
+  completed external reads and model steps are not rerun merely because the process restarted.
+- Invalid checkpoint scope is terminal and explicit. Source and model outages retain their typed
+  failure or incomplete-Revision behavior without silent provider fallback.
 - Model or source failure is visible; no provider fallback occurs implicitly.
 - Budgets cap evidence acquisition, retrieval, model calls, and graph work. Mandatory immutable Revision persistence is a post-budget finalization step: it never authorizes more evidence or model work, and its database latency is excluded from the Investigation wall-time measurement.
 - Repository archives are bounded in memory and explicitly discarded after successful parsing or rejection; only manifests, normalized results, hashes, and evidence-bearing excerpts remain.

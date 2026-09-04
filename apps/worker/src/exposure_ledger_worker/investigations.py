@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
-from time import monotonic
-from typing import Protocol, TypedDict, cast
-from uuid import UUID, uuid4
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol, TypedDict, cast
+from uuid import UUID
 
 from exposure_ledger import (
     AssessmentOperation,
@@ -42,6 +41,8 @@ from exposure_ledger import (
     RunInvestigation,
     StructuredInvestigationDraft,
 )
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -79,11 +80,21 @@ class InvestigationRetriever(Protocol):
 class RevisionHistory(Protocol):
     def append(self, revision: InvestigationRevision) -> InvestigationRevision: ...
 
+    def get(self, revision_id: UUID) -> InvestigationRevision | None: ...
+
+
+class ProgressHistory(Protocol):
+    def record(self, command: RunInvestigation, event: InvestigationEvent) -> None: ...
+
+
+class InvalidInvestigationCheckpoint(RuntimeError):
+    """A persisted graph checkpoint cannot safely resume the requested operation."""
+
 
 class _GraphState(TypedDict, total=False):
     command: RunInvestigation
     started_at: datetime
-    deadline_monotonic: float
+    deadline_at: datetime
     exposure: InvestigationExposure
     retrieved: RetrievedInvestigationEvidence
     draft: StructuredInvestigationDraft
@@ -171,33 +182,64 @@ class BoundedInvestigationRunner:
         retriever: InvestigationRetriever,
         generator: GenerationProvider,
         revision_history: RevisionHistory,
+        checkpointer: BaseCheckpointSaver[Any] | None = None,
+        progress_history: ProgressHistory | None = None,
         clock: Callable[[], datetime] | None = None,
-        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         self._evidence_acquirer = evidence_acquirer
         self._retriever = retriever
         self._generator = generator
         self._revision_history = revision_history
+        self._checkpointer = checkpointer
+        self._progress_history = progress_history
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._monotonic = monotonic_clock or monotonic
         self._graph = self._build_graph()
 
     async def run(self, command: RunInvestigation) -> InvestigationRevision:
         started_at = self._clock()
+        config: RunnableConfig = {"configurable": {"thread_id": str(command.operation_id)}}
+        resume = False
+        if self._checkpointer is not None:
+            try:
+                checkpoint = await self._checkpointer.aget_tuple(config)
+            except (KeyError, TypeError, ValueError) as error:
+                raise InvalidInvestigationCheckpoint(
+                    f"Investigation checkpoint {command.operation_id} is invalid."
+                ) from error
+            if checkpoint is not None:
+                channel_values = checkpoint.checkpoint.get("channel_values", {})
+                stored_command = channel_values.get("command")
+                if not _same_operation(stored_command, command):
+                    raise InvalidInvestigationCheckpoint(
+                        f"Investigation checkpoint {command.operation_id} does not match its scope."
+                    )
+                checkpoint_revision = channel_values.get("revision")
+                if checkpoint_revision is not None:
+                    revision = self._revision_history.get(command.operation_id)
+                    if revision is None:
+                        raise InvalidInvestigationCheckpoint(
+                            f"Investigation checkpoint {command.operation_id} has no Revision."
+                        )
+                    return revision
+                resume = True
         state = cast(
             _GraphState,
             await self._graph.ainvoke(
-                {
+                None
+                if resume
+                else {
                     "command": command,
                     "started_at": started_at,
-                    "deadline_monotonic": self._monotonic() + command.budget.wall_time_seconds,
+                    "deadline_at": started_at + timedelta(seconds=command.budget.wall_time_seconds),
                     "events": (),
                     "generation_model_calls": 0,
                     "tool_calls": 0,
                     "graph_transitions": 0,
                     "status": InvestigationRevisionStatus.COMPLETE,
                     "stopping_condition": InvestigationStoppingCondition.COMPLETED,
-                }
+                },
+                config if self._checkpointer is not None else None,
+                durability="sync" if self._checkpointer is not None else None,
             ),
         )
         return state["revision"]
@@ -254,7 +296,7 @@ class BoundedInvestigationRunner:
         graph.add_edge(InvestigationStage.RECOMMEND, InvestigationStage.VALIDATE_POLICY)
         graph.add_edge(InvestigationStage.VALIDATE_POLICY, InvestigationStage.PERSIST_REVISION)
         graph.add_edge(InvestigationStage.PERSIST_REVISION, END)
-        return graph.compile()
+        return graph.compile(checkpointer=self._checkpointer)
 
     @staticmethod
     def _route_after_initial_synthesis(state: _GraphState) -> str:
@@ -301,8 +343,11 @@ class BoundedInvestigationRunner:
                     InvestigationStoppingCondition.GRAPH_TRANSITION_BUDGET_EXHAUSTED
                 ),
             }
+        event = InvestigationEvent(stage, mode, detail, occurred_at)
+        if self._progress_history is not None:
+            self._progress_history.record(command, event)
         return {
-            "events": (*state["events"], InvestigationEvent(stage, mode, detail, occurred_at)),
+            "events": (*state["events"], event),
             "graph_transitions": state["graph_transitions"] + 1,
         }
 
@@ -311,7 +356,7 @@ class BoundedInvestigationRunner:
         return updates.get("status", state["status"]) is InvestigationRevisionStatus.INCOMPLETE
 
     def _remaining_seconds(self, state: _GraphState) -> float:
-        return max(0.0, state["deadline_monotonic"] - self._monotonic())
+        return max(0.0, (state["deadline_at"] - self._clock()).total_seconds())
 
     def _load_exposure(self, state: _GraphState) -> dict[str, object]:
         return self._event(state, InvestigationStage.LOAD_EXPOSURE)
@@ -655,7 +700,7 @@ class BoundedInvestigationRunner:
                 reasons=(stopping_condition,),
             )
         revision = InvestigationRevision(
-            id=uuid4(),
+            id=state["command"].operation_id,
             assessment_run_id=state["command"].assessment_run_id,
             exposure_id=state["command"].exposure_id,
             asset_snapshot_id=state["command"].asset_snapshot_id,
@@ -809,3 +854,30 @@ def _stopping_reason(
     }
     base = reasons.get(condition, f"The Investigation stopped: {condition.value}.")
     return f"{base} ({detail})" if detail and detail != condition else base
+
+
+def _same_operation(stored: object, requested: RunInvestigation) -> bool:
+    if not isinstance(stored, RunInvestigation):
+        return False
+    stored_configuration = stored.configuration
+    requested_configuration = requested.configuration
+    return (
+        stored.operation_id == requested.operation_id
+        and stored.assessment_run_id == requested.assessment_run_id
+        and stored.exposure_id == requested.exposure_id
+        and stored.asset_snapshot_id == requested.asset_snapshot_id
+        and stored.budget == requested.budget
+        and stored_configuration.application_release == requested_configuration.application_release
+        and stored_configuration.graph_version == requested_configuration.graph_version
+        and stored_configuration.prompt_version == requested_configuration.prompt_version
+        and stored_configuration.policy_version == requested_configuration.policy_version
+        and stored_configuration.parser_version == requested_configuration.parser_version
+        and stored_configuration.retrieval_configuration_version
+        == requested_configuration.retrieval_configuration_version
+        and stored_configuration.source_policy_version
+        == requested_configuration.source_policy_version
+        and tuple(stored_configuration.source_adapter_versions)
+        == requested_configuration.source_adapter_versions
+        and stored_configuration.generation_model == requested_configuration.generation_model
+        and stored_configuration.embedding_space == requested_configuration.embedding_space
+    )

@@ -20,6 +20,9 @@ erDiagram
     INVESTIGATION ||--o{ DISPOSITION : receives
     INVESTIGATION_REVISION ||--o{ POLICY_DECISION : records
     ASSESSMENT_RUN ||--o{ ASSESSMENT_EVENT : emits
+    ASSESSMENT_RUN ||--o{ INVESTIGATION_OPERATION : schedules
+    INVESTIGATION_OPERATION ||--o{ GRAPH_CHECKPOINT : resumes_from
+    INVESTIGATION_OPERATION ||--o| INVESTIGATION_REVISION : produces
 ```
 
 ## Identity and immutability
@@ -33,6 +36,10 @@ erDiagram
 - An Investigation belongs to one Exposure. Reassessment of unchanged code appends an Investigation Revision.
 - A new commit or Environment Profile creates a new Asset Snapshot and new Investigations.
 - Evidence Records, Investigation Revisions, Policy Decisions, and Dispositions are append-only.
+- An Investigation operation is unique to one Assessment Run and selected Exposure. Its identity is
+  also the graph-checkpoint thread and eventual Revision identity, making retries idempotent.
+- Ordered Assessment events carry idempotency identities for Investigation stages, so reconnecting SSE
+  consumers observe each authoritative progress step once without sequence gaps.
 - An Investigation Revision preserves a model-proposed Evidence Gap and follow-up separately from the
   deterministic follow-up Policy Decision and execution outcome. Invalid and blocked proposals remain
   visible without gaining authority.
