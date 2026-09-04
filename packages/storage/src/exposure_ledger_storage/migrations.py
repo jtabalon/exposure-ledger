@@ -567,6 +567,44 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
     (
         10,
         """
+        CREATE TABLE retrieval_configurations (
+            version text PRIMARY KEY,
+            text_search_configuration text NOT NULL,
+            ranking_algorithm text NOT NULL,
+            passage_construction_version text NOT NULL
+        );
+
+        INSERT INTO retrieval_configurations (
+            version, text_search_configuration, ranking_algorithm,
+            passage_construction_version
+        ) VALUES (
+            'postgres-lexical-v1', 'simple', 'ts_rank_cd-32', 'source-aware-passage-v1'
+        );
+
+        ALTER TABLE evidence_passages
+            ADD COLUMN search_vector tsvector
+            GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, content)) STORED;
+
+        CREATE INDEX evidence_passages_search_vector_idx
+            ON evidence_passages USING gin (search_vector);
+
+        CREATE FUNCTION reject_retrieval_configuration_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Retrieval configurations are immutable';
+        END;
+        $$;
+
+        CREATE TRIGGER retrieval_configurations_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON retrieval_configurations
+        FOR EACH ROW EXECUTE FUNCTION reject_retrieval_configuration_mutation();
+        """,
+    ),
+    (
+        11,
+        """
         ALTER TABLE assessment_run_exposures
             ADD COLUMN authoritative_conflict boolean NOT NULL DEFAULT false;
 

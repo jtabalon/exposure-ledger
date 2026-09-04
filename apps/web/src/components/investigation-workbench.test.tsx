@@ -5,6 +5,17 @@ import { demoInvestigation } from "@/lib/demo-investigation"
 
 import { InvestigationWorkbench } from "./investigation-workbench"
 
+const workbenchProps = {
+  assessmentRuns: [],
+  assessmentRunsError: null,
+  assetSnapshots: [],
+  assetSnapshotsError: null,
+  exposures: [],
+  exposuresError: null,
+  policyDecisions: [],
+  policyDecisionsError: null,
+}
+
 describe("InvestigationWorkbench", () => {
   it("names every evidence relationship and preserves an authoritative conflict", () => {
     const investigation = {
@@ -41,17 +52,7 @@ describe("InvestigationWorkbench", () => {
     }
 
     const html = renderToStaticMarkup(
-      <InvestigationWorkbench
-        investigation={investigation}
-        assessmentRuns={[]}
-        assessmentRunsError={null}
-        assetSnapshots={[]}
-        assetSnapshotsError={null}
-        exposures={[]}
-        exposuresError={null}
-        policyDecisions={[]}
-        policyDecisionsError={null}
-      />,
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
     )
 
     expect(html).toContain("Material conflict")
@@ -64,5 +65,22 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain("2.4.3")
     expect(html).toContain("Synthetic public vulnerability record")
     expect(html).toContain("2.4.2")
+  })
+
+  it("presents the exact retrieval query and only lexical ranking", () => {
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={demoInvestigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain(demoInvestigation.retrieval.query)
+    expect(html).toContain("Lexical · top")
+    expect(html).toContain("Lexical rank")
+    expect(html).toContain("PostgreSQL full-text search")
+    expect(html).toContain("Rank 1 is the strongest lexical match")
+    expect(html).toContain(demoInvestigation.retrieval.configurationVersion)
+    expect(html).not.toContain("RRF")
+    expect(html).not.toContain("Vector")
+    expect(html).not.toContain("Fused")
+    expect(html).not.toContain("qwen3-embedding")
   })
 })

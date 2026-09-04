@@ -171,7 +171,7 @@ export function InvestigationWorkbench({
             </div>
             <div className="space-y-1 font-mono text-[10px] leading-4 text-stone-500">
               <div>gpt-oss:20b</div>
-              <div>qwen3-embedding:0.6b</div>
+              <div>PostgreSQL lexical retrieval</div>
             </div>
           </div>
         </div>
@@ -501,14 +501,21 @@ export function InvestigationWorkbench({
                 </h2>
               </div>
               <Badge variant="secondary" className="font-mono text-[10px]">
-                RRF · top {relatedEvidence.length}
+                Lexical · top {relatedEvidence.length}
               </Badge>
             </div>
 
             <div className="mb-4 rounded-md border border-primary/15 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground">
               <span className="font-semibold text-foreground">Retrieval query:</span>{" "}
-              affected version, available fix, exploitation status, and repository usage for{" "}
-              {investigation.exposure.packageName}
+              <span className="font-mono">{investigation.retrieval.query}</span>
+              <span className="mt-1 block text-[10px]">
+                PostgreSQL full-text search · {investigation.retrieval.configurationVersion} ·{" "}
+                {investigation.retrieval.sourcePolicyVersion}
+              </span>
+              <span className="mt-1 block text-[10px]">
+                Rank 1 is the strongest lexical match. Scores are comparable only within this
+                query.
+              </span>
             </div>
 
             <div className="space-y-3">
@@ -553,29 +560,21 @@ export function InvestigationWorkbench({
                         {record.passage}
                       </blockquote>
 
-                      <div className="grid grid-cols-3 gap-2 border-y py-2">
+                      <div className="grid grid-cols-2 gap-2 border-y py-2">
                         <div>
                           <div className="text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
-                            Full text
+                            Lexical rank
                           </div>
                           <div className="mt-0.5 font-mono text-xs">
-                            {record.fullTextRank ? `#${record.fullTextRank}` : "—"}
+                            #{record.lexicalRank}
                           </div>
                         </div>
                         <div>
                           <div className="text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
-                            Vector
+                            Lexical score
                           </div>
                           <div className="mt-0.5 font-mono text-xs">
-                            {record.vectorRank ? `#${record.vectorRank}` : "—"}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
-                            Fused
-                          </div>
-                          <div className="mt-0.5 font-mono text-xs font-semibold text-primary">
-                            #{record.fusedRank}
+                            {record.lexicalScore.toFixed(3)}
                           </div>
                         </div>
                       </div>
@@ -626,7 +625,8 @@ export function InvestigationWorkbench({
         <footer className="mx-auto flex max-w-[1600px] flex-col gap-2 border-x border-b bg-card px-5 py-4 text-[10px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-6">
           <span>This screen contains synthetic data for interface evaluation.</span>
           <span className="font-mono">
-            graph v0.1 · policy v0.1 · prompt demo-001 · embedding-space local-qwen3-001
+            graph v0.1 · policy v0.1 · prompt demo-001 · retrieval{" "}
+            {investigation.retrieval.configurationVersion}
           </span>
         </footer>
       </main>

@@ -13,11 +13,13 @@ from exposure_ledger import (
     AssessmentResult,
     CapturedSourcePayload,
     EvidenceRecord,
+    ExposureEvidence,
     GitHubAdvisorySourceUnavailable,
     GitHubAdvisoryTarget,
     GitHubRepositoryAdvisoryAdapter,
     OsvBatchResponse,
     OsvPackageQuery,
+    OsvQueryBatchSourceAdapter,
     OsvSourceUnavailable,
     RepositoryArchive,
 )
@@ -28,6 +30,7 @@ from exposure_ledger_worker.main import process_next_assessment
 from fastapi.testclient import TestClient
 
 FIXTURE_ROOT = Path(__file__).parents[3] / "packages/domain/tests/fixtures/uv_repository"
+LEXICAL_FIXTURE = Path(__file__).parent / "fixtures/lexical-retrieval-v1.json"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
@@ -45,9 +48,10 @@ class FixtureArchiveSource:
 
 
 class CapturedOsvSource:
-    def __init__(self) -> None:
+    def __init__(self, *, include_query_capture: bool = False) -> None:
         self.batches: list[tuple[OsvPackageQuery, ...]] = []
         self._captured_at = datetime(2026, 9, 3, 12, 30, tzinfo=UTC)
+        self._include_query_capture = include_query_capture
 
     def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         self.batches.append(queries)
@@ -121,6 +125,10 @@ class CapturedOsvSource:
                 {},
             ]
         }
+        if self._include_query_capture:
+            payload["results"][0]["vulns"][0]["affected"][0]["database_specific"] = {
+                "remediation": "Upgrade feature-lib to 5.2 or later"
+            }
         captured_payloads = {
             str(vulnerability["id"]): CapturedSourcePayload(
                 content=json.dumps(vulnerability, separators=(",", ":"), sort_keys=True),
@@ -129,10 +137,36 @@ class CapturedOsvSource:
             for result in payload["results"]
             for vulnerability in result.get("vulns", [])
         }
+        capture_options: dict[str, object] = {}
+        if self._include_query_capture:
+            captured_content = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            query_record = OsvQueryBatchSourceAdapter(
+                payload_identity="lexical-known-answer-page-v1"
+            ).capture(
+                payload,
+                capture=CapturedSourcePayload(
+                    content=captured_content,
+                    captured_at=self._captured_at,
+                ),
+            )
+            capture_options = {
+                "additional_evidence_records": (query_record,),
+                "query_evidence_by_vulnerability": {
+                    (result_index, str(vulnerability["id"])): (
+                        ExposureEvidence(
+                            record_identity=query_record.identity,
+                            passage_identities=(query_record.passages[result_index].identity,),
+                        ),
+                    )
+                    for result_index, result in enumerate(payload["results"])
+                    for vulnerability in result.get("vulns", [])
+                },
+            }
         response = OsvBatchResponse.capture(
             payload,
             expected_results=len(queries),
             captured_payloads=captured_payloads,
+            **capture_options,
         )
         self._captured_at += timedelta(minutes=1)
         return response
@@ -402,6 +436,126 @@ def test_osv_unavailability_is_visible_without_fabricated_evidence(database_url:
     assert exposures == []
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (0,)
+
+
+def test_exposure_evidence_search_matches_versioned_lexical_known_answers(
+    database_url: str,
+) -> None:
+    fixture = json.loads(LEXICAL_FIXTURE.read_text())
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(include_query_capture=True),
+    )
+
+    with TestClient(app) as client:
+        exposures = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"]
+        target, unrelated = exposures
+        evidence_record_ids = {
+            record["identity"]: record["id"] for record in target["evidenceRecords"]
+        }
+
+        for case in fixture["cases"]:
+            response = client.get(
+                f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
+                params=[
+                    ("query", case["query"]),
+                    ("sourceIdentity", "osv"),
+                    *[("evidenceType", item) for item in case["evidenceTypes"]],
+                ],
+            )
+            assert response.status_code == 200
+            result = response.json()
+            assert result["queryContext"] == {
+                "query": case["query"],
+                "assessmentRunId": run["id"],
+                "exposureId": target["id"],
+                "sourcePolicy": {
+                    "version": fixture["sourcePolicyVersion"],
+                    "allowedSourceIdentities": ["osv"],
+                },
+                "evidenceTypes": case["evidenceTypes"],
+                "retrievalConfigurationVersion": fixture["retrievalConfigurationVersion"],
+                "limit": fixture["limit"],
+            }
+            assert len(result["items"]) == len(case["expectedPassages"])
+            for rank, (item, passage_key) in enumerate(
+                zip(result["items"], case["expectedPassages"], strict=True),
+                start=1,
+            ):
+                expected = fixture["passages"][passage_key]
+                assert item["lexicalRank"] == rank
+                assert item["lexicalScore"] > 0
+                assert {key: item["passage"][key] for key in ("identity", "kind", "selector")} == {
+                    key: expected[key] for key in ("identity", "kind", "selector")
+                }
+                assert {
+                    key: item["source"][key] for key in ("identity", "authority", "location")
+                } == expected["source"]
+                assert item["source"]["id"]
+                assert item["capture"] == expected["capture"]
+                assert (
+                    item["evidenceRecordId"] == evidence_record_ids[expected["capture"]["identity"]]
+                )
+                assert item["exposureContext"] == fixture["exposureContext"]
+
+        exposure_by_scope = {"target": target, "unrelated": unrelated}
+        for case in fixture["emptyCases"]:
+            scoped_exposure = exposure_by_scope[case["scope"]]
+            response = client.get(
+                f"/api/v1/assessment-runs/{run['id']}/exposures/{scoped_exposure['id']}"
+                "/evidence-passages",
+                params=[
+                    ("query", case["query"]),
+                    *[("sourceIdentity", item) for item in case["sourceIdentities"]],
+                    *[("evidenceType", item) for item in case["evidenceTypes"]],
+                ],
+            )
+            assert response.status_code == 200
+            assert response.json()["items"] == []
+
+
+def test_exposure_evidence_search_rejects_stale_configuration_and_wrong_scope(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(),
+    )
+
+    with TestClient(app) as client:
+        exposure = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"][0]
+        stale = client.get(
+            f"/api/v1/assessment-runs/{run['id']}/exposures/{exposure['id']}/evidence-passages",
+            params={
+                "query": "fixed",
+                "sourceIdentity": "osv",
+                "evidenceType": "affected",
+                "retrievalConfigurationVersion": "postgres-lexical-v0",
+            },
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"]["code"] == "retrieval_configuration_not_current"
+
+        wrong_run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+        wrong_scope = client.get(
+            f"/api/v1/assessment-runs/{wrong_run['id']}/exposures/{exposure['id']}"
+            "/evidence-passages",
+            params={
+                "query": "fixed",
+                "sourceIdentity": "osv",
+                "evidenceType": "affected",
+            },
+        )
+        assert wrong_scope.status_code == 404
+        assert wrong_scope.json()["detail"]["code"] == "exposure_not_found"
 
 
 def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(

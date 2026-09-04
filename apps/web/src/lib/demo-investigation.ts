@@ -19,9 +19,8 @@ export type DemoEvidenceRecord = {
   relationship: EvidenceRelationship
   claimIds: string[]
   passage: string
-  fullTextRank: number | null
-  vectorRank: number | null
-  fusedRank: number
+  lexicalRank: number
+  lexicalScore: number
   digest: string
 }
 
@@ -71,6 +70,12 @@ export type DemoInvestigation = {
     assistanceClass: string
     actionLevel: string
     decision: string
+  }
+  retrieval: {
+    query: string
+    configurationVersion: string
+    sourcePolicyVersion: string
+    evidenceTypes: string[]
   }
   stages: InvestigationStage[]
   claims: InvestigationClaim[]
@@ -132,9 +137,19 @@ export const demoInvestigation: DemoInvestigation = {
     actionLevel: "A1 · Read",
     decision: "Allowed",
   },
+  retrieval: {
+    query: "cipherleaf 2.4.1 affected fixed upgrade",
+    configurationVersion: "postgres-lexical-v1",
+    sourcePolicyVersion: "explicit-source-allowlist-v1",
+    evidenceTypes: ["dependency", "affected", "remediation", "exploitation", "usage"],
+  },
   stages: [
     { label: "Matched", mode: "deterministic", detail: "Version range and aliases normalized" },
-    { label: "Retrieved", mode: "retrieval", detail: "Hybrid evidence search completed" },
+    {
+      label: "Retrieved",
+      mode: "retrieval",
+      detail: "PostgreSQL full-text search completed",
+    },
     { label: "Interpreted", mode: "model", detail: "Claims synthesized locally" },
     { label: "Validated", mode: "policy", detail: "Citations and safety policy passed" },
   ],
@@ -174,9 +189,8 @@ export const demoInvestigation: DemoInvestigation = {
       relationship: "supports",
       claimIds: ["claim-version"],
       passage: 'name = "cipherleaf" · version = "2.4.1" · via auth-gateway',
-      fullTextRank: 1,
-      vectorRank: null,
-      fusedRank: 1,
+      lexicalRank: 1,
+      lexicalScore: 0.941,
       digest: "sha256:65bc…8a20",
     },
     {
@@ -188,9 +202,8 @@ export const demoInvestigation: DemoInvestigation = {
       claimIds: ["claim-version", "claim-fix"],
       passage:
         "Releases from 2.1.0 through 2.4.2 are affected. Consumers should upgrade to cipherleaf 2.4.3 or later.",
-      fullTextRank: 2,
-      vectorRank: 1,
-      fusedRank: 2,
+      lexicalRank: 2,
+      lexicalScore: 0.887,
       digest: "sha256:21df…0c91",
     },
     {
@@ -202,9 +215,8 @@ export const demoInvestigation: DemoInvestigation = {
       claimIds: ["claim-version", "claim-fix"],
       passage:
         "The public record lists releases before 2.4.2 as affected and names 2.4.2 as fixed.",
-      fullTextRank: 3,
-      vectorRank: 2,
-      fusedRank: 3,
+      lexicalRank: 3,
+      lexicalScore: 0.844,
       digest: "sha256:44ea…a1c2",
     },
     {
@@ -216,9 +228,8 @@ export const demoInvestigation: DemoInvestigation = {
       claimIds: ["claim-priority"],
       passage:
         "This synthetic record exists only to demonstrate how known-exploitation evidence changes investigation priority.",
-      fullTextRank: 1,
-      vectorRank: 3,
-      fusedRank: 4,
+      lexicalRank: 4,
+      lexicalScore: 0.802,
       digest: "sha256:8aa1…9f13",
     },
     {
@@ -229,9 +240,8 @@ export const demoInvestigation: DemoInvestigation = {
       relationship: "contextual",
       claimIds: ["claim-usage"],
       passage: "from cipherleaf.tokens import verify_session",
-      fullTextRank: 1,
-      vectorRank: 2,
-      fusedRank: 5,
+      lexicalRank: 5,
+      lexicalScore: 0.734,
       digest: "sha256:d10c…4b27",
     },
   ],
