@@ -203,6 +203,33 @@ class InjectedFollowUpRetriever(ControlledRetriever):
         )
 
 
+class AdditionalEvidenceRetriever(ControlledRetriever):
+    def follow_up(
+        self,
+        exposure: InvestigationExposure,
+        command: RunInvestigation,
+        proposal: EvidenceFollowUpProposal,
+        *,
+        timeout_seconds: float,
+    ) -> RetrievedInvestigationEvidence:
+        result = super().follow_up(
+            exposure,
+            command,
+            proposal,
+            timeout_seconds=timeout_seconds,
+        )
+        return replace(
+            result,
+            passages=(
+                replace(
+                    result.passages[0],
+                    passage_identity="osv:affected-detail",
+                    passage="The first fixed release is 5.2.0.",
+                ),
+            ),
+        )
+
+
 class ControlledGenerator:
     def __init__(self, draft: StructuredInvestigationDraft) -> None:
         self._draft = draft
@@ -406,6 +433,25 @@ async def test_runner_follows_one_authorized_evidence_gap_before_finalizing() ->
         "recommend",
         "validate_policy",
         "persist_revision",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_follow_up_adds_to_the_initial_evidence_context() -> None:
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=AdditionalEvidenceRetriever(),
+        generator=SequencedGenerator(_follow_up_draft(), _supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert revision.status is InvestigationRevisionStatus.COMPLETE
+    assert [item.passage_identity for item in revision.evidence_state.retrieved.passages] == [
+        "osv:affected",
+        "osv:affected-detail",
     ]
 
 

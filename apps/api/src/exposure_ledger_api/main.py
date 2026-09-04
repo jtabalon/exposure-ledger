@@ -686,14 +686,14 @@ class RevisionPolicyDecisionResponse(ApiModel):
     result: PolicyResult
     rule_version: str
     reason: str
-    enforcement_point: Literal["structured_output", "follow_up_tool"]
+    enforcement_point: Literal["structured_output", "tool_call"]
 
     @classmethod
     def from_domain(
         cls,
         decision: PolicyDecision,
         *,
-        enforcement_point: Literal["structured_output", "follow_up_tool"] = "structured_output",
+        enforcement_point: Literal["structured_output", "tool_call"] = "structured_output",
     ) -> "RevisionPolicyDecisionResponse":
         return cls(
             standard_version=decision.standard_version,
@@ -826,7 +826,7 @@ class InvestigationRevisionResponse(ApiModel):
                         issues=list(revision.follow_up.issues),
                         policy_decision=RevisionPolicyDecisionResponse.from_domain(
                             revision.follow_up.policy_decision,
-                            enforcement_point="follow_up_tool",
+                            enforcement_point="tool_call",
                         ),
                     ),
                 )

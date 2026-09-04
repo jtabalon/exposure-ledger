@@ -45,6 +45,35 @@ def test_default_revision_limits_match_the_documented_safety_ceilings() -> None:
     assert budget.wall_time_seconds == 120
 
 
+@pytest.mark.parametrize(
+    "budget",
+    [
+        InvestigationBudget(max_generation_model_calls=5),
+        InvestigationBudget(max_tool_calls=15),
+        InvestigationBudget(max_graph_transitions=12),
+        InvestigationBudget(wall_time_seconds=120),
+    ],
+)
+def test_documented_safety_ceilings_are_accepted(budget: InvestigationBudget) -> None:
+    assert budget
+
+
+@pytest.mark.parametrize(
+    "budget_arguments",
+    [
+        {"max_generation_model_calls": 6},
+        {"max_tool_calls": 16},
+        {"max_graph_transitions": 13},
+        {"wall_time_seconds": 121},
+    ],
+)
+def test_revision_limits_cannot_exceed_documented_safety_ceilings(
+    budget_arguments: dict[str, int],
+) -> None:
+    with pytest.raises(ValueError, match="cannot exceed"):
+        InvestigationBudget(**budget_arguments)
+
+
 def test_one_scoped_c1_a1_evidence_search_is_authorized() -> None:
     exposure_id = UUID("00000000-0000-0000-0000-000000000042")
     proposal = EvidenceFollowUpProposal(

@@ -35,6 +35,7 @@ from exposure_ledger import (
     InvestigationMeasurements,
     InvestigationRevision,
     InvestigationRevisionStatus,
+    InvestigationStoppingCondition,
     Recommendation,
     RetrievedInvestigationEvidence,
     RetrievedInvestigationPassage,
@@ -43,7 +44,7 @@ from exposure_ledger import (
 )
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
-from exposure_ledger_storage import ExposureRepository, InvestigationRepository
+from exposure_ledger_storage import ExposureRepository, InvestigationRepository, apply_migrations
 from exposure_ledger_storage.postgres_deadline import connect_with_deadline
 from exposure_ledger_worker.local_generation import GenerationReadiness
 from exposure_ledger_worker.main import process_next_assessment
@@ -397,6 +398,46 @@ def test_revision_history_appends_and_reloads_complete_immutable_revisions(
         )
 
 
+def test_follow_up_migration_preserves_legacy_incomplete_revisions(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    legacy_revision = replace(
+        _revision(exposure),
+        status=InvestigationRevisionStatus.INCOMPLETE,
+        stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
+        stopping_reason="The Investigation wall-time budget was exhausted.",
+    )
+    repository.append(legacy_revision)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """
+            ALTER TABLE investigation_revisions
+                DROP CONSTRAINT investigation_revisions_stopping_reason_check,
+                DROP CONSTRAINT investigation_revisions_follow_up_check,
+                DROP COLUMN stopping_reason,
+                DROP COLUMN evidence_gap,
+                DROP COLUMN follow_up,
+                DROP COLUMN follow_up_policy_decision_id
+            """
+        )
+        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 16")
+
+    apply_migrations(database_url)
+
+    loaded = repository.list_for_exposure(exposure.id)[0].revision
+    with psycopg.connect(database_url) as connection:
+        stored_reason = connection.execute(
+            "SELECT stopping_reason FROM investigation_revisions WHERE id = %s",
+            (legacy_revision.id,),
+        ).fetchone()
+    assert stored_reason == (None,)
+    assert loaded.status is InvestigationRevisionStatus.INCOMPLETE
+    assert loaded.stopping_reason is not None
+    assert "legacy Investigation Revision" in loaded.stopping_reason
+
+
 def test_revision_persists_the_model_proposal_and_deterministic_follow_up_authorization(
     database_url: str,
 ) -> None:
@@ -454,7 +495,7 @@ def test_revision_persists_the_model_proposal_and_deterministic_follow_up_author
     assert payload["followUp"]["authorization"]["authorized"] is True
     assert payload["followUp"]["authorization"]["executed"] is True
     assert payload["followUp"]["authorization"]["policyDecision"]["enforcementPoint"] == (
-        "follow_up_tool"
+        "tool_call"
     )
 
 
@@ -720,7 +761,9 @@ def test_controlled_adapters_execute_one_persisted_follow_up_per_exposure(
         assert connection.execute(
             """
             SELECT count(*) FROM policy_decisions
-            WHERE assessment_run_id = %s AND enforcement_point = 'follow_up_tool'
+            WHERE assessment_run_id = %s
+              AND enforcement_point = 'tool_call'
+              AND target_scope LIKE 'exposure:%%'
             """,
             (run["id"],),
         ).fetchone() == (2,)

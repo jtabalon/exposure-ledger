@@ -255,6 +255,16 @@ class InvestigationBudget:
             raise ValueError(
                 "Investigation count budgets must be positive and wall time must be at least 1s"
             )
+        if (
+            self.max_generation_model_calls > 5
+            or self.max_tool_calls > 15
+            or self.max_graph_transitions > 12
+            or self.wall_time_seconds > 120
+        ):
+            raise ValueError(
+                "Investigation budgets cannot exceed 5 generation calls, 15 tool calls, "
+                "12 graph transitions, or 120 seconds"
+            )
 
 
 @dataclass(frozen=True, slots=True)

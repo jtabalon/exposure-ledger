@@ -47,7 +47,7 @@ from exposure_ledger import (
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from exposure_ledger_storage.exposures import ExposureRepository
+from exposure_ledger_storage.exposures import ExposureRecord, ExposureRepository
 from exposure_ledger_storage.postgres_deadline import (
     connect_with_deadline,
     deadline_after,
@@ -55,8 +55,11 @@ from exposure_ledger_storage.postgres_deadline import (
 )
 from exposure_ledger_storage.retrieval import (
     EmbeddingIndexUnavailable,
+    EmbeddingSpaceNotCurrent,
     EvidenceRetriever,
+    RetrievalConfigurationNotCurrent,
     RetrievalQuery,
+    RetrievalResult,
     SourcePolicy,
     build_exposure_retrieval_query,
 )
@@ -245,16 +248,13 @@ class InvestigationRepository:
         deadline_monotonic = deadline_after(timeout_seconds)
         if command.configuration.source_policy_version != "explicit-source-allowlist-v1":
             raise ValueError("Pinned Source policy version is not current")
-        try:
-            records = ExposureRepository(self._database_url).list_for_assessment(
-                command.assessment_run_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-        except psycopg.errors.QueryCanceled as error:
-            raise TimeoutError("Evidence retrieval exceeded its wall-time budget") from error
-        record = next((item for item in records if item.id == exposure.exposure_id), None)
-        if record is None:
-            raise ValueError("Exposure is no longer available in the Assessment scope")
+        record = self._load_scoped_exposure(
+            command,
+            exposure.exposure_id,
+            deadline_monotonic=deadline_monotonic,
+            timeout_message="Evidence retrieval exceeded its wall-time budget",
+            missing_message="Exposure is no longer available in the Assessment scope",
+        )
         source_identities = tuple(
             sorted({evidence.source.identity for evidence in record.evidence_records})
         )
@@ -294,29 +294,7 @@ class InvestigationRepository:
             raise TimeoutError("Evidence retrieval exceeded its wall-time budget") from error
         if result.embedding_space != command.configuration.embedding_space:
             raise ValueError("Retrieved evidence used a different Embedding Space")
-        return RetrievedInvestigationEvidence(
-            query=result.query.text,
-            passages=tuple(
-                RetrievedInvestigationPassage(
-                    evidence_record_id=item.evidence_record_id,
-                    evidence_record_identity=item.capture.identity,
-                    evidence_record_digest=item.capture.content_digest,
-                    passage_identity=item.passage.identity,
-                    passage=item.passage.content,
-                    source_identity=item.source.identity,
-                    source_authority=item.source.authority,
-                    source_location=item.source.location,
-                    captured_at=item.capture.captured_at,
-                    full_text_rank=item.full_text_rank,
-                    full_text_score=item.full_text_score,
-                    vector_rank=item.vector_rank,
-                    vector_score=item.vector_score,
-                    fused_rank=item.fused_rank or 0,
-                    fused_score=item.fused_score or 0.0,
-                )
-                for item in result.passages
-            ),
-        )
+        return self._to_retrieved_evidence(result)
 
     def follow_up(
         self,
@@ -336,16 +314,13 @@ class InvestigationRepository:
         except ValueError as error:
             raise ValueError("Evidence follow-up type is not supported") from error
         deadline_monotonic = deadline_after(timeout_seconds)
-        try:
-            records = ExposureRepository(self._database_url).list_for_assessment(
-                command.assessment_run_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-        except psycopg.errors.QueryCanceled as error:
-            raise TimeoutError("Evidence follow-up exceeded its wall-time budget") from error
-        record = next((item for item in records if item.id == exposure.exposure_id), None)
-        if record is None:
-            raise ValueError("Evidence follow-up Exposure is outside the Assessment scope")
+        record = self._load_scoped_exposure(
+            command,
+            exposure.exposure_id,
+            deadline_monotonic=deadline_monotonic,
+            timeout_message="Evidence follow-up exceeded its wall-time budget",
+            missing_message="Evidence follow-up Exposure is outside the Assessment scope",
+        )
         source_identity = proposal.arguments.source_identity
         matching_passages = tuple(
             passage
@@ -384,14 +359,45 @@ class InvestigationRepository:
             )
         except psycopg.errors.QueryCanceled as error:
             raise TimeoutError("Evidence follow-up exceeded its wall-time budget") from error
-        except EmbeddingIndexUnavailable as error:
+        except (
+            EmbeddingIndexUnavailable,
+            EmbeddingSpaceNotCurrent,
+            RetrievalConfigurationNotCurrent,
+        ) as error:
             raise EvidenceFollowUpUnavailable(str(error)) from error
         if result.embedding_space != command.configuration.embedding_space:
-            raise ValueError("Evidence follow-up used a different Embedding Space")
+            raise EvidenceFollowUpUnavailable(
+                "Evidence follow-up used a different Embedding Space."
+            )
         if not result.passages:
             raise EvidenceFollowUpUnavailable(
                 "The authorized captured-evidence follow-up returned no passages."
             )
+        return self._to_retrieved_evidence(result)
+
+    def _load_scoped_exposure(
+        self,
+        command: RunInvestigation,
+        exposure_id: UUID,
+        *,
+        deadline_monotonic: float,
+        timeout_message: str,
+        missing_message: str,
+    ) -> ExposureRecord:
+        try:
+            records = ExposureRepository(self._database_url).list_for_assessment(
+                command.assessment_run_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError(timeout_message) from error
+        record = next((item for item in records if item.id == exposure_id), None)
+        if record is None:
+            raise ValueError(missing_message)
+        return record
+
+    @staticmethod
+    def _to_retrieved_evidence(result: RetrievalResult) -> RetrievedInvestigationEvidence:
         return RetrievedInvestigationEvidence(
             query=result.query.text,
             passages=tuple(
@@ -973,7 +979,7 @@ class InvestigationRepository:
                 id, assessment_run_id, standard_version, assistance_class, action_level,
                 target_scope, authorization_scope, result, rule_version, reason, created_at,
                 enforcement_point
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'follow_up_tool')
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'tool_call')
             """,
             (
                 decision_id,
@@ -1146,9 +1152,7 @@ class InvestigationRepository:
             ),
             evidence_gap=evidence_gap,
             follow_up=follow_up,
-            stopping_reason=(
-                str(row["stopping_reason"]) if row["stopping_reason"] is not None else None
-            ),
+            stopping_reason=_stored_stopping_reason(row),
             events=_events_from_json(row["events"]),
             measurements=_measurements_from_json(row["measurements"]),
             configuration=configuration,
@@ -1159,6 +1163,19 @@ class InvestigationRepository:
             revision_number=int(row["revision_number"]),
             revision=revision,
         )
+
+
+def _stored_stopping_reason(row: dict[str, Any]) -> str | None:
+    value = row["stopping_reason"]
+    if value is not None:
+        return str(value)
+    if row["status"] == InvestigationRevisionStatus.INCOMPLETE.value:
+        return (
+            "This legacy Investigation Revision stopped at "
+            f"{str(row['stopping_condition']).replace('_', ' ')} before stopping reasons "
+            "were recorded."
+        )
+    return None
 
 
 def _retrieved_passages_json(evidence: RetrievedInvestigationEvidence) -> list[dict[str, object]]:

@@ -1031,14 +1031,6 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
     (
         16,
         """
-        ALTER TABLE policy_decisions
-            DROP CONSTRAINT policy_decisions_enforcement_point_check,
-            ADD CONSTRAINT policy_decisions_enforcement_point_check
-                CHECK (enforcement_point IN (
-                    'request', 'tool_call', 'retrieved_content', 'structured_output',
-                    'follow_up_tool'
-                ));
-
         ALTER TABLE investigation_revisions
             DROP CONSTRAINT investigation_revisions_stopping_condition_check,
             ADD CONSTRAINT investigation_revisions_stopping_condition_check
@@ -1060,10 +1052,6 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             ADD COLUMN follow_up_policy_decision_id uuid UNIQUE
                 REFERENCES policy_decisions(id) ON DELETE RESTRICT;
 
-        UPDATE investigation_revisions
-        SET stopping_reason = 'The Investigation stopped: ' || stopping_condition || '.'
-        WHERE status = 'incomplete';
-
         ALTER TABLE investigation_revisions
             ADD CONSTRAINT investigation_revisions_stopping_reason_check
                 CHECK (
@@ -1071,7 +1059,7 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                     OR
                     (status = 'incomplete' AND stopping_reason IS NOT NULL
                      AND length(trim(stopping_reason)) > 0)
-                ),
+                ) NOT VALID,
             ADD CONSTRAINT investigation_revisions_follow_up_check
                 CHECK (
                     (follow_up IS NULL) = (follow_up_policy_decision_id IS NULL)

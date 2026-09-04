@@ -514,12 +514,13 @@ class BoundedInvestigationRunner:
             }
         updates["tool_calls"] = state["tool_calls"] + 1
         try:
-            updates["retrieved"] = self._retriever.follow_up(
+            follow_up_evidence = self._retriever.follow_up(
                 state["exposure"],
                 state["command"],
                 authorization.proposal,
                 timeout_seconds=self._remaining_seconds(state),
             )
+            updates["retrieved"] = _merge_retrieved_evidence(state["retrieved"], follow_up_evidence)
             updates["follow_up"] = replace(authorization, executed=True)
         except TimeoutError:
             stopping_condition = InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED
@@ -739,6 +740,20 @@ def _retrieved_evidence_scope(
             source_adapter_version,
             passages,
         ) in sorted(grouped.items(), key=lambda item: str(item[0]))
+    )
+
+
+def _merge_retrieved_evidence(
+    initial: RetrievedInvestigationEvidence,
+    follow_up: RetrievedInvestigationEvidence,
+) -> RetrievedInvestigationEvidence:
+    passages = {(item.evidence_record_id, item.passage_identity): item for item in initial.passages}
+    passages.update(
+        {(item.evidence_record_id, item.passage_identity): item for item in follow_up.passages}
+    )
+    return RetrievedInvestigationEvidence(
+        query=follow_up.query,
+        passages=tuple(passages.values()),
     )
 
 
