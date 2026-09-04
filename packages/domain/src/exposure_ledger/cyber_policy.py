@@ -31,6 +31,7 @@ class AssessmentOperation(StrEnum):
     PUBLIC_FIRST_PARTY_ADVISORY_LOOKUP = "public_first_party_advisory_lookup"
     PUBLIC_CISA_KEV_LOOKUP = "public_cisa_kev_lookup"
     PUBLIC_FIRST_EPSS_LOOKUP = "public_first_epss_lookup"
+    EMBED_RETRIEVED_EVIDENCE = "embed_retrieved_evidence"
     SUMMARIZE_PUBLIC_ADVISORY = "summarize_public_advisory"
     DRAFT_DEPENDENCY_PATCH = "draft_dependency_patch"
     GENERATE_EXPLOIT = "generate_exploit"
@@ -90,6 +91,9 @@ _OPERATION_CLASSIFICATIONS: Final = {
     ),
     AssessmentOperation.PUBLIC_CISA_KEV_LOOKUP: _Classification(AssistanceClass.C1, ActionLevel.A1),
     AssessmentOperation.PUBLIC_FIRST_EPSS_LOOKUP: _Classification(
+        AssistanceClass.C1, ActionLevel.A1
+    ),
+    AssessmentOperation.EMBED_RETRIEVED_EVIDENCE: _Classification(
         AssistanceClass.C1, ActionLevel.A1
     ),
     AssessmentOperation.SUMMARIZE_PUBLIC_ADVISORY: _Classification(

@@ -297,6 +297,34 @@ class AssessmentRunRepository:
             enforcement_point="tool_call",
         )
 
+    def record_retrieved_content_policy_decision(
+        self, assessment_run_id: UUID, decision: PolicyDecision
+    ) -> PolicyDecisionRecord:
+        """Record policy enforcement before untrusted evidence enters a local model."""
+        created_at = datetime.now(UTC)
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            decision_id = self._insert_policy_decision(
+                connection,
+                decision,
+                assessment_run_id=assessment_run_id,
+                created_at=created_at,
+                enforcement_point="retrieved_content",
+            )
+        return PolicyDecisionRecord(
+            id=decision_id,
+            assessment_run_id=assessment_run_id,
+            standard_version=decision.standard_version,
+            assistance_class=decision.assistance_class,
+            action_level=decision.action_level,
+            target_scope=decision.target_scope,
+            authorization_scope=decision.authorization_scope,
+            result=decision.result,
+            rule_version=decision.rule_version,
+            reason=decision.reason,
+            created_at=created_at,
+            enforcement_point="retrieved_content",
+        )
+
     def get_policy_decision(self, assessment_run_id: UUID) -> PolicyDecisionRecord | None:
         with psycopg.connect(
             self._database_url,

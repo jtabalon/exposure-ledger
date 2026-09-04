@@ -44,7 +44,12 @@ from exposure_ledger_storage import (
     AssessmentRunRepository,
     AssessmentScenario,
     AssetSnapshotRepository,
+    EmbeddingIndexUnavailable,
+    EmbeddingProvider,
+    EmbeddingProviderUnavailable,
+    EvidenceRetriever,
     ExposureRepository,
+    OllamaEmbeddingProvider,
     normalize_database_url,
 )
 from pydantic import Field, field_validator
@@ -116,6 +121,65 @@ def _public_source_decision(
     )
 
 
+def _index_evidence_or_fail(
+    *,
+    repository: AssessmentRunRepository,
+    assessment_run_id: UUID,
+    claim_id: UUID,
+    database_url: str,
+    embedding_provider: EmbeddingProvider,
+) -> bool:
+    retriever = EvidenceRetriever(database_url, embedding_provider=embedding_provider)
+    readiness = embedding_provider.check_readiness()
+    retriever.record_embedding_readiness(readiness)
+    if readiness.space is None:
+        error = EmbeddingProviderUnavailable(readiness)
+    else:
+        decision = CyberPolicy.decide(
+            AssessmentRequest(
+                operation=AssessmentOperation.EMBED_RETRIEVED_EVIDENCE,
+                target_scope=(
+                    f"assessment:{assessment_run_id};embedding-space:{readiness.space.identity}"
+                ),
+                authorization_scope="local operator",
+                authorization_status=AuthorizationStatus.CONFIRMED,
+            )
+        )
+        repository.record_retrieved_content_policy_decision(assessment_run_id, decision)
+        if decision.result is not PolicyResult.ALLOWED:
+            repository.fail(
+                assessment_run_id,
+                claim_id=claim_id,
+                code="embedding_content_policy_blocked",
+                message=decision.reason,
+            )
+            return False
+        try:
+            retriever.index_assessment(assessment_run_id, space=readiness.space)
+            return True
+        except EmbeddingProviderUnavailable as caught:
+            error = caught
+        except (EmbeddingIndexUnavailable, ValueError) as caught:
+            repository.fail(
+                assessment_run_id,
+                claim_id=claim_id,
+                code="embedding_index_failed",
+                message=str(caught),
+            )
+            return False
+
+    detail = error.readiness.message
+    if error.readiness.setup is not None:
+        detail = f"{detail} {error.readiness.setup}"
+    repository.fail(
+        assessment_run_id,
+        claim_id=claim_id,
+        code=error.readiness.code or "embedding_provider_unavailable",
+        message=detail,
+    )
+    return False
+
+
 class WorkerSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -126,6 +190,9 @@ class WorkerSettings(BaseSettings):
     database_url: str = DEFAULT_DATABASE_URL
     worker_poll_seconds: float = Field(default=0.5, gt=0, le=30)
     worker_lease_seconds: float = Field(default=30, ge=1, le=3600)
+    embedding_health_seconds: float = Field(default=10, gt=0, le=20)
+    ollama_base_url: str = "http://localhost:11434"
+    embedding_model: str = "qwen3-embedding:0.6b"
 
     @field_validator("database_url")
     @classmethod
@@ -163,6 +230,36 @@ def maintain_claim(
         thread.join()
 
 
+@contextmanager
+def maintain_embedding_readiness(
+    retriever: EvidenceRetriever,
+    provider: EmbeddingProvider,
+    *,
+    interval_seconds: float,
+) -> Iterator[None]:
+    """Refresh worker-owned embedding health while long Assessments are running."""
+    stopped = Event()
+
+    def observe() -> None:
+        try:
+            retriever.record_embedding_readiness(provider.check_readiness())
+        except Exception:
+            logger.exception("Local embedding readiness observation failed")
+
+    def heartbeat() -> None:
+        while not stopped.wait(interval_seconds):
+            observe()
+
+    observe()
+    thread = Thread(target=heartbeat, name="embedding-readiness-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join()
+
+
 def process_next_assessment(
     *,
     database_url: str,
@@ -172,6 +269,7 @@ def process_next_assessment(
     kev_source: CisaKevSource | None = None,
     epss_source: EpssSource | None = None,
     advisory_source: FirstPartyAdvisorySource | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
 ) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
     repository = AssessmentRunRepository(database_url)
@@ -253,6 +351,14 @@ def process_next_assessment(
                     assessment_run.id,
                     asset_snapshot_id=snapshot.id,
                 ):
+                    if embedding_provider is not None and not _index_evidence_or_fail(
+                        repository=repository,
+                        assessment_run_id=assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        database_url=database_url,
+                        embedding_provider=embedding_provider,
+                    ):
+                        return True
                     repository.complete_repository(
                         assessment_run.id,
                         claim_id=assessment_run.claim_id,
@@ -348,6 +454,14 @@ def process_next_assessment(
                         asset_snapshot_id=snapshot.id,
                         result=result,
                     )
+                    if embedding_provider is not None and not _index_evidence_or_fail(
+                        repository=repository,
+                        assessment_run_id=assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        database_url=database_url,
+                        embedding_provider=embedding_provider,
+                    ):
+                        return True
                 except OsvSourceUnavailable as error:
                     repository.fail(
                         assessment_run.id,
@@ -385,15 +499,29 @@ def main() -> None:
     settings = WorkerSettings()
     repository = AssessmentRunRepository(settings.database_url)
     repository.check_ready()
+    embedding_provider = OllamaEmbeddingProvider(
+        base_url=settings.ollama_base_url,
+        model_artifact=settings.embedding_model,
+    )
+    readiness_repository = EvidenceRetriever(
+        settings.database_url,
+        embedding_provider=embedding_provider,
+    )
     logger.info("Exposure Ledger worker ready")
 
     try:
-        while True:
-            if not process_next_assessment(
-                database_url=settings.database_url,
-                stale_after_seconds=settings.worker_lease_seconds,
-            ):
-                time.sleep(settings.worker_poll_seconds)
+        with maintain_embedding_readiness(
+            readiness_repository,
+            embedding_provider,
+            interval_seconds=settings.embedding_health_seconds,
+        ):
+            while True:
+                if not process_next_assessment(
+                    database_url=settings.database_url,
+                    stale_after_seconds=settings.worker_lease_seconds,
+                    embedding_provider=embedding_provider,
+                ):
+                    time.sleep(settings.worker_poll_seconds)
     except KeyboardInterrupt:
         logger.info("Exposure Ledger worker stopped")
 

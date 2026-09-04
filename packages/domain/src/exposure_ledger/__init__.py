@@ -40,6 +40,7 @@ from exposure_ledger.cyber_policy import (
     PolicyDecision,
     PolicyResult,
 )
+from exposure_ledger.embeddings import EmbeddingSpace
 from exposure_ledger.enrichment import (
     CISA_KEV_CATALOG_URL,
     FIRST_EPSS_API_URL,
@@ -116,6 +117,7 @@ __all__ = [
     "CisaKevSource",
     "CyberPolicy",
     "EnvironmentProfile",
+    "EmbeddingSpace",
     "EvidenceState",
     "EvidencePassage",
     "EvidenceRecord",

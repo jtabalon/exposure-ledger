@@ -12,6 +12,30 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE retrieval_query_embeddings")
+    connection.execute("DROP TABLE embedding_provider_observations")
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 14")
+    connection.execute("DROP TABLE passage_embeddings")
+    connection.execute("DROP TABLE embedding_spaces")
+    connection.execute("DROP FUNCTION validate_embedding_dimensions")
+    connection.execute("DROP FUNCTION reject_embedding_mutation")
+    connection.execute(
+        "DROP TRIGGER retrieval_configurations_cannot_be_changed ON retrieval_configurations"
+    )
+    connection.execute(
+        "DELETE FROM retrieval_configurations WHERE version = 'postgres-hybrid-rrf-v1'"
+    )
+    connection.execute(
+        "ALTER TABLE retrieval_configurations "
+        "DROP COLUMN fusion_algorithm, DROP COLUMN rrf_rank_constant, "
+        "DROP COLUMN full_text_candidate_limit, DROP COLUMN vector_candidate_limit"
+    )
+    connection.execute(
+        "CREATE TRIGGER retrieval_configurations_cannot_be_changed "
+        "BEFORE UPDATE OR DELETE ON retrieval_configurations "
+        "FOR EACH ROW EXECUTE FUNCTION reject_retrieval_configuration_mutation()"
+    )
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 13")
     connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 12")
     connection.execute("DROP TABLE assessment_run_exposure_passages")
     connection.execute("DROP TABLE assessment_run_exposure_evidence")
@@ -399,5 +423,20 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         ).fetchone()
 
     assert row == (True,)
-    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert [version for (version,) in versions] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+    ]
     assert enforcement_point == ("enforcement_point",)

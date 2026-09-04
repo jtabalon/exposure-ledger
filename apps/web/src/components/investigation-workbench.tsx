@@ -106,7 +106,10 @@ export function InvestigationWorkbench({
     { label: "Evaluations", icon: FlaskConical, count: "v0.3" },
   ]
   const relatedEvidence = useMemo(
-    () => evidenceForClaim(investigation.evidence, selectedClaimId),
+    () =>
+      evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
+        (left, right) => left.fusedRank - right.fusedRank,
+      ),
     [investigation.evidence, selectedClaimId],
   )
 
@@ -171,7 +174,8 @@ export function InvestigationWorkbench({
             </div>
             <div className="space-y-1 font-mono text-[10px] leading-4 text-stone-500">
               <div>gpt-oss:20b</div>
-              <div>PostgreSQL lexical retrieval</div>
+              <div>{investigation.retrieval.embeddingSpace.modelArtifact}</div>
+              <div>PostgreSQL hybrid retrieval</div>
             </div>
           </div>
         </div>
@@ -501,7 +505,7 @@ export function InvestigationWorkbench({
                 </h2>
               </div>
               <Badge variant="secondary" className="font-mono text-[10px]">
-                Lexical · top {relatedEvidence.length}
+                Hybrid · RRF · top {relatedEvidence.length}
               </Badge>
             </div>
 
@@ -509,13 +513,48 @@ export function InvestigationWorkbench({
               <span className="font-semibold text-foreground">Retrieval query:</span>{" "}
               <span className="font-mono">{investigation.retrieval.query}</span>
               <span className="mt-1 block text-[10px]">
-                PostgreSQL full-text search · {investigation.retrieval.configurationVersion} ·{" "}
+                PostgreSQL full-text + pgvector · {investigation.retrieval.configurationVersion} ·{" "}
                 {investigation.retrieval.sourcePolicyVersion}
               </span>
               <span className="mt-1 block text-[10px]">
-                Rank 1 is the strongest lexical match. Scores are comparable only within this
-                query.
+                Rank 1 is the strongest fused result. A missing component rank means the passage
+                was outside that component&apos;s candidate list.
               </span>
+              <details className="mt-2 border-t border-primary/10 pt-2 text-[10px]">
+                <summary className="cursor-pointer font-semibold text-foreground">
+                  Embedding Space
+                </summary>
+                <dl className="mt-2 grid gap-x-3 gap-y-1 sm:grid-cols-[112px_1fr]">
+                  <dt>Identity</dt>
+                  <dd className="break-all font-mono">
+                    {investigation.retrieval.embeddingSpace.identity}
+                  </dd>
+                  <dt>Provider</dt>
+                  <dd className="font-mono">{investigation.retrieval.embeddingSpace.provider}</dd>
+                  <dt>Artifact</dt>
+                  <dd className="font-mono">
+                    {investigation.retrieval.embeddingSpace.modelArtifact}
+                  </dd>
+                  <dt>Artifact digest</dt>
+                  <dd className="break-all font-mono">
+                    {investigation.retrieval.embeddingSpace.artifactDigest}
+                  </dd>
+                  <dt>Dimensions</dt>
+                  <dd className="font-mono">
+                    {investigation.retrieval.embeddingSpace.dimensions}
+                  </dd>
+                  <dt>Instruction</dt>
+                  <dd className="font-mono">
+                    {investigation.retrieval.embeddingSpace.retrievalInstruction}
+                  </dd>
+                  <dt>Normalizer</dt>
+                  <dd className="font-mono">{investigation.retrieval.embeddingSpace.normalizer}</dd>
+                  <dt>Passage version</dt>
+                  <dd className="font-mono">
+                    {investigation.retrieval.embeddingSpace.passageConstructionVersion}
+                  </dd>
+                </dl>
+              </details>
             </div>
 
             <div className="space-y-3">
@@ -560,21 +599,29 @@ export function InvestigationWorkbench({
                         {record.passage}
                       </blockquote>
 
-                      <div className="grid grid-cols-2 gap-2 border-y py-2">
+                      <div className="grid grid-cols-3 gap-2 border-y py-2">
                         <div>
                           <div className="text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
-                            Lexical rank
+                            Full-text rank
                           </div>
                           <div className="mt-0.5 font-mono text-xs">
-                            #{record.lexicalRank}
+                            {record.fullTextRank === null ? "Not ranked" : `#${record.fullTextRank}`}
                           </div>
                         </div>
                         <div>
                           <div className="text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
-                            Lexical score
+                            Vector rank
                           </div>
                           <div className="mt-0.5 font-mono text-xs">
-                            {record.lexicalScore.toFixed(3)}
+                            {record.vectorRank === null ? "Not ranked" : `#${record.vectorRank}`}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
+                            Fused rank
+                          </div>
+                          <div className="mt-0.5 font-mono text-xs">
+                            #{record.fusedRank}
                           </div>
                         </div>
                       </div>

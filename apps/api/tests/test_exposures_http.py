@@ -10,10 +10,15 @@ from uuid import UUID
 import psycopg
 import pytest
 from exposure_ledger import (
+    AssessmentOperation,
+    AssessmentRequest,
     AssessmentResult,
+    AuthorizationStatus,
     CapturedSourcePayload,
     CisaKevCatalog,
     CisaKevSource,
+    CyberPolicy,
+    EmbeddingSpace,
     EpssResponseRejected,
     EpssSource,
     EvidenceRecord,
@@ -31,13 +36,101 @@ from exposure_ledger import (
 )
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
-from exposure_ledger_storage import ExposureRepository
+from exposure_ledger_storage import (
+    HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
+    AssessmentRunRepository,
+    EmbeddingIndexUnavailable,
+    EmbeddingProviderUnavailable,
+    EmbeddingReadiness,
+    EvidenceRetriever,
+    ExposureRepository,
+    build_exposure_retrieval_query,
+    evaluate_retrieval_recall,
+)
 from exposure_ledger_worker.main import process_next_assessment
 from fastapi.testclient import TestClient
 
 FIXTURE_ROOT = Path(__file__).parents[3] / "packages/domain/tests/fixtures/uv_repository"
 LEXICAL_FIXTURE = Path(__file__).parent / "fixtures/lexical-retrieval-v1.json"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+class KnownAnswerEmbeddingProvider:
+    def __init__(self, *, digest_character: str = "a", reverse: bool = False) -> None:
+        self.space = EmbeddingSpace(
+            provider="known-answer-local",
+            model_artifact="known-answer-embedding-v1",
+            artifact_digest="sha256:" + digest_character * 64,
+            dimensions=3,
+            retrieval_instruction="Represent this query for evidence passage retrieval: ",
+            normalizer="l2-v1",
+            passage_construction_version="source-aware-passage-v1",
+        )
+        self._reverse = reverse
+
+    def check_readiness(self) -> EmbeddingReadiness:
+        return EmbeddingReadiness(
+            status="ready",
+            code=None,
+            message="Known-answer local provider is ready.",
+            setup=None,
+            space=self.space,
+        )
+
+    def require_space(self) -> EmbeddingSpace:
+        return self.space
+
+    def embed_query(self, text: str, space: EmbeddingSpace) -> tuple[float, ...]:
+        assert space.identity == self.space.identity
+        return (1.0, 0.0, 0.0)
+
+    def embed_passages(
+        self, texts: tuple[str, ...], space: EmbeddingSpace
+    ) -> tuple[tuple[float, ...], ...]:
+        assert space.identity == self.space.identity
+        vectors = []
+        for text in texts:
+            is_query_capture = '"vulns"' in text
+            first = (0.0, 1.0, 0.0) if is_query_capture else (1.0, 0.0, 0.0)
+            second = (1.0, 0.0, 0.0) if is_query_capture else (0.0, 1.0, 0.0)
+            vectors.append(second if self._reverse else first)
+        return tuple(vectors)
+
+
+class UnavailableEmbeddingProvider:
+    def check_readiness(self) -> EmbeddingReadiness:
+        return EmbeddingReadiness(
+            status="unavailable",
+            code="embedding_runtime_unavailable",
+            message="Local Ollama embedding runtime is unavailable.",
+            setup="Start Ollama locally and run `make models`, then retry.",
+            space=None,
+        )
+
+    def require_space(self) -> EmbeddingSpace:
+        raise EmbeddingProviderUnavailable(self.check_readiness())
+
+    def embed_query(self, text: str, space: EmbeddingSpace) -> tuple[float, ...]:
+        raise AssertionError("Unavailable provider must not embed a query")
+
+    def embed_passages(
+        self, texts: tuple[str, ...], space: EmbeddingSpace
+    ) -> tuple[tuple[float, ...], ...]:
+        raise AssertionError("Unavailable provider must not embed passages")
+
+
+class InterruptOnceEmbeddingProvider(KnownAnswerEmbeddingProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self._interrupted = False
+
+    def embed_passages(
+        self, texts: tuple[str, ...], space: EmbeddingSpace
+    ) -> tuple[tuple[float, ...], ...]:
+        if not self._interrupted:
+            self._interrupted = True
+            raise KeyboardInterrupt("simulated worker interruption after evidence commit")
+        return super().embed_passages(texts, space)
 
 
 class FixtureArchiveSource:
@@ -543,6 +636,35 @@ def test_osv_unavailability_is_visible_without_fabricated_evidence(database_url:
         assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (0,)
 
 
+def test_embedding_provider_outage_preserves_evidence_and_explicit_setup(
+    database_url: str,
+) -> None:
+    provider = UnavailableEmbeddingProvider()
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(),
+        embedding_provider=provider,
+    )
+
+    with TestClient(app) as client:
+        failed = client.get(f"/api/v1/assessment-runs/{run['id']}").json()
+        exposures = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"]
+
+    assert failed["status"] == "failed"
+    assert failed["errorCode"] == "embedding_runtime_unavailable"
+    assert failed["errorMessage"] == (
+        "Local Ollama embedding runtime is unavailable. "
+        "Start Ollama locally and run `make models`, then retry."
+    )
+    assert exposures
+    assert exposures[0]["evidenceRecords"]
+
+
 def test_exposure_evidence_search_matches_versioned_lexical_known_answers(
     database_url: str,
 ) -> None:
@@ -570,6 +692,10 @@ def test_exposure_evidence_search_matches_versioned_lexical_known_answers(
                     ("query", case["query"]),
                     ("sourceIdentity", "osv"),
                     *[("evidenceType", item) for item in case["evidenceTypes"]],
+                    (
+                        "retrievalConfigurationVersion",
+                        fixture["retrievalConfigurationVersion"],
+                    ),
                 ],
             )
             assert response.status_code == 200
@@ -584,16 +710,20 @@ def test_exposure_evidence_search_matches_versioned_lexical_known_answers(
                 },
                 "evidenceTypes": case["evidenceTypes"],
                 "retrievalConfigurationVersion": fixture["retrievalConfigurationVersion"],
+                "embeddingSpace": None,
                 "limit": fixture["limit"],
             }
+            assert result["evaluation"] is None
             assert len(result["items"]) == len(case["expectedPassages"])
             for rank, (item, passage_key) in enumerate(
                 zip(result["items"], case["expectedPassages"], strict=True),
                 start=1,
             ):
                 expected = fixture["passages"][passage_key]
-                assert item["lexicalRank"] == rank
-                assert item["lexicalScore"] > 0
+                assert item["fullTextRank"] == rank
+                assert item["fullTextScore"] > 0
+                assert item["vectorRank"] is None
+                assert item["fusedRank"] is None
                 assert {key: item["passage"][key] for key in ("identity", "kind", "selector")} == {
                     key: expected[key] for key in ("identity", "kind", "selector")
                 }
@@ -617,6 +747,10 @@ def test_exposure_evidence_search_matches_versioned_lexical_known_answers(
                     ("query", case["query"]),
                     *[("sourceIdentity", item) for item in case["sourceIdentities"]],
                     *[("evidenceType", item) for item in case["evidenceTypes"]],
+                    (
+                        "retrievalConfigurationVersion",
+                        fixture["retrievalConfigurationVersion"],
+                    ),
                 ],
             )
             assert response.status_code == 200
@@ -661,6 +795,222 @@ def test_exposure_evidence_search_rejects_stale_configuration_and_wrong_scope(
         )
         assert wrong_scope.status_code == 404
         assert wrong_scope.json()["detail"]["code"] == "exposure_not_found"
+
+
+def test_hybrid_retrieval_is_deterministic_space_isolated_and_reports_recall(
+    database_url: str,
+) -> None:
+    fixture = json.loads(LEXICAL_FIXTURE.read_text())
+    first_provider = KnownAnswerEmbeddingProvider()
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(include_query_capture=True),
+        embedding_provider=first_provider,
+    )
+
+    second_provider = KnownAnswerEmbeddingProvider(digest_character="b", reverse=True)
+    with pytest.raises(EmbeddingIndexUnavailable, match="retrieved-content Policy Decision"):
+        EvidenceRetriever(database_url, embedding_provider=second_provider).index_assessment(
+            UUID(run["id"])
+        )
+    AssessmentRunRepository(database_url).record_retrieved_content_policy_decision(
+        UUID(run["id"]),
+        CyberPolicy.decide(
+            AssessmentRequest(
+                operation=AssessmentOperation.EMBED_RETRIEVED_EVIDENCE,
+                target_scope=(
+                    f"assessment:{run['id']};embedding-space:{second_provider.space.identity}"
+                ),
+                authorization_scope="local operator",
+                authorization_status=AuthorizationStatus.CONFIRMED,
+            )
+        ),
+    )
+    EvidenceRetriever(database_url, embedding_provider=second_provider).index_assessment(
+        UUID(run["id"])
+    )
+
+    with TestClient(app) as client:
+        target = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"][0]
+        query_text = build_exposure_retrieval_query(
+            target["package"]["name"],
+            target["package"]["version"],
+            tuple(target["vulnerabilityRecord"]["aliases"]),
+        )
+        assert target["retrievalQuery"] == query_text
+        params = [
+            ("query", query_text),
+            ("sourceIdentity", "osv"),
+            ("evidenceType", "affected"),
+            ("evidenceType", "query_result"),
+            ("retrievalConfigurationVersion", HYBRID_RETRIEVAL_CONFIGURATION_VERSION),
+            ("embeddingSpaceIdentity", first_provider.space.identity),
+            (
+                "expectedPassageIdentity",
+                fixture["passages"]["targetAffected"]["identity"],
+            ),
+            (
+                "expectedPassageIdentity",
+                fixture["passages"]["targetQueryResult"]["identity"],
+            ),
+            ("limit", "2"),
+        ]
+        first = client.get(
+            f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
+            params=params,
+        )
+        replay = client.get(
+            f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
+            params=params,
+        )
+
+        assert first.status_code == 200
+        assert replay.json() == first.json()
+        result = first.json()
+        assert result["queryContext"]["embeddingSpace"] == {
+            "identity": first_provider.space.identity,
+            "provider": "known-answer-local",
+            "modelArtifact": "known-answer-embedding-v1",
+            "artifactDigest": "sha256:" + "a" * 64,
+            "dimensions": 3,
+            "retrievalInstruction": "Represent this query for evidence passage retrieval: ",
+            "normalizer": "l2-v1",
+            "passageConstructionVersion": "source-aware-passage-v1",
+        }
+        assert [item["fusedRank"] for item in result["items"]] == [1, 2]
+        assert sorted(item["vectorRank"] for item in result["items"]) == [1, 2]
+        assert all("fullTextRank" in item for item in result["items"])
+        assert result["evaluation"] == {
+            "k": 2,
+            "expectedCount": 2,
+            "retrievedCount": 2,
+            "matchedPassageIdentities": [
+                fixture["passages"]["targetAffected"]["identity"],
+                fixture["passages"]["targetQueryResult"]["identity"],
+            ],
+            "recallAtK": 1.0,
+        }
+        first_vector_ranks = {
+            item["passage"]["identity"]: item["vectorRank"] for item in result["items"]
+        }
+        assert first_vector_ranks == {
+            fixture["passages"]["targetAffected"]["identity"]: 1,
+            fixture["passages"]["targetQueryResult"]["identity"]: 2,
+        }
+
+        wrong_space = client.get(
+            f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
+            params={
+                "query": query_text,
+                "sourceIdentity": "osv",
+                "evidenceType": "affected",
+                "embeddingSpaceIdentity": "sha256:" + "c" * 64,
+            },
+        )
+        assert wrong_space.status_code == 409
+        assert wrong_space.json()["detail"]["code"] == "embedding_space_not_current"
+
+    with TestClient(app) as client:
+        second = client.get(
+            f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
+            params=[
+                ("query", query_text),
+                ("sourceIdentity", "osv"),
+                ("evidenceType", "affected"),
+                ("evidenceType", "query_result"),
+                ("embeddingSpaceIdentity", second_provider.space.identity),
+                ("limit", "2"),
+            ],
+        )
+    assert second.status_code == 200
+    assert second.json()["queryContext"]["embeddingSpace"]["identity"] == (
+        second_provider.space.identity
+    )
+    assert {item["passage"]["identity"]: item["vectorRank"] for item in second.json()["items"]} == {
+        fixture["passages"]["targetAffected"]["identity"]: 2,
+        fixture["passages"]["targetQueryResult"]["identity"]: 1,
+    }
+
+    report = evaluate_retrieval_recall(
+        retrieved_passage_identities=("expected-a", "other"),
+        expected_passage_identities=("expected-a", "expected-b"),
+        k=2,
+    )
+    assert report.recall_at_k == 0.5
+    assert report.matched_passage_identities == ("expected-a",)
+
+    with TestClient(app) as client:
+        unavailable = client.get(
+            f"/api/v1/assessment-runs/{run['id']}/exposures/{target['id']}/evidence-passages",
+            params={
+                "query": "not generated by the worker",
+                "sourceIdentity": "osv",
+                "evidenceType": "affected",
+                "embeddingSpaceIdentity": first_provider.space.identity,
+            },
+        )
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"] == {
+        "code": "embedding_index_unavailable",
+        "message": (
+            "No worker-generated query representation exists for this query and "
+            "Embedding Space. Use the exposure's indexed retrieval query."
+        ),
+        "setup": "Run a new Assessment after `make models` succeeds.",
+    }
+
+
+def test_recovered_worker_indexes_existing_evidence_before_completion(
+    database_url: str,
+) -> None:
+    provider = InterruptOnceEmbeddingProvider()
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    with pytest.raises(KeyboardInterrupt, match="simulated worker interruption"):
+        process_next_assessment(
+            database_url=database_url,
+            archive_source=FixtureArchiveSource(),
+            osv_source=CapturedOsvSource(include_query_capture=True),
+            embedding_provider=provider,
+        )
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "UPDATE assessment_runs SET claimed_at = now() - interval '1 minute' WHERE id = %s",
+            (run["id"],),
+        )
+        connection.commit()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        stale_after_seconds=1,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(include_query_capture=True),
+        embedding_provider=provider,
+    )
+
+    with psycopg.connect(database_url) as connection:
+        status_row = connection.execute(
+            "SELECT status FROM assessment_runs WHERE id = %s", (run["id"],)
+        ).fetchone()
+        embedding_count = connection.execute("SELECT count(*) FROM passage_embeddings").fetchone()
+        content_policy_count = connection.execute(
+            """
+            SELECT count(*) FROM policy_decisions
+            WHERE assessment_run_id = %s AND enforcement_point = 'retrieved_content'
+            """,
+            (run["id"],),
+        ).fetchone()
+
+    assert status_row == ("completed",)
+    assert embedding_count is not None and embedding_count[0] > 0
+    assert content_policy_count == (2,)
 
 
 def test_enrichment_failures_complete_with_explicit_partial_states(database_url: str) -> None:

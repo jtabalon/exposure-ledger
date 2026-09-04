@@ -27,13 +27,24 @@ from exposure_ledger_storage.exposures import (
     SourceRecord,
     VulnerabilityRecordRecord,
 )
+from exposure_ledger_storage.local_embeddings import (
+    EmbeddingProviderUnavailable,
+    EmbeddingReadiness,
+    OllamaEmbeddingProvider,
+)
 from exposure_ledger_storage.migrations import apply_migrations
 from exposure_ledger_storage.retrieval import (
+    EMBEDDING_READINESS_MAX_AGE_SECONDS,
+    HYBRID_RETRIEVAL_CONFIGURATION_VERSION,
     LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
     SOURCE_POLICY_VERSION,
+    EmbeddingIndexUnavailable,
+    EmbeddingProvider,
+    EmbeddingSpaceNotCurrent,
     EvidenceRetriever,
     ExposureRetrievalScopeNotFound,
     RetrievalConfigurationNotCurrent,
+    RetrievalEvaluationReport,
     RetrievalQuery,
     RetrievalResult,
     RetrievedCapture,
@@ -42,6 +53,8 @@ from exposure_ledger_storage.retrieval import (
     RetrievedPassageIdentity,
     RetrievedSource,
     SourcePolicy,
+    build_exposure_retrieval_query,
+    evaluate_retrieval_recall,
 )
 
 __all__ = [
@@ -58,13 +71,22 @@ __all__ = [
     "EvidencePassageRecord",
     "EvidenceRecordRecord",
     "EvidenceRetriever",
+    "EmbeddingIndexUnavailable",
+    "EMBEDDING_READINESS_MAX_AGE_SECONDS",
+    "EmbeddingProvider",
+    "EmbeddingProviderUnavailable",
+    "EmbeddingReadiness",
+    "EmbeddingSpaceNotCurrent",
     "ExposureRetrievalScopeNotFound",
     "ExposureRecord",
     "ExposureRepository",
     "PolicyDecisionRecord",
     "PackageInstanceRecord",
+    "HYBRID_RETRIEVAL_CONFIGURATION_VERSION",
     "LEXICAL_RETRIEVAL_CONFIGURATION_VERSION",
+    "OllamaEmbeddingProvider",
     "RetrievalConfigurationNotCurrent",
+    "RetrievalEvaluationReport",
     "RetrievalQuery",
     "RetrievalResult",
     "RetrievedCapture",
@@ -77,5 +99,7 @@ __all__ = [
     "SourcePolicy",
     "VulnerabilityRecordRecord",
     "apply_migrations",
+    "build_exposure_retrieval_query",
+    "evaluate_retrieval_recall",
     "normalize_database_url",
 ]
