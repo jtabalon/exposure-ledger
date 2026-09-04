@@ -70,7 +70,7 @@ def _command() -> RunInvestigation:
             parser_version="uv-lock-v1",
             retrieval_configuration_version="postgres-hybrid-rrf-v1",
             source_policy_version="explicit-source-allowlist-v1",
-            source_adapter_versions=("osv-v1", "cisa-kev-v1", "first-epss-v1"),
+            source_adapter_versions=("osv=osv-v1",),
             generation_model=_generation_model(),
             embedding_space=_embedding_space(),
         ),
@@ -94,6 +94,8 @@ class ControlledEvidenceAcquirer:
                     record_id=EVIDENCE_ID,
                     record_identity="sha256:evidence",
                     content_digest="sha256:" + "c" * 64,
+                    source_identity="osv",
+                    source_adapter_version="osv-v1",
                     passage_identities=("osv:affected",),
                 ),
             ),
@@ -229,7 +231,7 @@ async def test_runner_persists_one_complete_evidence_backed_revision() -> None:
         "persist_revision",
     ]
     assert revision.measurements.generation_model_calls == 1
-    assert revision.measurements.tool_calls == 1
+    assert revision.measurements.tool_calls == 2
     assert revision.measurements.graph_transitions == 8
     assert revision.configuration == _command().configuration
     assert history.revisions == [revision]
@@ -350,7 +352,7 @@ async def test_wall_time_budget_stops_model_use_and_persists_incomplete_revision
     assert revision.status is InvestigationRevisionStatus.INCOMPLETE
     assert revision.stopping_condition == "wall_time_budget_exhausted"
     assert revision.measurements.generation_model_calls == 0
-    assert revision.measurements.tool_calls == 0
+    assert revision.measurements.tool_calls == 1
     assert generator.calls == 0
 
 

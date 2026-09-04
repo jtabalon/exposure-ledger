@@ -36,7 +36,12 @@ import { ExposureQueuePanel } from "@/components/exposure-queue-panel"
 import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
 import type { AssetSnapshot } from "@/lib/asset-snapshots"
 import type { Exposure } from "@/lib/exposures"
-import { evidenceForClaim, evidenceRelationshipLabels } from "@/lib/evidence"
+import {
+  claimsForEvidence,
+  evidenceForClaim,
+  evidenceRelationshipLabels,
+  relationshipsForClaim,
+} from "@/lib/evidence"
 import type {
   DemoInvestigation,
   EvidenceRelationship,
@@ -100,6 +105,12 @@ export function InvestigationWorkbench({
   )
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null)
   const selectedClaim = investigation.claims.find(({ id }) => id === selectedClaimId)
+  const selectedEvidence = investigation.evidence.find(({ id }) => id === selectedEvidenceId)
+  const claimsLinkedToSelectedEvidence = new Set(
+    selectedEvidence
+      ? claimsForEvidence(investigation.claims, selectedEvidence).map(({ id }) => id)
+      : [],
+  )
   const navigation = [
     { label: "Assessment Runs", icon: Activity, count: String(assessmentRuns.length), active: true },
     { label: "Asset Snapshots", icon: Database, count: String(assetSnapshots.length) },
@@ -113,7 +124,7 @@ export function InvestigationWorkbench({
         ? evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
             (left, right) => left.fusedRank - right.fusedRank,
           )
-        : [],
+        : investigation.evidence.toSorted((left, right) => left.fusedRank - right.fusedRank),
     [investigation.evidence, selectedClaimId],
   )
 
@@ -456,6 +467,7 @@ export function InvestigationWorkbench({
               ) : null}
               {investigation.claims.map((claim) => {
                 const selected = claim.id === selectedClaimId
+                const linkedToSelectedEvidence = claimsLinkedToSelectedEvidence.has(claim.id)
                 const evidenceCount = evidenceForClaim(investigation.evidence, claim.id).length
                 return (
                   <button
@@ -467,6 +479,8 @@ export function InvestigationWorkbench({
                       "group w-full rounded-md border p-4 text-left transition-[background-color,border-color,transform] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                       selected
                         ? "border-primary/40 bg-accent/55"
+                        : linkedToSelectedEvidence
+                          ? "border-primary/30 bg-primary/5 ring-2 ring-primary/10"
                         : "bg-card hover:-translate-y-px hover:border-primary/20 hover:bg-muted/30",
                     )}
                   >
@@ -581,6 +595,9 @@ export function InvestigationWorkbench({
             <div className="space-y-3">
               {relatedEvidence.map((record) => {
                 const selected = record.id === selectedEvidenceId
+                const selectedRelationships = selectedClaimId
+                  ? relationshipsForClaim(record, selectedClaimId)
+                  : []
                 return (
                   <article
                     key={record.id}
@@ -591,7 +608,14 @@ export function InvestigationWorkbench({
                   >
                     <button
                       type="button"
-                      onClick={() => selectEvidence(record.id, record.claimIds)}
+                      onClick={() =>
+                        selectEvidence(
+                          record.id,
+                          Array.from(
+                            new Set(record.relationships.map(({ claimId }) => claimId)),
+                          ),
+                        )
+                      }
                       aria-pressed={selected}
                       className="w-full text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                     >
@@ -604,16 +628,21 @@ export function InvestigationWorkbench({
                             <span className="font-mono">{record.capturedAt}</span>
                           </div>
                         </div>
-                        <Badge
-                          variant="outline"
-                          aria-label={`Evidence relationship: ${evidenceRelationshipLabels[record.relationship]}`}
-                          className={cn(
-                            "shrink-0 text-[9px] tracking-[0.08em] uppercase",
-                            relationshipStyles[record.relationship],
-                          )}
-                        >
-                          {evidenceRelationshipLabels[record.relationship]}
-                        </Badge>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                          {selectedRelationships.map((relationship, index) => (
+                            <Badge
+                              key={`${relationship}-${index}`}
+                              variant="outline"
+                              aria-label={`Evidence relationship: ${evidenceRelationshipLabels[relationship]}`}
+                              className={cn(
+                                "text-[9px] tracking-[0.08em] uppercase",
+                                relationshipStyles[relationship],
+                              )}
+                            >
+                              {evidenceRelationshipLabels[relationship]}
+                            </Badge>
+                          ))}
+                        </div>
                       </div>
 
                       <blockquote className="my-4 border-l-2 border-primary/25 pl-4 text-sm leading-6 text-[var(--ink-soft)]">
@@ -660,24 +689,26 @@ export function InvestigationWorkbench({
 
                     <div className="mt-3 flex items-center gap-1.5 border-t pt-3 text-[10px] text-muted-foreground">
                       <span>Used by</span>
-                      {record.claimIds.map((claimId) => {
-                        const claim = investigation.claims.find(({ id }) => id === claimId)
-                        if (!claim) return null
-                        return (
-                          <button
-                            key={claimId}
-                            type="button"
-                            onClick={() => selectClaim(claimId)}
-                            className={cn(
-                              "rounded-sm border px-1.5 py-0.5 font-mono font-semibold transition-colors hover:border-primary/40 hover:text-primary",
-                              claimId === selectedClaimId &&
-                                "border-primary/35 bg-primary/8 text-primary",
-                            )}
-                          >
-                            {claim.label}
-                          </button>
-                        )
-                      })}
+                      {Array.from(new Set(record.relationships.map(({ claimId }) => claimId))).map(
+                        (claimId) => {
+                          const claim = investigation.claims.find(({ id }) => id === claimId)
+                          if (!claim) return null
+                          return (
+                            <button
+                              key={claimId}
+                              type="button"
+                              onClick={() => selectClaim(claimId)}
+                              className={cn(
+                                "rounded-sm border px-1.5 py-0.5 font-mono font-semibold transition-colors hover:border-primary/40 hover:text-primary",
+                                claimId === selectedClaimId &&
+                                  "border-primary/35 bg-primary/8 text-primary",
+                              )}
+                            >
+                              {claim.label}
+                            </button>
+                          )
+                        },
+                      )}
                     </div>
                   </article>
                 )

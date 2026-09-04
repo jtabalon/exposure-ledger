@@ -46,8 +46,12 @@ describe("InvestigationWorkbench", () => {
       },
       evidence: demoInvestigation.evidence.map((record, index) => ({
         ...record,
-        relationship: (["supports", "contradicts", "contextual"] as const)[index % 3],
-        claimIds: [demoInvestigation.claims[0].id],
+        relationships: [
+          {
+            claimId: demoInvestigation.claims[0].id,
+            relationship: (["supports", "contradicts", "contextual"] as const)[index % 3],
+          },
+        ],
       })),
     }
 

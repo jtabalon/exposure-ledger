@@ -119,6 +119,8 @@ def _revision(exposure, *, created_at: datetime = NOW) -> InvestigationRevision:
         record_id=evidence.id,
         record_identity=evidence.identity,
         content_digest=evidence.content_digest,
+        source_identity=evidence.source.identity,
+        source_adapter_version=evidence.source_adapter_version,
         passage_identities=(passage.identity,),
     )
     retrieved = RetrievedInvestigationEvidence(
@@ -216,7 +218,9 @@ def _revision(exposure, *, created_at: datetime = NOW) -> InvestigationRevision:
             parser_version="uv-lock-v1",
             retrieval_configuration_version="postgres-hybrid-rrf-v1",
             source_policy_version="explicit-source-allowlist-v1",
-            source_adapter_versions=("osv-v1", "cisa-kev-v1", "first-epss-v1"),
+            source_adapter_versions=(
+                f"{evidence.source.identity}={evidence.source_adapter_version}",
+            ),
             generation_model=GenerationModel(
                 provider="controlled-local",
                 model_artifact="controlled-generation-v1",
@@ -269,6 +273,20 @@ def test_revision_history_appends_and_reloads_complete_immutable_revisions(
             (first.id,),
         )
 
+    with (
+        psycopg.connect(database_url) as connection,
+        pytest.raises(psycopg.errors.RaiseException, match="Investigation history is immutable"),
+    ):
+        connection.execute(
+            """
+            INSERT INTO claims (
+                id, revision_id, identity_key, ordinal, kind, claim_text,
+                material, limitation, supported
+            ) VALUES (%s, %s, 'late-claim', 2, 'fact', 'Late mutation.', true, NULL, false)
+            """,
+            (uuid4(), first.id),
+        )
+
 
 def test_revision_rejects_evidence_outside_the_exposure_scope(database_url: str) -> None:
     exposure = _seed_exposure(database_url)
@@ -281,6 +299,30 @@ def test_revision_rejects_evidence_outside_the_exposure_scope(database_url: str)
 
     with pytest.raises(ValueError, match="Exposure evidence scope"):
         InvestigationRepository(database_url).append(replace(revision, claims=(invalid_claim,)))
+
+
+def test_revision_rejects_a_forged_supported_claim(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    forged = replace(revision.claims[0], citations=())
+
+    with pytest.raises(ValueError, match="support state is inconsistent"):
+        InvestigationRepository(database_url).append(replace(revision, claims=(forged,)))
+
+
+def test_revision_rejects_an_unverified_source_adapter_pin(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    source_identity = revision.evidence_state.available[0].source_identity
+    unverified_configuration = replace(
+        revision.configuration,
+        source_adapter_versions=(f"{source_identity}=unverified-v99",),
+    )
+
+    with pytest.raises(ValueError, match="exact Evidence Source adapter versions"):
+        InvestigationRepository(database_url).append(
+            replace(revision, configuration=unverified_configuration)
+        )
 
 
 def test_controlled_adapters_exercise_the_complete_investigation_path(
@@ -335,6 +377,7 @@ def test_controlled_adapters_exercise_the_complete_investigation_path(
     assert first["claims"][0]["kind"] == "fact"
     assert first["claims"][0]["supported"] is True
     assert first["claims"][0]["citations"][0]["relationship"] == "supports"
+    assert first["evidenceState"]["available"][0]["sourceAdapterVersion"]
     assert first["recommendation"]["value"] == "planned_remediation"
     assert first["outputPolicyDecision"]["enforcementPoint"] == "structured_output"
     assert first["configuration"]["generationModel"] == {

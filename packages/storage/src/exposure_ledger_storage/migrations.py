@@ -801,6 +801,20 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                     'request', 'tool_call', 'retrieved_content', 'structured_output'
                 ));
 
+        ALTER TABLE evidence_records ADD COLUMN source_adapter_version text;
+        UPDATE evidence_records
+        SET source_adapter_version = CASE sources.identity_key
+            WHEN 'osv' THEN 'osv-v1'
+            WHEN 'cisa-kev' THEN 'cisa-kev-v1'
+            WHEN 'first-epss' THEN 'first-epss-v1'
+            WHEN 'github_repository_security_advisory'
+                THEN 'github-repository-advisory-v1'
+            ELSE 'legacy-source-adapter-v1'
+        END
+        FROM sources
+        WHERE sources.id = evidence_records.source_id;
+        ALTER TABLE evidence_records ALTER COLUMN source_adapter_version SET NOT NULL;
+
         CREATE TABLE investigations (
             id uuid PRIMARY KEY,
             exposure_id uuid NOT NULL UNIQUE REFERENCES exposures(id) ON DELETE RESTRICT,
@@ -871,6 +885,7 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                 CHECK (generation_artifact_digest LIKE 'sha256:%'),
             embedding_space_identity text NOT NULL
                 REFERENCES embedding_spaces(identity_key) ON DELETE RESTRICT,
+            sealed boolean NOT NULL DEFAULT false,
             created_at timestamptz NOT NULL,
             UNIQUE (investigation_id, revision_number)
         );
@@ -925,21 +940,82 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         BEFORE UPDATE OR DELETE ON investigations
         FOR EACH ROW EXECUTE FUNCTION reject_investigation_history_mutation();
 
-        CREATE TRIGGER investigation_revisions_cannot_be_changed
+        CREATE FUNCTION allow_only_investigation_revision_seal()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NOT OLD.sealed AND NEW.sealed
+               AND (to_jsonb(NEW) - 'sealed') = (to_jsonb(OLD) - 'sealed') THEN
+                RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'Investigation history is immutable';
+        END;
+        $$;
+
+        CREATE FUNCTION protect_investigation_revision_children()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            revision_is_sealed boolean;
+        BEGIN
+            IF TG_OP <> 'INSERT' THEN
+                RAISE EXCEPTION 'Investigation history is immutable';
+            END IF;
+            IF TG_TABLE_NAME = 'claim_evidence_relationships' THEN
+                SELECT investigation_revisions.sealed INTO revision_is_sealed
+                FROM claims
+                JOIN investigation_revisions
+                  ON investigation_revisions.id = claims.revision_id
+                WHERE claims.id = NEW.claim_id;
+            ELSE
+                SELECT sealed INTO revision_is_sealed
+                FROM investigation_revisions WHERE id = NEW.revision_id;
+            END IF;
+            IF revision_is_sealed OR revision_is_sealed IS NULL THEN
+                RAISE EXCEPTION 'Investigation history is immutable';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE FUNCTION require_investigation_revision_sealed()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            revision_is_sealed boolean;
+        BEGIN
+            SELECT sealed INTO revision_is_sealed
+            FROM investigation_revisions WHERE id = NEW.id;
+            IF NOT revision_is_sealed THEN
+                RAISE EXCEPTION 'Investigation Revision must be sealed atomically';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER investigation_revisions_allow_only_seal
         BEFORE UPDATE OR DELETE ON investigation_revisions
-        FOR EACH ROW EXECUTE FUNCTION reject_investigation_history_mutation();
+        FOR EACH ROW EXECUTE FUNCTION allow_only_investigation_revision_seal();
+
+        CREATE CONSTRAINT TRIGGER investigation_revisions_require_seal
+        AFTER INSERT ON investigation_revisions
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION require_investigation_revision_sealed();
 
         CREATE TRIGGER investigation_revision_evidence_cannot_be_changed
-        BEFORE UPDATE OR DELETE ON investigation_revision_evidence
-        FOR EACH ROW EXECUTE FUNCTION reject_investigation_history_mutation();
+        BEFORE INSERT OR UPDATE OR DELETE ON investigation_revision_evidence
+        FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
 
         CREATE TRIGGER claims_cannot_be_changed
-        BEFORE UPDATE OR DELETE ON claims
-        FOR EACH ROW EXECUTE FUNCTION reject_investigation_history_mutation();
+        BEFORE INSERT OR UPDATE OR DELETE ON claims
+        FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
 
         CREATE TRIGGER claim_evidence_relationships_cannot_be_changed
-        BEFORE UPDATE OR DELETE ON claim_evidence_relationships
-        FOR EACH ROW EXECUTE FUNCTION reject_investigation_history_mutation();
+        BEFORE INSERT OR UPDATE OR DELETE ON claim_evidence_relationships
+        FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
         """,
     ),
 )

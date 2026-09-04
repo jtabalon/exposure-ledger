@@ -21,11 +21,13 @@ from exposure_ledger import (
     GenerationReadiness,
     InvestigationConfiguration,
     InvestigationEvent,
+    InvestigationEventMode,
     InvestigationEvidenceState,
     InvestigationExposure,
     InvestigationMeasurements,
     InvestigationRevision,
     InvestigationRevisionStatus,
+    InvestigationStage,
     PolicyDecision,
     PolicyResult,
     Recommendation,
@@ -121,11 +123,19 @@ class InvestigationRepository:
         if cast(datetime, row["observed_at"]) < datetime.now(UTC) - timedelta(
             seconds=GENERATION_READINESS_MAX_AGE_SECONDS
         ):
+            previous_setup = str(row["setup"]) if row["setup"] is not None else None
             return GenerationReadiness(
                 status="unavailable",
                 code="generation_readiness_stale",
-                message="The worker's local generation readiness observation is stale.",
-                setup="Check that the worker and Ollama are running, then retry.",
+                message=(
+                    "The worker's local generation readiness observation is stale. "
+                    f"Last observation: {row['message']}"
+                ),
+                setup=(
+                    f"{previous_setup} Then restart the worker."
+                    if previous_setup is not None
+                    else "Check that the worker and Ollama are running, then retry."
+                ),
                 model=None,
             )
         model = (
@@ -179,6 +189,8 @@ class InvestigationRepository:
                     record_id=evidence.id,
                     record_identity=evidence.identity,
                     content_digest=evidence.content_digest,
+                    source_identity=evidence.source.identity,
+                    source_adapter_version=evidence.source_adapter_version,
                     passage_identities=tuple(passage.identity for passage in evidence.passages),
                 )
                 for evidence in exposure.evidence_records
@@ -385,6 +397,10 @@ class InvestigationRepository:
                             list(citation.passage_identities),
                         ),
                     )
+            connection.execute(
+                "UPDATE investigation_revisions SET sealed = true WHERE id = %s",
+                (revision.id,),
+            )
         return revision
 
     def list_for_exposure(self, exposure_id: UUID) -> list[InvestigationRevisionRecord]:
@@ -478,11 +494,14 @@ class InvestigationRepository:
             """
             SELECT evidence_records.id, evidence_records.identity_key,
                    evidence_records.content_digest,
+                   evidence_records.source_adapter_version,
+                   sources.identity_key AS source_identity,
                    array_agg(evidence_passages.identity_key
                              ORDER BY evidence_passages.identity_key) AS passages
             FROM assessment_run_exposure_evidence
             JOIN evidence_records
               ON evidence_records.id = assessment_run_exposure_evidence.evidence_record_id
+            JOIN sources ON sources.id = evidence_records.source_id
             JOIN evidence_passages
               ON evidence_passages.evidence_record_id = evidence_records.id
             JOIN assessment_run_exposure_passages
@@ -495,7 +514,8 @@ class InvestigationRepository:
             WHERE assessment_run_exposure_evidence.assessment_run_id = %s
               AND assessment_run_exposure_evidence.exposure_id = %s
             GROUP BY evidence_records.id, evidence_records.identity_key,
-                     evidence_records.content_digest
+                     evidence_records.content_digest,
+                     evidence_records.source_adapter_version, sources.identity_key
             """,
             (revision.assessment_run_id, revision.exposure_id),
         ).fetchall()
@@ -503,6 +523,8 @@ class InvestigationRepository:
             UUID(str(row["id"])): (
                 str(row["identity_key"]),
                 str(row["content_digest"]),
+                str(row["source_identity"]),
+                str(row["source_adapter_version"]),
                 tuple(str(item) for item in row["passages"]),
             )
             for row in stored_rows
@@ -511,12 +533,14 @@ class InvestigationRepository:
             expected = stored.get(record_id)
             if (
                 expected is None
-                or expected[:2]
+                or expected[:4]
                 != (
                     available.record_identity,
                     available.content_digest,
+                    available.source_identity,
+                    available.source_adapter_version,
                 )
-                or not set(available.passage_identities).issubset(expected[2])
+                or not set(available.passage_identities).issubset(expected[4])
             ):
                 raise ValueError("Investigation Revision is outside the Exposure evidence scope")
 
@@ -537,6 +561,21 @@ class InvestigationRepository:
             for passage in revision.evidence_state.retrieved.passages
         }
         for claim in revision.claims:
+            if not claim.citations:
+                raise ValueError("Claim support state is inconsistent with its citations")
+            expected_supported = (
+                bool(claim.limitation and claim.limitation.strip())
+                if claim.kind is ClaimKind.INFERENCE
+                else (
+                    not claim.material
+                    or any(
+                        citation.relationship is EvidenceRelationship.SUPPORTS
+                        for citation in claim.citations
+                    )
+                )
+            )
+            if claim.supported != expected_supported:
+                raise ValueError("Claim support state is inconsistent with its citations")
             for citation in claim.citations:
                 cited_available = available_by_id.get(citation.evidence_record_id)
                 if cited_available is None or not set(citation.passage_identities).issubset(
@@ -550,6 +589,18 @@ class InvestigationRepository:
                     for passage_identity in citation.passage_identities
                 ):
                     raise ValueError("Claim citation is outside the retrieved evidence scope")
+        expected_material_support = bool(revision.claims) and all(
+            claim.supported for claim in revision.claims
+        )
+        if revision.evidence_state.material_claims_supported != expected_material_support:
+            raise ValueError("Revision evidence support state is inconsistent with its Claims")
+        adapter_versions = _source_adapter_versions(revision.configuration.source_adapter_versions)
+        expected_adapter_versions = {
+            item.source_identity: item.source_adapter_version
+            for item in revision.evidence_state.available
+        }
+        if adapter_versions != expected_adapter_versions:
+            raise ValueError("Revision does not pin the exact Evidence Source adapter versions")
         if (
             revision.configuration.policy_version
             != revision.output_policy_decision.standard_version
@@ -689,11 +740,14 @@ class InvestigationRepository:
             """
             SELECT investigation_revision_evidence.evidence_record_id,
                    evidence_records.identity_key,
+                   evidence_records.source_adapter_version,
+                   sources.identity_key AS source_identity,
                    investigation_revision_evidence.content_digest,
                    investigation_revision_evidence.available_passage_identities
             FROM investigation_revision_evidence
             JOIN evidence_records
               ON evidence_records.id = investigation_revision_evidence.evidence_record_id
+            JOIN sources ON sources.id = evidence_records.source_id
             WHERE investigation_revision_evidence.revision_id = %s
             ORDER BY evidence_records.identity_key
             """,
@@ -774,6 +828,8 @@ class InvestigationRepository:
                     record_id=UUID(str(item["evidence_record_id"])),
                     record_identity=str(item["identity_key"]),
                     content_digest=str(item["content_digest"]),
+                    source_identity=str(item["source_identity"]),
+                    source_adapter_version=str(item["source_adapter_version"]),
                     passage_identities=tuple(
                         str(value) for value in item["available_passage_identities"]
                     ),
@@ -897,8 +953,8 @@ def _events_json(events: tuple[InvestigationEvent, ...]) -> list[dict[str, objec
 def _events_from_json(value: object) -> tuple[InvestigationEvent, ...]:
     return tuple(
         InvestigationEvent(
-            stage=str(item["stage"]),
-            mode=str(item["mode"]),
+            stage=InvestigationStage(str(item["stage"])),
+            mode=InvestigationEventMode(str(item["mode"])),
             detail=str(item["detail"]),
             occurred_at=datetime.fromisoformat(str(item["occurredAt"])),
         )
@@ -935,3 +991,18 @@ def _optional_int(value: object) -> int | None:
 
 def _optional_float(value: object) -> float | None:
     return float(str(value)) if value is not None else None
+
+
+def _source_adapter_versions(values: tuple[str, ...]) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for value in values:
+        source_identity, separator, version = value.partition("=")
+        if (
+            not separator
+            or not source_identity.strip()
+            or not version.strip()
+            or source_identity in versions
+        ):
+            raise ValueError("Source adapter versions must uniquely map Source identity to version")
+        versions[source_identity] = version
+    return versions

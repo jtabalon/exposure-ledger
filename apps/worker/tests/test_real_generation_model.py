@@ -39,6 +39,8 @@ def test_installed_local_generation_model_satisfies_structured_claim_contract() 
         record_id=evidence_id,
         record_identity="sha256:real-model-contract-evidence",
         content_digest="sha256:" + "c" * 64,
+        source_identity="controlled-contract-source",
+        source_adapter_version="controlled-contract-v1",
         passage_identities=("contract:affected",),
     )
     exposure = InvestigationExposure(
@@ -81,7 +83,7 @@ def test_installed_local_generation_model_satisfies_structured_claim_contract() 
         parser_version="uv-lock-v1",
         retrieval_configuration_version="postgres-hybrid-rrf-v1",
         source_policy_version="explicit-source-allowlist-v1",
-        source_adapter_versions=("controlled-contract-v1",),
+        source_adapter_versions=("controlled-contract-source=controlled-contract-v1",),
         generation_model=readiness.model,
         embedding_space=EmbeddingSpace(
             provider="controlled-contract-local",

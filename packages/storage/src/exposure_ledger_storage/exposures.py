@@ -53,6 +53,7 @@ class EvidenceRecordRecord:
     id: UUID
     identity: str
     source: SourceRecord
+    source_adapter_version: str
     captured_at: datetime
     content_digest: str
     attribution: str
@@ -339,8 +340,8 @@ class ExposureRepository:
             """
             INSERT INTO evidence_records (
                 id, identity_key, source_id, captured_at, content_digest, attribution,
-                aliases, payload_identity, content
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                aliases, payload_identity, content, source_adapter_version
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_key) DO NOTHING
             RETURNING id
             """,
@@ -354,13 +355,14 @@ class ExposureRepository:
                 list(evidence.aliases),
                 evidence.payload_identity,
                 evidence.content,
+                evidence.source_adapter_version,
             ),
         ).fetchone()
         if inserted is None:
             existing = connection.execute(
                 """
                 SELECT id, source_id, content_digest, attribution, aliases,
-                       payload_identity, content
+                       payload_identity, content, source_adapter_version
                 FROM evidence_records WHERE identity_key = %s
                 """,
                 (evidence.identity,),
@@ -373,6 +375,7 @@ class ExposureRepository:
                 list(evidence.aliases),
                 evidence.payload_identity,
                 evidence.content,
+                evidence.source_adapter_version,
             )
             actual = (UUID(str(existing[1])), *existing[2:])
             if actual != expected:
@@ -589,6 +592,7 @@ class ExposureRepository:
                    evidence_records.captured_at, evidence_records.content_digest,
                    evidence_records.attribution, evidence_records.aliases,
                    evidence_records.payload_identity, evidence_records.content,
+                   evidence_records.source_adapter_version,
                    sources.identity_key AS source_identity, sources.authority,
                    sources.location, assessment_run_exposure_evidence.relationship
             FROM assessment_run_exposure_evidence
@@ -635,6 +639,7 @@ class ExposureRepository:
                         authority=str(evidence["authority"]),
                         location=str(evidence["location"]),
                     ),
+                    source_adapter_version=str(evidence["source_adapter_version"]),
                     captured_at=evidence["captured_at"],
                     content_digest=str(evidence["content_digest"]),
                     attribution=str(evidence["attribution"]),

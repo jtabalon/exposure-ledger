@@ -28,6 +28,7 @@ from exposure_ledger import (
     FirstEpssResponse,
     FirstPartyAdvisoryCollector,
     FirstPartyAdvisorySource,
+    GenerationReadiness,
     GitHubAdvisoryResponseRejected,
     GitHubAdvisorySourceUnavailable,
     InvestigationBudget,
@@ -240,11 +241,13 @@ def _run_investigations_or_fail(
                         parser_version=parser_version,
                         retrieval_configuration_version="postgres-hybrid-rrf-v1",
                         source_policy_version="explicit-source-allowlist-v1",
-                        source_adapter_versions=(
-                            "osv-v1",
-                            "cisa-kev-v1",
-                            "first-epss-v1",
-                            "github-repository-advisory-v1",
+                        source_adapter_versions=tuple(
+                            sorted(
+                                {
+                                    f"{evidence.source.identity}={evidence.source_adapter_version}"
+                                    for evidence in exposure.evidence_records
+                                }
+                            )
                         ),
                         generation_model=readiness.model,
                         embedding_space=embedding_space,
@@ -254,6 +257,55 @@ def _run_investigations_or_fail(
             )
         )
     return True
+
+
+def _run_post_exposure_pipeline(
+    *,
+    repository: AssessmentRunRepository,
+    assessment_run_id: UUID,
+    claim_id: UUID,
+    database_url: str,
+    parser_version: str,
+    embedding_provider: EmbeddingProvider | None,
+    generation_provider: GenerationProvider | None,
+) -> bool:
+    if embedding_provider is None:
+        if generation_provider is None:
+            return True
+        repository.fail(
+            assessment_run_id,
+            claim_id=claim_id,
+            code="embedding_provider_unavailable",
+            message="Local generation requires the pinned local Embedding Space.",
+        )
+        return False
+    embedding_space = _index_evidence_or_fail(
+        repository=repository,
+        assessment_run_id=assessment_run_id,
+        claim_id=claim_id,
+        database_url=database_url,
+        embedding_provider=embedding_provider,
+    )
+    if embedding_space is None:
+        return False
+    return generation_provider is None or _run_investigations_or_fail(
+        repository=repository,
+        assessment_run_id=assessment_run_id,
+        claim_id=claim_id,
+        database_url=database_url,
+        parser_version=parser_version,
+        embedding_space=embedding_space,
+        generation_provider=generation_provider,
+    )
+
+
+def _require_generation_startup_ready(readiness: GenerationReadiness) -> None:
+    if readiness.model is not None:
+        return
+    detail = readiness.message
+    if readiness.setup is not None:
+        detail = f"{detail} {readiness.setup}"
+    raise RuntimeError(f"Local generation startup failed: {detail}")
 
 
 class WorkerSettings(BaseSettings):
@@ -459,28 +511,14 @@ def process_next_assessment(
                     assessment_run.id,
                     asset_snapshot_id=snapshot.id,
                 ):
-                    embedding_space = None
-                    if embedding_provider is not None:
-                        embedding_space = _index_evidence_or_fail(
-                            repository=repository,
-                            assessment_run_id=assessment_run.id,
-                            claim_id=assessment_run.claim_id,
-                            database_url=database_url,
-                            embedding_provider=embedding_provider,
-                        )
-                        if embedding_space is None:
-                            return True
-                    if generation_provider is not None and (
-                        embedding_space is None
-                        or not _run_investigations_or_fail(
-                            repository=repository,
-                            assessment_run_id=assessment_run.id,
-                            claim_id=assessment_run.claim_id,
-                            database_url=database_url,
-                            parser_version=snapshot.parser_version,
-                            embedding_space=embedding_space,
-                            generation_provider=generation_provider,
-                        )
+                    if not _run_post_exposure_pipeline(
+                        repository=repository,
+                        assessment_run_id=assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        database_url=database_url,
+                        parser_version=snapshot.parser_version,
+                        embedding_provider=embedding_provider,
+                        generation_provider=generation_provider,
                     ):
                         return True
                     repository.complete_repository(
@@ -578,28 +616,14 @@ def process_next_assessment(
                         asset_snapshot_id=snapshot.id,
                         result=result,
                     )
-                    embedding_space = None
-                    if embedding_provider is not None:
-                        embedding_space = _index_evidence_or_fail(
-                            repository=repository,
-                            assessment_run_id=assessment_run.id,
-                            claim_id=assessment_run.claim_id,
-                            database_url=database_url,
-                            embedding_provider=embedding_provider,
-                        )
-                        if embedding_space is None:
-                            return True
-                    if generation_provider is not None and (
-                        embedding_space is None
-                        or not _run_investigations_or_fail(
-                            repository=repository,
-                            assessment_run_id=assessment_run.id,
-                            claim_id=assessment_run.claim_id,
-                            database_url=database_url,
-                            parser_version=snapshot.parser_version,
-                            embedding_space=embedding_space,
-                            generation_provider=generation_provider,
-                        )
+                    if not _run_post_exposure_pipeline(
+                        repository=repository,
+                        assessment_run_id=assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        database_url=database_url,
+                        parser_version=snapshot.parser_version,
+                        embedding_provider=embedding_provider,
+                        generation_provider=generation_provider,
                     ):
                         return True
                 except OsvSourceUnavailable as error:
@@ -647,6 +671,10 @@ def main() -> None:
         base_url=settings.ollama_base_url,
         model_artifact=settings.generation_model,
     )
+    investigation_repository = InvestigationRepository(settings.database_url)
+    generation_readiness = generation_provider.check_readiness()
+    investigation_repository.record_generation_readiness(generation_readiness)
+    _require_generation_startup_ready(generation_readiness)
     readiness_repository = EvidenceRetriever(
         settings.database_url,
         embedding_provider=embedding_provider,
@@ -661,7 +689,7 @@ def main() -> None:
                 interval_seconds=settings.embedding_health_seconds,
             ),
             maintain_generation_readiness(
-                InvestigationRepository(settings.database_url),
+                investigation_repository,
                 generation_provider,
                 interval_seconds=settings.embedding_health_seconds,
             ),

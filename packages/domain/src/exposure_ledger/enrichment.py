@@ -468,6 +468,8 @@ def _merge_evidence(references: Sequence[ExposureEvidence]) -> tuple[ExposureEvi
 class CisaKevSourceAdapter:
     """Capture one complete CISA KEV catalog under shared provenance rules."""
 
+    version = "cisa-kev-v1"
+
     def capture(
         self,
         payload: Mapping[str, Any],
@@ -501,10 +503,13 @@ class CisaKevSourceAdapter:
             location=CISA_KEV_CATALOG_URL,
         )
         payload_identity = f"catalog:{version.strip()}"
-        evidence_identity = _evidence_identity(source, payload_identity, content_digest)
+        evidence_identity = _evidence_identity(
+            source, payload_identity, content_digest, adapter_version=self.version
+        )
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
+            source_adapter_version=self.version,
             captured_at=captured_at,
             content_digest=content_digest,
             attribution="CISA Known Exploited Vulnerabilities Catalog",
@@ -525,6 +530,8 @@ class CisaKevSourceAdapter:
 
 class FirstEpssSourceAdapter:
     """Capture one CVE-filtered FIRST EPSS response under shared provenance rules."""
+
+    version = "first-epss-v1"
 
     def __init__(self, *, cve_ids: tuple[str, ...]) -> None:
         normalized = tuple(sorted({identifier.strip().upper() for identifier in cve_ids}))
@@ -577,10 +584,13 @@ class FirstEpssSourceAdapter:
         )
         query_digest = hashlib.sha256("\n".join(self._cve_ids).encode()).hexdigest()
         payload_identity = f"query:sha256:{query_digest}"
-        evidence_identity = _evidence_identity(source, payload_identity, content_digest)
+        evidence_identity = _evidence_identity(
+            source, payload_identity, content_digest, adapter_version=self.version
+        )
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
+            source_adapter_version=self.version,
             captured_at=captured_at,
             content_digest=content_digest,
             attribution="FIRST Exploit Prediction Scoring System (EPSS)",
@@ -649,8 +659,16 @@ def _validated_capture(
     )
 
 
-def _evidence_identity(source: Source, payload_identity: str, content_digest: str) -> str:
-    material = "\n".join((source.identity, source.location, payload_identity, content_digest))
+def _evidence_identity(
+    source: Source,
+    payload_identity: str,
+    content_digest: str,
+    *,
+    adapter_version: str,
+) -> str:
+    material = "\n".join(
+        (source.identity, source.location, adapter_version, payload_identity, content_digest)
+    )
     return f"sha256:{hashlib.sha256(material.encode()).hexdigest()}"
 
 

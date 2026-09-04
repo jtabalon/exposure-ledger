@@ -632,6 +632,8 @@ class RevisionEvidenceRecordResponse(ApiModel):
     record_id: UUID
     record_identity: str
     content_digest: str
+    source_identity: str
+    source_adapter_version: str
     passage_identities: list[str]
 
 
@@ -765,6 +767,8 @@ class InvestigationRevisionResponse(ApiModel):
                         record_id=item.record_id,
                         record_identity=item.record_identity,
                         content_digest=item.content_digest,
+                        source_identity=item.source_identity,
+                        source_adapter_version=item.source_adapter_version,
                         passage_identities=list(item.passage_identities),
                     )
                     for item in revision.evidence_state.available

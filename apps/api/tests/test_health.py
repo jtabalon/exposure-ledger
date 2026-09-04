@@ -116,3 +116,28 @@ def test_health_reports_missing_local_generation_without_hosted_fallback(
         "setup": "Run `ollama pull gpt-oss:20b`, then retry.",
         "model": None,
     }
+
+
+def test_health_preserves_missing_generation_setup_when_worker_observation_is_stale(
+    database_url: str,
+) -> None:
+    InvestigationRepository(database_url).record_generation_readiness(
+        GenerationReadiness(
+            status="unavailable",
+            code="generation_model_not_installed",
+            message="Local generation artifact gpt-oss:20b is not installed.",
+            setup="Run `ollama pull gpt-oss:20b`, then retry.",
+            model=None,
+        )
+    )
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "UPDATE generation_provider_observations SET observed_at = now() - interval '1 hour'"
+        )
+        connection.commit()
+
+    response = TestClient(create_app(Settings(database_url=database_url))).get("/health")
+
+    assert response.json()["generation"]["code"] == "generation_readiness_stale"
+    assert "gpt-oss:20b is not installed" in response.json()["generation"]["message"]
+    assert "ollama pull gpt-oss:20b" in response.json()["generation"]["setup"]

@@ -68,6 +68,8 @@ than thirty seconds. If Ollama is stopped or either configured artifact is missi
 `degraded` and includes the exact local setup command; the application never calls Ollama's pull
 endpoint and never substitutes a hosted provider. `OLLAMA_BASE_URL` must be an HTTP loopback URL.
 Cloud-tagged artifacts and model inventory entries that resolve to a remote model are rejected.
+The production worker records the failed readiness observation and exits at startup when the pinned
+generation artifact is unavailable, so the API can report the exact missing setup step.
 
 Create and inspect the tracer Assessment Run through the versioned API:
 
@@ -135,6 +137,12 @@ ordering and top-five Investigation selection. The workbench explains the score 
 with unknown dependency provenance contributing no directness or proximity points and remaining
 visible in the response. Stable vulnerability aliases and package identity are used as tie-breakers.
 No generation model participates in matching, identity, ranking, or selection.
+
+The bounded Investigation runner then loads each selected Exposure, acquires its immutable evidence,
+runs the pinned hybrid retrieval query, requests schema-constrained local generation, validates
+Claim provenance, Recommendation evidence sufficiency, and output cyber policy, and atomically
+seals an immutable Revision. Evidence captures carry their actual Source adapter version; each
+Revision must pin the exact Source-to-adapter-version mapping before persistence accepts it.
 
 After evidence capture, the worker records a retrieved-content Policy Decision, then records passage
 representations in PostgreSQL under an immutable Embedding Space. Its identity covers the local

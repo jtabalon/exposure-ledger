@@ -35,6 +35,7 @@ class EvidencePassage:
 class EvidenceRecord:
     identity: str
     source: Source
+    source_adapter_version: str
     captured_at: datetime
     content_digest: str
     attribution: str
@@ -72,6 +73,8 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 class SourceAdapter(Protocol):
     """Convert one captured provider payload into immutable evidence."""
+
+    version: str
 
     def capture(
         self,

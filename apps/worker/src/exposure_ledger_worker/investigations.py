@@ -18,11 +18,13 @@ from exposure_ledger import (
     CyberPolicy,
     EvidenceState,
     InvestigationEvent,
+    InvestigationEventMode,
     InvestigationEvidenceState,
     InvestigationExposure,
     InvestigationMeasurements,
     InvestigationRevision,
     InvestigationRevisionStatus,
+    InvestigationStage,
     PolicyDecision,
     PolicyResult,
     Recommendation,
@@ -75,15 +77,47 @@ class _GraphState(TypedDict, total=False):
     revision: InvestigationRevision
 
 
-_STAGES: tuple[tuple[str, str, str], ...] = (
-    ("load_exposure", "deterministic", "Pinned package-specific Exposure loaded."),
-    ("acquire_evidence", "deterministic", "Immutable Evidence Records acquired."),
-    ("retrieve_passages", "retrieval", "Exposure-scoped hybrid retrieval completed."),
-    ("synthesize_claims", "model", "Structured Claims synthesized locally."),
-    ("validate_claims", "deterministic", "Claim citations and limitations validated."),
-    ("recommend", "deterministic", "Recommendation evidence policy applied."),
-    ("validate_policy", "policy", "Structured output cyber policy applied."),
-    ("persist_revision", "deterministic", "Immutable Investigation Revision persisted."),
+_STAGES: tuple[tuple[InvestigationStage, InvestigationEventMode, str], ...] = (
+    (
+        InvestigationStage.LOAD_EXPOSURE,
+        InvestigationEventMode.DETERMINISTIC,
+        "Pinned package-specific Exposure loaded.",
+    ),
+    (
+        InvestigationStage.ACQUIRE_EVIDENCE,
+        InvestigationEventMode.DETERMINISTIC,
+        "Immutable Evidence Records acquired.",
+    ),
+    (
+        InvestigationStage.RETRIEVE_PASSAGES,
+        InvestigationEventMode.RETRIEVAL,
+        "Exposure-scoped hybrid retrieval completed.",
+    ),
+    (
+        InvestigationStage.SYNTHESIZE_CLAIMS,
+        InvestigationEventMode.MODEL,
+        "Structured Claims synthesized locally.",
+    ),
+    (
+        InvestigationStage.VALIDATE_CLAIMS,
+        InvestigationEventMode.DETERMINISTIC,
+        "Claim citations and limitations validated.",
+    ),
+    (
+        InvestigationStage.RECOMMEND,
+        InvestigationEventMode.DETERMINISTIC,
+        "Recommendation evidence policy applied.",
+    ),
+    (
+        InvestigationStage.VALIDATE_POLICY,
+        InvestigationEventMode.POLICY,
+        "Structured output cyber policy applied.",
+    ),
+    (
+        InvestigationStage.PERSIST_REVISION,
+        InvestigationEventMode.DETERMINISTIC,
+        "Immutable Investigation Revision persisted.",
+    ),
 )
 
 
@@ -146,7 +180,7 @@ class BoundedInvestigationRunner:
         graph.add_edge(_STAGES[-1][0], END)
         return graph.compile()
 
-    def _event(self, state: _GraphState, stage: str) -> dict[str, object]:
+    def _event(self, state: _GraphState, stage: InvestigationStage) -> dict[str, object]:
         _, mode, detail = next(item for item in _STAGES if item[0] == stage)
         command = state["command"]
         transitions = state["graph_transitions"] + 1
@@ -171,21 +205,22 @@ class BoundedInvestigationRunner:
         return updates
 
     def _load_exposure(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "load_exposure")
+        return self._event(state, InvestigationStage.LOAD_EXPOSURE)
+
+    def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
         exposure = self._evidence_acquirer.acquire(state["command"])
         if (
             exposure.assessment_run_id != state["command"].assessment_run_id
             or exposure.exposure_id != state["command"].exposure_id
         ):
             raise ValueError("Acquired Exposure does not match the Investigation command")
+        updates = self._event(state, InvestigationStage.ACQUIRE_EVIDENCE)
         updates["exposure"] = exposure
+        updates["tool_calls"] = state["tool_calls"] + 1
         return updates
 
-    def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
-        return self._event(state, "acquire_evidence")
-
     def _retrieve_passages(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "retrieve_passages")
+        updates = self._event(state, InvestigationStage.RETRIEVE_PASSAGES)
         if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
             updates["retrieved"] = RetrievedInvestigationEvidence(query="", passages=())
             return updates
@@ -201,7 +236,7 @@ class BoundedInvestigationRunner:
         return updates
 
     def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "synthesize_claims")
+        updates = self._event(state, InvestigationStage.SYNTHESIZE_CLAIMS)
         if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
             return updates
         readiness = self._generator.check_readiness()
@@ -239,10 +274,10 @@ class BoundedInvestigationRunner:
         return updates
 
     def _validate_claims(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "validate_claims")
+        updates = self._event(state, InvestigationStage.VALIDATE_CLAIMS)
         draft = state.get("draft")
         retrieved = state["retrieved"]
-        available = _retrieved_evidence_scope(retrieved)
+        available = _retrieved_evidence_scope(retrieved, state["exposure"].evidence)
         updates["validation"] = ClaimValidator.validate(
             claims=draft.claims if draft is not None else (),
             available_evidence=available,
@@ -251,7 +286,7 @@ class BoundedInvestigationRunner:
         return updates
 
     def _recommend(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "recommend")
+        updates = self._event(state, InvestigationStage.RECOMMEND)
         draft = state.get("draft")
         validation = state["validation"]
         decision = RecommendationPolicy.validate(
@@ -293,7 +328,7 @@ class BoundedInvestigationRunner:
         return updates
 
     def _validate_policy(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "validate_policy")
+        updates = self._event(state, InvestigationStage.VALIDATE_POLICY)
         draft = state.get("draft")
         decision = CyberPolicy.decide(
             AssessmentRequest(
@@ -321,7 +356,7 @@ class BoundedInvestigationRunner:
         return updates
 
     def _persist_revision(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, "persist_revision")
+        updates = self._event(state, InvestigationStage.PERSIST_REVISION)
         events = cast(tuple[InvestigationEvent, ...], updates["events"])
         completed_at = self._clock()
         duration_ms = max(
@@ -381,14 +416,21 @@ class BoundedInvestigationRunner:
 
 def _retrieved_evidence_scope(
     retrieved: RetrievedInvestigationEvidence,
+    exposure_evidence: tuple[AvailableEvidence, ...],
 ) -> tuple[AvailableEvidence, ...]:
-    grouped: dict[UUID, tuple[str, str, list[str]]] = {}
+    available_by_id = {item.record_id: item for item in exposure_evidence}
+    grouped: dict[UUID, tuple[str, str, str, str, list[str]]] = {}
     for passage in retrieved.passages:
+        source_evidence = available_by_id.get(passage.evidence_record_id)
+        if source_evidence is None or source_evidence.source_identity != passage.source_identity:
+            raise ValueError("Retrieved Evidence Record changed Source identity")
         current = grouped.setdefault(
             passage.evidence_record_id,
             (
                 passage.evidence_record_identity,
                 passage.evidence_record_digest,
+                source_evidence.source_identity,
+                source_evidence.source_adapter_version,
                 [],
             ),
         )
@@ -397,15 +439,21 @@ def _retrieved_evidence_scope(
             passage.evidence_record_digest,
         ):
             raise ValueError("Retrieved Evidence Record identity changed within one result")
-        current[2].append(passage.passage_identity)
+        current[4].append(passage.passage_identity)
     return tuple(
         AvailableEvidence(
             record_id=record_id,
             record_identity=identity,
             content_digest=digest,
+            source_identity=source_identity,
+            source_adapter_version=source_adapter_version,
             passage_identities=tuple(dict.fromkeys(passages)),
         )
-        for record_id, (identity, digest, passages) in sorted(
-            grouped.items(), key=lambda item: str(item[0])
-        )
+        for record_id, (
+            identity,
+            digest,
+            source_identity,
+            source_adapter_version,
+            passages,
+        ) in sorted(grouped.items(), key=lambda item: str(item[0]))
     )

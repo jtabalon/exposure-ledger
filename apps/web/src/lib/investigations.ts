@@ -227,20 +227,23 @@ export function revisionToWorkbench(
             citation.passageIdentities.includes(passage.passageIdentity),
         ),
       )
-      const relationship = linkedClaims
-        .flatMap((claim) => claim.citations)
-        .find(
-          (citation) =>
-            citation.evidenceRecordId === passage.evidenceRecordId &&
-            citation.passageIdentities.includes(passage.passageIdentity),
-        )?.relationship
       return {
         id: `${passage.evidenceRecordId}:${passage.passageIdentity}`,
         source: passage.sourceIdentity,
         authority: passage.sourceAuthority,
         capturedAt: passage.capturedAt,
-        relationship: relationship ?? "contextual",
-        claimIds: linkedClaims.map((claim) => claim.identity),
+        relationships: linkedClaims.flatMap((claim) =>
+          claim.citations
+            .filter(
+              (citation) =>
+                citation.evidenceRecordId === passage.evidenceRecordId &&
+                citation.passageIdentities.includes(passage.passageIdentity),
+            )
+            .map((citation) => ({
+              claimId: claim.identity,
+              relationship: citation.relationship,
+            })),
+        ),
         passage: passage.passage,
         fullTextRank: passage.fullTextRank,
         fullTextScore: passage.fullTextScore,

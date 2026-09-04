@@ -18,6 +18,8 @@ def _evidence() -> tuple[AvailableEvidence, ...]:
             record_id=EVIDENCE_ID,
             record_identity="sha256:evidence",
             content_digest="sha256:" + "a" * 64,
+            source_identity="osv",
+            source_adapter_version="osv-v1",
             passage_identities=("osv:affected",),
         ),
     )
@@ -76,6 +78,27 @@ def test_unsupported_material_fact_is_preserved_and_forces_an_evidence_gap() -> 
     assert validation.material_claims_supported is False
     assert validation.claims[0].supported is False
     assert validation.issues == ("claim-reachability:material_claim_missing_support",)
+
+
+def test_every_fact_must_relate_to_retrieved_evidence() -> None:
+    validation = ClaimValidator.validate(
+        claims=(
+            ClaimDraft(
+                identity="claim-context",
+                kind=ClaimKind.FACT,
+                text="This is a non-material contextual fact.",
+                material=False,
+                limitation=None,
+                citations=(),
+            ),
+        ),
+        available_evidence=_evidence(),
+        authoritative_conflict=False,
+    )
+
+    assert validation.material_claims_supported is False
+    assert validation.claims[0].supported is False
+    assert validation.issues == ("claim-context:claim_evidence_required",)
 
 
 def test_inference_cites_its_inputs_and_exposes_a_limitation() -> None:

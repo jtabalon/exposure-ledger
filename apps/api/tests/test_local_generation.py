@@ -34,7 +34,7 @@ def _configuration() -> InvestigationConfiguration:
         parser_version="uv-lock-v1",
         retrieval_configuration_version="postgres-hybrid-rrf-v1",
         source_policy_version="explicit-source-allowlist-v1",
-        source_adapter_versions=("osv-v1",),
+        source_adapter_versions=("osv=osv-v1",),
         generation_model=GenerationModel(
             provider="ollama-local",
             model_artifact=MODEL,

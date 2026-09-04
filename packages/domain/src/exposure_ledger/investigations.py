@@ -27,6 +27,8 @@ class AvailableEvidence:
     record_id: UUID
     record_identity: str
     content_digest: str
+    source_identity: str
+    source_adapter_version: str
     passage_identities: tuple[str, ...]
 
 
@@ -130,7 +132,9 @@ class ClaimValidator:
                 has_support = any(
                     citation.relationship is EvidenceRelationship.SUPPORTS for citation in citations
                 )
-                supported = not draft.material or has_support
+                supported = bool(citations) and (not draft.material or has_support)
+                if not citations:
+                    claim_issues.append("claim_evidence_required")
                 if draft.material and not has_support:
                     claim_issues.append("material_claim_missing_support")
 
@@ -151,9 +155,7 @@ class ClaimValidator:
                 )
             )
 
-        material_claims_supported = bool(validated) and all(
-            claim.supported for claim in validated if claim.material
-        )
+        material_claims_supported = bool(validated) and all(claim.supported for claim in validated)
         return ClaimValidation(
             claims=tuple(validated),
             material_claims_supported=material_claims_supported,
@@ -210,6 +212,18 @@ class InvestigationConfiguration:
         )
         if not self.source_adapter_versions or any(not value.strip() for value in values):
             raise ValueError("Investigation configuration identities must not be blank")
+        source_identities = [
+            value.partition("=")[0] for value in self.source_adapter_versions if "=" in value
+        ]
+        if len(source_identities) != len(self.source_adapter_versions) or len(
+            set(source_identities)
+        ) != len(source_identities):
+            raise ValueError("Source adapter versions must uniquely map Source identity to version")
+        if any(
+            not value.partition("=")[0].strip() or not value.partition("=")[2].strip()
+            for value in self.source_adapter_versions
+        ):
+            raise ValueError("Source adapter versions must uniquely map Source identity to version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +306,24 @@ class InvestigationRevisionStatus(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class InvestigationStage(StrEnum):
+    LOAD_EXPOSURE = "load_exposure"
+    ACQUIRE_EVIDENCE = "acquire_evidence"
+    RETRIEVE_PASSAGES = "retrieve_passages"
+    SYNTHESIZE_CLAIMS = "synthesize_claims"
+    VALIDATE_CLAIMS = "validate_claims"
+    RECOMMEND = "recommend"
+    VALIDATE_POLICY = "validate_policy"
+    PERSIST_REVISION = "persist_revision"
+
+
+class InvestigationEventMode(StrEnum):
+    DETERMINISTIC = "deterministic"
+    RETRIEVAL = "retrieval"
+    MODEL = "model"
+    POLICY = "policy"
+
+
 @dataclass(frozen=True, slots=True)
 class InvestigationEvidenceState:
     available: tuple[AvailableEvidence, ...]
@@ -313,8 +345,8 @@ class RevisionRecommendation:
 
 @dataclass(frozen=True, slots=True)
 class InvestigationEvent:
-    stage: str
-    mode: str
+    stage: InvestigationStage
+    mode: InvestigationEventMode
     detail: str
     occurred_at: datetime
 
