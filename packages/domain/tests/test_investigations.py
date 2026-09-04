@@ -1,5 +1,6 @@
 from uuid import UUID
 
+import pytest
 from exposure_ledger import (
     AvailableEvidence,
     ClaimDraft,
@@ -7,9 +8,15 @@ from exposure_ledger import (
     ClaimKind,
     ClaimValidator,
     EvidenceRelationship,
+    InvestigationStoppingCondition,
 )
 
 EVIDENCE_ID = UUID("00000000-0000-0000-0000-000000000081")
+
+
+def test_stopping_conditions_use_a_closed_vocabulary() -> None:
+    with pytest.raises(ValueError):
+        InvestigationStoppingCondition("misspelled_condition")
 
 
 def _evidence() -> tuple[AvailableEvidence, ...]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -28,6 +29,7 @@ from exposure_ledger import (
     InvestigationRevision,
     InvestigationRevisionStatus,
     InvestigationStage,
+    InvestigationStoppingCondition,
     PolicyDecision,
     PolicyResult,
     Recommendation,
@@ -159,13 +161,14 @@ class InvestigationRepository:
         self, command: RunInvestigation, *, timeout_seconds: float
     ) -> InvestigationExposure:
         """Load one selected package-specific Exposure and its immutable evidence state."""
-        timeout_ms = _timeout_ms(timeout_seconds)
+        deadline_monotonic = monotonic() + timeout_seconds
         try:
             exposure = next(
                 (
                     item
                     for item in ExposureRepository(self._database_url).list_for_assessment(
-                        command.assessment_run_id, statement_timeout_ms=timeout_ms
+                        command.assessment_run_id,
+                        deadline_monotonic=deadline_monotonic,
                     )
                     if item.id == command.exposure_id
                 ),
@@ -179,6 +182,7 @@ class InvestigationRepository:
             raise ValueError("Pinned Asset Snapshot does not match the Exposure")
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
             try:
+                timeout_ms = _timeout_ms(deadline_monotonic - monotonic())
                 connection.execute(
                     "SELECT set_config('statement_timeout', %s, true)",
                     (f"{timeout_ms}ms",),
@@ -220,12 +224,13 @@ class InvestigationRepository:
         timeout_seconds: float,
     ) -> RetrievedInvestigationEvidence:
         """Run the pinned hybrid retrieval configuration inside the Exposure scope."""
-        timeout_ms = _timeout_ms(timeout_seconds)
+        deadline_monotonic = monotonic() + timeout_seconds
         if command.configuration.source_policy_version != "explicit-source-allowlist-v1":
             raise ValueError("Pinned Source policy version is not current")
         try:
             records = ExposureRepository(self._database_url).list_for_assessment(
-                command.assessment_run_id, statement_timeout_ms=timeout_ms
+                command.assessment_run_id,
+                deadline_monotonic=deadline_monotonic,
             )
         except psycopg.errors.QueryCanceled as error:
             raise TimeoutError("Evidence retrieval exceeded its wall-time budget") from error
@@ -265,7 +270,7 @@ class InvestigationRepository:
                     embedding_space_identity=command.configuration.embedding_space.identity,
                     limit=10,
                 ),
-                statement_timeout_ms=timeout_ms,
+                deadline_monotonic=deadline_monotonic,
             )
         except psycopg.errors.QueryCanceled as error:
             raise TimeoutError("Evidence retrieval exceeded its wall-time budget") from error
@@ -628,8 +633,20 @@ class InvestigationRepository:
             revision.status is InvestigationRevisionStatus.INCOMPLETE
             and not revision.evidence_state.available
             and revision.stopping_condition
-            in {"wall_time_budget_exhausted", "graph_transition_budget_exhausted"}
+            in {
+                InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
+                InvestigationStoppingCondition.GRAPH_TRANSITION_BUDGET_EXHAUSTED,
+            }
         )
+        if evidence_was_skipped_by_budget:
+            if revision.evidence_state.authoritative_conflict is not None:
+                raise ValueError(
+                    "Authoritative conflict must be unknown when evidence acquisition was skipped"
+                )
+        elif revision.evidence_state.authoritative_conflict is None:
+            raise ValueError(
+                "Authoritative conflict may be unknown only when evidence acquisition was skipped"
+            )
         if adapter_versions != expected_adapter_versions and not evidence_was_skipped_by_budget:
             raise ValueError("Revision does not pin the exact Evidence Source adapter versions")
         if (
@@ -885,7 +902,7 @@ class InvestigationRepository:
             exposure_id=UUID(str(row["exposure_id"])),
             asset_snapshot_id=UUID(str(row["asset_snapshot_id"])),
             status=InvestigationRevisionStatus(str(row["status"])),
-            stopping_condition=str(row["stopping_condition"]),
+            stopping_condition=InvestigationStoppingCondition(str(row["stopping_condition"])),
             evidence_state=evidence_state,
             claims=tuple(claims),
             recommendation=RevisionRecommendation(

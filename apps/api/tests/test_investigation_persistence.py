@@ -365,6 +365,53 @@ def test_revision_persists_when_budget_expires_before_evidence_acquisition(
     assert repository.list_for_exposure(exposure.id)[0].revision == incomplete
 
 
+def test_revision_rejects_unknown_conflict_after_evidence_acquisition(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+
+    with pytest.raises(ValueError, match="unknown only when evidence acquisition was skipped"):
+        InvestigationRepository(database_url).append(
+            replace(
+                revision,
+                evidence_state=replace(
+                    revision.evidence_state,
+                    authoritative_conflict=None,
+                ),
+            )
+        )
+
+
+def test_revision_rejects_known_conflict_when_evidence_acquisition_was_skipped(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    skipped = replace(
+        revision,
+        status=InvestigationRevisionStatus.INCOMPLETE,
+        stopping_condition="graph_transition_budget_exhausted",
+        evidence_state=InvestigationEvidenceState(
+            available=(),
+            retrieved=RetrievedInvestigationEvidence(query="", passages=()),
+            material_claims_supported=False,
+            authoritative_conflict=False,
+            validation_issues=(),
+        ),
+        claims=(),
+        recommendation=replace(
+            revision.recommendation,
+            recommendation=Recommendation.MORE_EVIDENCE_REQUIRED,
+            accepted=False,
+            reason="graph_transition_budget_exhausted",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must be unknown"):
+        InvestigationRepository(database_url).append(skipped)
+
+
 def test_controlled_adapters_exercise_the_complete_investigation_path(
     database_url: str,
 ) -> None:

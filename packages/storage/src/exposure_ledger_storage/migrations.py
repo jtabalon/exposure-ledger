@@ -852,7 +852,16 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
             asset_snapshot_id uuid NOT NULL REFERENCES asset_snapshots(id) ON DELETE RESTRICT,
             status text NOT NULL CHECK (status IN ('complete', 'incomplete')),
-            stopping_condition text NOT NULL,
+            stopping_condition text NOT NULL CHECK (stopping_condition IN (
+                'completed', 'wall_time_budget_exhausted',
+                'graph_transition_budget_exhausted', 'tool_call_budget_exhausted',
+                'generation_model_call_budget_exhausted',
+                'generation_provider_unavailable', 'generation_runtime_unavailable',
+                'generation_model_not_installed', 'generation_model_not_current',
+                'generation_cloud_model_rejected', 'generation_provider_invalid_response',
+                'generation_prompt_not_current', 'generation_artifact_changed',
+                'generation_invalid_structured_output', 'structured_output_policy_blocked'
+            )),
             material_claims_supported boolean NOT NULL,
             authoritative_conflict boolean,
             validation_issues text[] NOT NULL,

@@ -39,7 +39,7 @@ stateDiagram-v2
 - 12 graph transitions
 - 2 minutes wall time
 
-Crossing any limit produces an incomplete revision; it never triggers an unrecorded retry or fallback provider.
+Crossing any limit stops evidence, retrieval, and model work and produces an incomplete revision; it never triggers an unrecorded retry or fallback provider. Immutable Revision persistence is the mandatory post-budget finalization step and does not authorize additional Investigation work.
 
 Evidence Gap follow-ups and LangGraph checkpoint resumption are future extensions. The initial graph
 runs one fixed pass; interrupted work is reclaimed through the PostgreSQL Assessment lease and starts

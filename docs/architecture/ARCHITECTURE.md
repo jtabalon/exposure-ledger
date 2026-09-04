@@ -52,7 +52,7 @@ Each module is deep: callers cross a small interface while the volatile source, 
 - PostgreSQL is authoritative for jobs, events, Evidence Records, and domain history. Future graph checkpoints will use the same store.
 - Every retry is idempotent and cannot mutate a prior Evidence Record or Investigation Revision.
 - Model or source failure is visible; no provider fallback occurs implicitly.
-- Budgets cap model calls, tool calls, graph transitions, wall time, and—when hosted models arrive—money.
+- Budgets cap evidence acquisition, retrieval, model calls, and graph work. Mandatory immutable Revision persistence is a post-budget finalization step: it never authorizes more evidence or model work, and its database latency is excluded from the Investigation wall-time measurement.
 - Repository archives are bounded in memory and explicitly discarded after successful parsing or rejection; only manifests, normalized results, hashes, and evidence-bearing excerpts remain.
 
 ## Security invariants

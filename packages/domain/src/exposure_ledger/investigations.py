@@ -307,6 +307,24 @@ class InvestigationRevisionStatus(StrEnum):
     INCOMPLETE = "incomplete"
 
 
+class InvestigationStoppingCondition(StrEnum):
+    COMPLETED = "completed"
+    WALL_TIME_BUDGET_EXHAUSTED = "wall_time_budget_exhausted"
+    GRAPH_TRANSITION_BUDGET_EXHAUSTED = "graph_transition_budget_exhausted"
+    TOOL_CALL_BUDGET_EXHAUSTED = "tool_call_budget_exhausted"
+    GENERATION_MODEL_CALL_BUDGET_EXHAUSTED = "generation_model_call_budget_exhausted"
+    GENERATION_PROVIDER_UNAVAILABLE = "generation_provider_unavailable"
+    GENERATION_RUNTIME_UNAVAILABLE = "generation_runtime_unavailable"
+    GENERATION_MODEL_NOT_INSTALLED = "generation_model_not_installed"
+    GENERATION_MODEL_NOT_CURRENT = "generation_model_not_current"
+    GENERATION_CLOUD_MODEL_REJECTED = "generation_cloud_model_rejected"
+    GENERATION_PROVIDER_INVALID_RESPONSE = "generation_provider_invalid_response"
+    GENERATION_PROMPT_NOT_CURRENT = "generation_prompt_not_current"
+    GENERATION_ARTIFACT_CHANGED = "generation_artifact_changed"
+    GENERATION_INVALID_STRUCTURED_OUTPUT = "generation_invalid_structured_output"
+    STRUCTURED_OUTPUT_POLICY_BLOCKED = "structured_output_policy_blocked"
+
+
 class InvestigationStage(StrEnum):
     LOAD_EXPOSURE = "load_exposure"
     ACQUIRE_EVIDENCE = "acquire_evidence"
@@ -369,7 +387,7 @@ class InvestigationRevision:
     exposure_id: UUID
     asset_snapshot_id: UUID
     status: InvestigationRevisionStatus
-    stopping_condition: str
+    stopping_condition: InvestigationStoppingCondition
     evidence_state: InvestigationEvidenceState
     claims: tuple[Claim, ...]
     recommendation: RevisionRecommendation
@@ -378,3 +396,10 @@ class InvestigationRevision:
     measurements: InvestigationMeasurements
     configuration: InvestigationConfiguration
     created_at: datetime
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "stopping_condition",
+            InvestigationStoppingCondition(self.stopping_condition),
+        )

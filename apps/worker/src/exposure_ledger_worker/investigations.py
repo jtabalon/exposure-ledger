@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -27,6 +26,7 @@ from exposure_ledger import (
     InvestigationRevision,
     InvestigationRevisionStatus,
     InvestigationStage,
+    InvestigationStoppingCondition,
     PolicyDecision,
     PolicyResult,
     Recommendation,
@@ -76,7 +76,7 @@ class _GraphState(TypedDict, total=False):
     recommendation: RevisionRecommendation
     policy_decision: PolicyDecision
     status: InvestigationRevisionStatus
-    stopping_condition: str
+    stopping_condition: InvestigationStoppingCondition
     events: tuple[InvestigationEvent, ...]
     generation_model_calls: int
     tool_calls: int
@@ -163,7 +163,7 @@ class BoundedInvestigationRunner:
                     "tool_calls": 0,
                     "graph_transitions": 0,
                     "status": InvestigationRevisionStatus.COMPLETE,
-                    "stopping_condition": "completed",
+                    "stopping_condition": InvestigationStoppingCondition.COMPLETED,
                 }
             ),
         )
@@ -200,12 +200,14 @@ class BoundedInvestigationRunner:
         if self._remaining_seconds(state) <= 0:
             return {
                 "status": InvestigationRevisionStatus.INCOMPLETE,
-                "stopping_condition": "wall_time_budget_exhausted",
+                "stopping_condition": InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
             }
         if state["graph_transitions"] >= command.budget.max_graph_transitions:
             return {
                 "status": InvestigationRevisionStatus.INCOMPLETE,
-                "stopping_condition": "graph_transition_budget_exhausted",
+                "stopping_condition": (
+                    InvestigationStoppingCondition.GRAPH_TRANSITION_BUDGET_EXHAUSTED
+                ),
             }
         return {
             "events": (*state["events"], InvestigationEvent(stage, mode, detail, occurred_at)),
@@ -222,25 +224,20 @@ class BoundedInvestigationRunner:
     def _load_exposure(self, state: _GraphState) -> dict[str, object]:
         return self._event(state, InvestigationStage.LOAD_EXPOSURE)
 
-    async def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
+    def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.ACQUIRE_EVIDENCE)
         if self._stopped(state, updates):
             return updates
         timeout_seconds = self._remaining_seconds(state)
         updates["tool_calls"] = state["tool_calls"] + 1
         try:
-            exposure = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._evidence_acquirer.acquire,
-                    state["command"],
-                    timeout_seconds=timeout_seconds,
-                ),
-                timeout=timeout_seconds,
+            exposure = self._evidence_acquirer.acquire(
+                state["command"], timeout_seconds=timeout_seconds
             )
         except TimeoutError:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="wall_time_budget_exhausted",
+                stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
             )
             return updates
         if (
@@ -252,11 +249,11 @@ class BoundedInvestigationRunner:
         updates["exposure"] = exposure
         return updates
 
-    async def _retrieve_passages(self, state: _GraphState) -> dict[str, object]:
+    def _retrieve_passages(self, state: _GraphState) -> dict[str, object]:
         if state["tool_calls"] >= state["command"].budget.max_tool_calls:
             return dict(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="tool_call_budget_exhausted",
+                stopping_condition=InvestigationStoppingCondition.TOOL_CALL_BUDGET_EXHAUSTED,
                 retrieved=RetrievedInvestigationEvidence(query="", passages=()),
             )
         updates = self._event(state, InvestigationStage.RETRIEVE_PASSAGES)
@@ -266,92 +263,72 @@ class BoundedInvestigationRunner:
         timeout_seconds = self._remaining_seconds(state)
         updates["tool_calls"] = state["tool_calls"] + 1
         try:
-            updates["retrieved"] = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._retriever.retrieve,
-                    state["exposure"],
-                    state["command"],
-                    timeout_seconds=timeout_seconds,
-                ),
-                timeout=timeout_seconds,
+            updates["retrieved"] = self._retriever.retrieve(
+                state["exposure"],
+                state["command"],
+                timeout_seconds=timeout_seconds,
             )
         except TimeoutError:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="wall_time_budget_exhausted",
+                stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
                 retrieved=RetrievedInvestigationEvidence(query="", passages=()),
             )
             return updates
         return updates
 
-    async def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
+    def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.SYNTHESIZE_CLAIMS)
         if self._stopped(state, updates):
             return updates
         timeout_seconds = self._remaining_seconds(state)
         try:
-            readiness = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._generator.check_readiness,
-                    timeout_seconds=timeout_seconds,
-                ),
-                timeout=timeout_seconds,
-            )
+            readiness = self._generator.check_readiness(timeout_seconds=timeout_seconds)
         except TimeoutError:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="wall_time_budget_exhausted",
+                stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
             )
             return updates
         configured = state["command"].configuration.generation_model
         if readiness.model is None:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition=(
-                    "wall_time_budget_exhausted"
-                    if readiness.code == "generation_wall_time_budget_exhausted"
-                    else readiness.code or "generation_provider_unavailable"
-                ),
+                stopping_condition=_generation_stopping_condition(readiness.code),
             )
             return updates
         if readiness.model != configured:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="generation_model_not_current",
+                stopping_condition=InvestigationStoppingCondition.GENERATION_MODEL_NOT_CURRENT,
             )
             return updates
         if state["generation_model_calls"] >= state["command"].budget.max_generation_model_calls:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="generation_model_call_budget_exhausted",
+                stopping_condition=(
+                    InvestigationStoppingCondition.GENERATION_MODEL_CALL_BUDGET_EXHAUSTED
+                ),
             )
             return updates
         try:
             timeout_seconds = self._remaining_seconds(state)
             updates["generation_model_calls"] = state["generation_model_calls"] + 1
-            updates["draft"] = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._generator.generate,
-                    state["exposure"],
-                    state["retrieved"],
-                    state["command"].configuration,
-                    timeout_seconds=timeout_seconds,
-                ),
-                timeout=timeout_seconds,
+            updates["draft"] = self._generator.generate(
+                state["exposure"],
+                state["retrieved"],
+                state["command"].configuration,
+                timeout_seconds=timeout_seconds,
             )
         except GenerationProviderUnavailable as error:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition=(
-                    "wall_time_budget_exhausted"
-                    if error.readiness.code == "generation_wall_time_budget_exhausted"
-                    else error.readiness.code or "generation_provider_unavailable"
-                ),
+                stopping_condition=_generation_stopping_condition(error.readiness.code),
             )
         except TimeoutError:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="wall_time_budget_exhausted",
+                stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
             )
         return updates
 
@@ -432,12 +409,14 @@ class BoundedInvestigationRunner:
         updates["policy_decision"] = decision
         if decision.result is not PolicyResult.ALLOWED:
             updates["status"] = InvestigationRevisionStatus.INCOMPLETE
-            updates["stopping_condition"] = "structured_output_policy_blocked"
+            updates["stopping_condition"] = (
+                InvestigationStoppingCondition.STRUCTURED_OUTPUT_POLICY_BLOCKED
+            )
             updates["recommendation"] = replace(
                 state["recommendation"],
                 recommendation=Recommendation.MORE_EVIDENCE_REQUIRED,
                 accepted=False,
-                reason="structured_output_policy_blocked",
+                reason=InvestigationStoppingCondition.STRUCTURED_OUTPUT_POLICY_BLOCKED,
                 summary="Structured model output was blocked by the Cyber Policy.",
             )
         return updates
@@ -453,7 +432,8 @@ class BoundedInvestigationRunner:
         validation = state["validation"]
         status = cast(InvestigationRevisionStatus, updates.get("status", state["status"]))
         stopping_condition = cast(
-            str, updates.get("stopping_condition", state["stopping_condition"])
+            InvestigationStoppingCondition,
+            updates.get("stopping_condition", state["stopping_condition"]),
         )
         recommendation = state["recommendation"]
         if status is InvestigationRevisionStatus.INCOMPLETE and recommendation.accepted:
@@ -548,3 +528,14 @@ def _retrieved_evidence_scope(
             passages,
         ) in sorted(grouped.items(), key=lambda item: str(item[0]))
     )
+
+
+def _generation_stopping_condition(code: str | None) -> InvestigationStoppingCondition:
+    if code == "generation_wall_time_budget_exhausted":
+        return InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED
+    try:
+        return InvestigationStoppingCondition(
+            code or InvestigationStoppingCondition.GENERATION_PROVIDER_UNAVAILABLE
+        )
+    except ValueError:
+        return InvestigationStoppingCondition.GENERATION_PROVIDER_UNAVAILABLE
