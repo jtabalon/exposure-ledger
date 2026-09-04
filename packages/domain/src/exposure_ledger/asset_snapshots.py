@@ -124,6 +124,13 @@ class PackageInstance:
 
 
 @dataclass(frozen=True, slots=True)
+class RetainedDependencyManifest:
+    path: str
+    digest: str
+    content: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class AssetSnapshot:
     repository: str
     commit: str
@@ -131,9 +138,7 @@ class AssetSnapshot:
     lockfile_path: str
     lockfile_digest: str
     lockfile_content: str = field(repr=False)
-    project_file_path: str | None
-    project_file_digest: str | None
-    project_file_content: str | None = field(repr=False)
+    project_file: RetainedDependencyManifest | None
     environment_profile: EnvironmentProfile
     packages: tuple[PackageInstance, ...]
     parser_version: str
@@ -163,15 +168,6 @@ class _LockedPackage:
     key: tuple[str, str | None, PackageSource]
     name: str
     version: str | None
-    source: PackageSource
-    data: Mapping[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class _PoetryPackage:
-    key: tuple[str, str, PackageSource]
-    name: str
-    version: str
     source: PackageSource
     data: Mapping[str, Any]
 
@@ -254,13 +250,17 @@ class AssetSnapshotCapture:
             lockfile_path=validated.lockfile_path,
             lockfile_digest=f"sha256:{hashlib.sha256(lockfile_bytes).hexdigest()}",
             lockfile_content=lockfile_content,
-            project_file_path=project_file_path,
-            project_file_digest=(
-                f"sha256:{hashlib.sha256(project_file_bytes).hexdigest()}"
-                if project_file_bytes is not None
+            project_file=(
+                RetainedDependencyManifest(
+                    path=project_file_path,
+                    digest=f"sha256:{hashlib.sha256(project_file_bytes).hexdigest()}",
+                    content=project_file_content,
+                )
+                if project_file_path is not None
+                and project_file_bytes is not None
+                and project_file_content is not None
                 else None
             ),
-            project_file_content=project_file_content,
             environment_profile=validated.environment_profile,
             packages=packages,
             parser_version=parser_version,
@@ -506,73 +506,34 @@ def _parse_uv_lock(
         by_name[package.name].append(package)
     for candidates in by_name.values():
         candidates.sort(key=lambda package: package.key)
+    direct_targets = tuple(
+        (
+            _resolve_dependency(dependency, by_name),
+            frozenset(_dependency_extras(dependency)),
+        )
+        for dependency in _dependencies_for(
+            root, frozenset(environment.selected_extras), environment
+        )
+    )
 
-    paths: dict[tuple[str, str | None, PackageSource], set[tuple[str, ...]]] = defaultdict(set)
-    queue: deque[
-        tuple[
-            _LockedPackage,
-            tuple[str, ...],
-            tuple[tuple[str, str | None, PackageSource], ...],
-            frozenset[str],
-        ]
-    ] = deque()
-    for dependency in _dependencies_for(root, frozenset(environment.selected_extras), environment):
-        target = _resolve_dependency(dependency, by_name)
-        queue.append(
+    def dependency_targets(
+        package: _LockedPackage, active_extras: frozenset[str]
+    ) -> tuple[tuple[_LockedPackage, frozenset[str]], ...]:
+        return tuple(
             (
-                target,
-                (root.name, target.name),
-                (root.key, target.key),
+                _resolve_dependency(dependency, by_name),
                 frozenset(_dependency_extras(dependency)),
             )
+            for dependency in _dependencies_for(package, active_extras, environment)
         )
 
-    total_paths = 0
-    expanded: set[tuple[tuple[str, str | None, PackageSource], tuple[str, ...], frozenset[str]]] = (
-        set()
-    )
-    while queue:
-        package, path, key_path, active_extras = queue.popleft()
-        state = (package.key, path, active_extras)
-        if state in expanded:
-            continue
-        expanded.add(state)
-        if package.version is not None and path not in paths[package.key]:
-            paths[package.key].add(path)
-            total_paths += 1
-            if total_paths > max_dependency_paths:
-                raise AssetSnapshotRejected(
-                    "dependency_graph_too_large", "uv.lock contains too many Dependency Paths"
-                )
-        for dependency in _dependencies_for(package, active_extras, environment):
-            target = _resolve_dependency(dependency, by_name)
-            if target.key in key_path:
-                continue
-            queue.append(
-                (
-                    target,
-                    (*path, target.name),
-                    (*key_path, target.key),
-                    frozenset(_dependency_extras(dependency)),
-                )
-            )
-
-    result = []
-    for key, package_paths in paths.items():
-        name, version, source = key
-        assert version is not None
-        ordered_paths = tuple(sorted(package_paths, key=lambda path: (len(path), path)))
-        result.append(
-            PackageInstance(
-                name=name,
-                version=version,
-                direct=any(len(path) == 2 for path in ordered_paths),
-                source=source,
-                dependency_paths=ordered_paths,
-            )
-        )
-    return tuple(
-        sorted(result, key=lambda package: (package.name, package.version, package.source))
+    return _normalize_dependency_graph(
+        root_name=root.name,
+        direct_targets=direct_targets,
+        dependency_targets=dependency_targets,
+        root_key=root.key,
+        max_dependency_paths=max_dependency_paths,
+        format_name="uv.lock",
     )
 
 
@@ -705,66 +666,107 @@ def _parse_poetry_lock(
         for package in (_poetry_package(raw, environment) for raw in raw_packages)
         if package is not None
     )
-    by_name: dict[str, list[_PoetryPackage]] = defaultdict(list)
+    by_name: dict[str, list[_LockedPackage]] = defaultdict(list)
     for package in packages:
         by_name[package.name].append(package)
     for candidates in by_name.values():
         candidates.sort(key=lambda package: package.key)
 
-    paths: dict[tuple[str, str, PackageSource], set[tuple[str, ...]]] = defaultdict(set)
+    root_extras = frozenset(environment.selected_extras)
+    direct_targets = tuple(
+        (
+            _resolve_poetry_dependency(name, specification, by_name, environment, root_extras),
+            frozenset(_poetry_dependency_extras(specification)),
+        )
+        for name, specification in root_dependencies
+    )
+
+    def dependency_targets(
+        package: _LockedPackage, active_extras: frozenset[str]
+    ) -> tuple[tuple[_LockedPackage, frozenset[str]], ...]:
+        return tuple(
+            (
+                _resolve_poetry_dependency(
+                    name, specification, by_name, environment, active_extras
+                ),
+                frozenset(_poetry_dependency_extras(specification)),
+            )
+            for name, specification in _poetry_dependencies_for(package, active_extras, environment)
+        )
+
+    return _normalize_dependency_graph(
+        root_name=root_name,
+        direct_targets=direct_targets,
+        dependency_targets=dependency_targets,
+        root_key=None,
+        max_dependency_paths=max_dependency_paths,
+        format_name="poetry.lock",
+    )
+
+
+def _normalize_dependency_graph(
+    *,
+    root_name: str,
+    direct_targets: Sequence[tuple[_LockedPackage, frozenset[str]]],
+    dependency_targets: Callable[
+        [_LockedPackage, frozenset[str]],
+        Sequence[tuple[_LockedPackage, frozenset[str]]],
+    ],
+    root_key: tuple[str, str | None, PackageSource] | None,
+    max_dependency_paths: int,
+    format_name: str,
+) -> tuple[PackageInstance, ...]:
+    paths: dict[tuple[str, str | None, PackageSource], set[tuple[str, ...]]] = defaultdict(set)
     queue: deque[
         tuple[
-            _PoetryPackage,
+            _LockedPackage,
             tuple[str, ...],
-            tuple[tuple[str, str, PackageSource], ...],
+            tuple[tuple[str, str | None, PackageSource], ...],
             frozenset[str],
         ]
     ] = deque()
-    for name, specification in root_dependencies:
-        target = _resolve_poetry_dependency(name, specification, by_name, environment)
-        queue.append(
-            (
-                target,
-                (root_name, target.name),
-                (target.key,),
-                frozenset(_poetry_dependency_extras(specification)),
-            )
+    for package, active_extras in direct_targets:
+        initial_key_path: tuple[tuple[str, str | None, PackageSource], ...] = (
+            (package.key,) if root_key is None else (root_key, package.key)
         )
+        queue.append((package, (root_name, package.name), initial_key_path, active_extras))
 
     total_paths = 0
+    expanded: set[tuple[tuple[str, str | None, PackageSource], tuple[str, ...], frozenset[str]]] = (
+        set()
+    )
     while queue:
         package, path, key_path, active_extras = queue.popleft()
-        if path in paths[package.key]:
+        state = (package.key, path, active_extras)
+        if state in expanded:
             continue
-        paths[package.key].add(path)
-        total_paths += 1
-        if total_paths > max_dependency_paths:
-            raise AssetSnapshotRejected(
-                "dependency_graph_too_large", "poetry.lock contains too many Dependency Paths"
-            )
-        for name, specification in _poetry_dependencies_for(package, active_extras, environment):
-            target = _resolve_poetry_dependency(name, specification, by_name, environment)
+        expanded.add(state)
+        if package.version is not None and path not in paths[package.key]:
+            paths[package.key].add(path)
+            total_paths += 1
+            if total_paths > max_dependency_paths:
+                raise AssetSnapshotRejected(
+                    "dependency_graph_too_large",
+                    f"{format_name} contains too many Dependency Paths",
+                )
+        for target, target_extras in dependency_targets(package, active_extras):
             if target.key in key_path:
                 continue
-            queue.append(
-                (
-                    target,
-                    (*path, target.name),
-                    (*key_path, target.key),
-                    frozenset(_poetry_dependency_extras(specification)),
-                )
-            )
+            queue.append((target, (*path, target.name), (*key_path, target.key), target_extras))
 
-    result = [
-        PackageInstance(
-            name=name,
-            version=version,
-            direct=any(len(path) == 2 for path in package_paths),
-            source=source,
-            dependency_paths=tuple(sorted(package_paths, key=lambda path: (len(path), path))),
+    result = []
+    for (name, version, source), package_paths in paths.items():
+        assert version is not None
+        ordered_paths = tuple(sorted(package_paths, key=lambda path: (len(path), path)))
+        result.append(
+            PackageInstance(
+                name=name,
+                version=version,
+                direct=any(len(path) == 2 for path in ordered_paths),
+                source=source,
+                dependency_paths=ordered_paths,
+            )
         )
-        for (name, version, source), package_paths in paths.items()
-    ]
     return tuple(
         sorted(result, key=lambda package: (package.name, package.version, package.source))
     )
@@ -797,8 +799,11 @@ def _poetry_root_dependencies(
     dependencies = _mapping(poetry.get("dependencies"), "Poetry project dependencies")
     _validate_poetry_python_constraint(dependencies.get("python"), environment)
     raw_extras = poetry.get("extras", {})
-    extras = _mapping(raw_extras, "Poetry project extras")
-    available_extras = {canonicalize_name(extra) for extra in extras}
+    extras: dict[str, object] = {
+        canonicalize_name(extra): members
+        for extra, members in _mapping(raw_extras, "Poetry project extras").items()
+    }
+    available_extras = set(extras)
     unknown_extras = set(environment.selected_extras) - available_extras
     if unknown_extras:
         raise AssetSnapshotRejected(
@@ -823,7 +828,9 @@ def _poetry_root_dependencies(
         active = tuple(
             variant
             for variant in variants
-            if _poetry_dependency_applies(variant, environment)
+            if _poetry_dependency_applies(
+                variant, environment, frozenset(environment.selected_extras)
+            )
             and (not bool(variant.get("optional")) or dependency_name in enabled_optional)
         )
         if len(active) > 1:
@@ -844,8 +851,11 @@ def _pep_621_root_dependencies(
         raise AssetSnapshotRejected("invalid_project_file", "project name is required")
     _validate_requires_python(project.get("requires-python"), environment)
     raw_optional = project.get("optional-dependencies", {})
-    optional = _mapping(raw_optional, "project optional-dependencies")
-    available_extras = {canonicalize_name(extra) for extra in optional}
+    optional: dict[str, object] = {
+        canonicalize_name(extra): members
+        for extra, members in _mapping(raw_optional, "project optional-dependencies").items()
+    }
+    available_extras = set(optional)
     unknown_extras = set(environment.selected_extras) - available_extras
     if unknown_extras:
         raise AssetSnapshotRejected(
@@ -887,12 +897,14 @@ def _pep_621_root_dependencies(
         }
         if requirement.marker is not None:
             specification["markers"] = str(requirement.marker)
-        if _poetry_dependency_applies(specification, environment):
+        if _poetry_dependency_applies(
+            specification, environment, frozenset(environment.selected_extras)
+        ):
             dependencies.append((canonicalize_name(requirement.name), specification))
     return canonicalize_name(name), tuple(dependencies)
 
 
-def _poetry_package(raw: object, environment: EnvironmentProfile) -> _PoetryPackage | None:
+def _poetry_package(raw: object, environment: EnvironmentProfile) -> _LockedPackage | None:
     data = _mapping(raw, "Poetry package")
     raw_name = data.get("name")
     raw_version = data.get("version")
@@ -911,8 +923,10 @@ def _poetry_package(raw: object, environment: EnvironmentProfile) -> _PoetryPack
         python_versions, Version(environment.python_version)
     ):
         return None
-    marker = data.get("markers", data.get("marker"))
-    if marker is not None and not _marker_applies(marker, environment, frozenset()):
+    marker = _poetry_group_marker(data.get("markers", data.get("marker")), "main")
+    if marker is not None and not _marker_applies(
+        marker, environment, frozenset(environment.selected_extras)
+    ):
         return None
     try:
         version = str(Version(raw_version))
@@ -922,7 +936,7 @@ def _poetry_package(raw: object, environment: EnvironmentProfile) -> _PoetryPack
         ) from error
     source = _poetry_package_source(data.get("source"))
     name = canonicalize_name(raw_name)
-    return _PoetryPackage(
+    return _LockedPackage(
         key=(name, version, source), name=name, version=version, source=source, data=data
     )
 
@@ -961,7 +975,7 @@ def _poetry_package_source(value: object) -> PackageSource:
 
 
 def _poetry_dependencies_for(
-    package: _PoetryPackage,
+    package: _LockedPackage,
     active_extras: frozenset[str],
     environment: EnvironmentProfile,
 ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
@@ -969,7 +983,10 @@ def _poetry_dependencies_for(
     dependencies = _mapping(raw_dependencies, "Poetry package dependencies")
     optional_names: set[str] = set()
     raw_extras = package.data.get("extras", {})
-    extras = _mapping(raw_extras, "Poetry package extras")
+    extras: dict[str, object] = {
+        canonicalize_name(extra): members
+        for extra, members in _mapping(raw_extras, "Poetry package extras").items()
+    }
     for extra in active_extras:
         members = extras.get(extra, ())
         if not isinstance(members, list) or not all(isinstance(item, str) for item in members):
@@ -984,7 +1001,7 @@ def _poetry_dependencies_for(
         active = tuple(
             variant
             for variant in _poetry_dependency_variants(specification)
-            if _poetry_dependency_applies(variant, environment)
+            if _poetry_dependency_applies(variant, environment, active_extras)
             and (not bool(variant.get("optional")) or name in optional_names)
         )
         if len(active) > 1:
@@ -1014,10 +1031,12 @@ def _poetry_dependency_variants(value: object) -> tuple[Mapping[str, Any], ...]:
 
 
 def _poetry_dependency_applies(
-    specification: Mapping[str, Any], environment: EnvironmentProfile
+    specification: Mapping[str, Any],
+    environment: EnvironmentProfile,
+    active_extras: frozenset[str] = frozenset(),
 ) -> bool:
     marker = specification.get("markers")
-    if marker is not None and not _marker_applies(marker, environment, frozenset()):
+    if marker is not None and not _marker_applies(marker, environment, active_extras):
         return False
     python_constraint = specification.get("python")
     if python_constraint is not None and not _poetry_constraint_applies(
@@ -1041,13 +1060,14 @@ def _poetry_dependency_applies(
 def _resolve_poetry_dependency(
     name: str,
     specification: object,
-    by_name: Mapping[str, Sequence[_PoetryPackage]],
+    by_name: Mapping[str, Sequence[_LockedPackage]],
     environment: EnvironmentProfile,
-) -> _PoetryPackage:
+    active_extras: frozenset[str],
+) -> _LockedPackage:
     variants = tuple(
         variant
         for variant in _poetry_dependency_variants(specification)
-        if _poetry_dependency_applies(variant, environment)
+        if _poetry_dependency_applies(variant, environment, active_extras)
     )
     if len(variants) != 1:
         raise AssetSnapshotRejected(
@@ -1057,7 +1077,8 @@ def _resolve_poetry_dependency(
     candidates = [
         candidate
         for candidate in by_name.get(canonicalize_name(name), ())
-        if _poetry_constraint_applies(version_constraint, Version(candidate.version))
+        if candidate.version is not None
+        and _poetry_constraint_applies(version_constraint, Version(candidate.version))
     ]
     if len(candidates) != 1:
         raise AssetSnapshotRejected(
@@ -1065,6 +1086,17 @@ def _resolve_poetry_dependency(
             f"Poetry dependency {canonicalize_name(name)} does not identify exactly one package",
         )
     return candidates[0]
+
+
+def _poetry_group_marker(value: object, group: str) -> object:
+    if not isinstance(value, dict):
+        return value
+    if not all(isinstance(name, str) and isinstance(marker, str) for name, marker in value.items()):
+        raise AssetSnapshotRejected(
+            "unsupported_environment_marker",
+            "Poetry package marker groups must map names to marker text",
+        )
+    return value.get(group)
 
 
 def _poetry_dependency_extras(specification: object) -> tuple[str, ...]:

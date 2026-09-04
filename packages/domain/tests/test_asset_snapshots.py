@@ -145,9 +145,9 @@ content-hash = "fixture"
     snapshot = AssetSnapshotCapture(BytesArchiveSource(content)).capture(request)
 
     assert snapshot.parser_version == "poetry-lock-v1"
-    assert snapshot.project_file_path == "services/api/pyproject.toml"
-    assert snapshot.project_file_content is not None
-    assert 'name = "demo-app"' in snapshot.project_file_content
+    assert snapshot.project_file is not None
+    assert snapshot.project_file.path == "services/api/pyproject.toml"
+    assert 'name = "demo-app"' in snapshot.project_file.content
     assert [
         (package.name, package.version, package.direct, package.dependency_paths)
         for package in snapshot.packages
@@ -299,6 +299,77 @@ content-hash = "fixture"
 
     assert [(package.name, package.version) for package in snapshot.packages] == [
         ("variant-lib", "2.5.0")
+    ]
+
+
+def test_poetry_extras_apply_to_package_markers_and_optional_dependency_edges() -> None:
+    content = archive_bytes(
+        {
+            "project-root/pyproject.toml": """
+[tool.poetry]
+name = "extras-app"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+cache-control = { version = "^1", optional = true, extras = ["filecache"] }
+flask = { version = "^3", optional = true }
+
+[tool.poetry.extras]
+my_feature = ["cache-control", "flask"]
+""",
+            "project-root/poetry.lock": """
+[[package]]
+name = "cache-control"
+version = "1.0.0"
+python-versions = ">=3.12"
+groups = ["main"]
+
+[package.dependencies]
+file-lock = { version = "^2", optional = true, markers = "extra == 'filecache'" }
+
+[package.extras]
+filecache = ["file-lock (>=2,<3)"]
+
+[[package]]
+name = "file-lock"
+version = "2.0.0"
+python-versions = ">=3.12"
+groups = ["main"]
+
+[[package]]
+name = "flask"
+version = "3.0.0"
+python-versions = ">=3.12"
+groups = ["main"]
+markers = { main = "extra == 'my-feature'" }
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.12"
+content-hash = "fixture"
+""",
+        }
+    )
+    request = CaptureAssetSnapshot(
+        repository="https://github.com/example/project",
+        commit="0123456789abcdef0123456789abcdef01234567",
+        project_root=".",
+        lockfile_path="poetry.lock",
+        environment_profile=EnvironmentProfile(
+            python_version="3.12.2",
+            operating_system=OperatingSystem.LINUX,
+            architecture=Architecture.X86_64,
+            selected_extras=("my-feature",),
+        ),
+    )
+
+    snapshot = AssetSnapshotCapture(BytesArchiveSource(content)).capture(request)
+
+    assert [(package.name, package.dependency_paths) for package in snapshot.packages] == [
+        ("cache-control", (("extras-app", "cache-control"),)),
+        ("file-lock", (("extras-app", "cache-control", "file-lock"),)),
+        ("flask", (("extras-app", "flask"),)),
     ]
 
 
