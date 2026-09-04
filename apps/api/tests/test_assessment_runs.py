@@ -372,5 +372,5 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         ).fetchone()
 
     assert row == (True,)
-    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6]
+    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6, 7]
     assert enforcement_point == ("enforcement_point",)

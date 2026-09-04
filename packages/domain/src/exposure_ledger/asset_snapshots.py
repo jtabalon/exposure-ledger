@@ -1280,8 +1280,8 @@ def _marker_applies(
     if unsupported:
         raise AssetSnapshotRejected(
             "unsupported_environment_marker",
-            "uv.lock marker depends on fields not pinned by the Environment Profile: "
-            + ", ".join(sorted(unsupported)),
+            "selected dependency data has a marker that depends on fields not pinned by the "
+            "Environment Profile: " + ", ".join(sorted(unsupported)),
         )
     try:
         marker = Marker(value)
@@ -1289,7 +1289,8 @@ def _marker_applies(
         return any(marker.evaluate(_marker_environment(environment, extra)) for extra in extras)
     except (InvalidMarker, KeyError) as error:
         raise AssetSnapshotRejected(
-            "unsupported_environment_marker", "uv.lock contains an unsupported environment marker"
+            "unsupported_environment_marker",
+            "selected dependency data contains an unsupported environment marker",
         ) from error
 
 

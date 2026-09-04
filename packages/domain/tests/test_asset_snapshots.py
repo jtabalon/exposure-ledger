@@ -194,6 +194,21 @@ windows-only==9.0.0 ; sys_platform == "win32"
     ]
 
 
+def test_requirements_unsupported_marker_rejection_does_not_name_another_format() -> None:
+    content = archive_bytes(
+        {"project-root/requirements.txt": ("demo==1.0.0 ; implementation_name == 'cpython'\n")}
+    )
+
+    with pytest.raises(AssetSnapshotRejected) as error:
+        AssetSnapshotCapture(BytesArchiveSource(content)).capture(
+            capture_request(lockfile_path="requirements.txt")
+        )
+
+    assert error.value.code == "unsupported_environment_marker"
+    assert "selected dependency data" in str(error.value)
+    assert "uv.lock" not in str(error.value)
+
+
 def test_poetry_pep_621_project_and_optional_dependencies_select_one_environment() -> None:
     content = archive_bytes(
         {
