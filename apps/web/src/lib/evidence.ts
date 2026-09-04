@@ -17,3 +17,11 @@ export function evidenceForClaim<T extends ClaimLinkedEvidence>(
 ): T[] {
   return evidence.filter((record) => record.claimIds.includes(claimId))
 }
+
+export function claimsForEvidence<T extends { id: string }>(
+  claims: readonly T[],
+  evidence: ClaimLinkedEvidence,
+): T[] {
+  const claimIds = new Set(evidence.claimIds)
+  return claims.filter((claim) => claimIds.has(claim.id))
+}

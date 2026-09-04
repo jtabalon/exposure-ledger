@@ -1,8 +1,13 @@
 import httpx
 import psycopg
+from exposure_ledger import GenerationModel, GenerationReadiness
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
-from exposure_ledger_storage import EvidenceRetriever, OllamaEmbeddingProvider
+from exposure_ledger_storage import (
+    EvidenceRetriever,
+    InvestigationRepository,
+    OllamaEmbeddingProvider,
+)
 from fastapi.testclient import TestClient
 
 
@@ -16,6 +21,19 @@ def test_health_gives_worker_observed_local_embedding_setup_when_artifact_is_mis
     )
 
     EvidenceRetriever(database_url).record_embedding_readiness(provider.check_readiness())
+    InvestigationRepository(database_url).record_generation_readiness(
+        GenerationReadiness(
+            status="ready",
+            code=None,
+            message="The explicitly configured local generation artifact is ready.",
+            setup=None,
+            model=GenerationModel(
+                provider="ollama-local",
+                model_artifact="gpt-oss:20b",
+                artifact_digest="sha256:" + "a" * 64,
+            ),
+        )
+    )
 
     response = TestClient(create_app(Settings(database_url=database_url))).get("/health")
 
@@ -31,6 +49,17 @@ def test_health_gives_worker_observed_local_embedding_setup_when_artifact_is_mis
             "message": "Local embedding artifact qwen3-embedding:0.6b is not installed.",
             "setup": "Run `ollama pull qwen3-embedding:0.6b`, then retry.",
             "space": None,
+        },
+        "generation": {
+            "status": "ready",
+            "code": None,
+            "message": "The explicitly configured local generation artifact is ready.",
+            "setup": None,
+            "model": {
+                "provider": "ollama-local",
+                "modelArtifact": "gpt-oss:20b",
+                "artifactDigest": "sha256:" + "a" * 64,
+            },
         },
     }
 
@@ -59,4 +88,31 @@ def test_health_rejects_stale_worker_embedding_observations(database_url: str) -
         "message": "The worker's local embedding readiness observation is stale.",
         "setup": "Check that the worker and Ollama are running, then retry.",
         "space": None,
+    }
+
+
+def test_health_reports_missing_local_generation_without_hosted_fallback(
+    database_url: str,
+) -> None:
+    InvestigationRepository(database_url).record_generation_readiness(
+        GenerationReadiness(
+            status="unavailable",
+            code="generation_model_not_installed",
+            message="Local generation artifact gpt-oss:20b is not installed.",
+            setup="Run `ollama pull gpt-oss:20b`, then retry.",
+            model=None,
+        )
+    )
+
+    response = TestClient(create_app(Settings(database_url=database_url))).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["inference_mode"] == "local"
+    assert response.json()["generation"] == {
+        "status": "unavailable",
+        "code": "generation_model_not_installed",
+        "message": "Local generation artifact gpt-oss:20b is not installed.",
+        "setup": "Run `ollama pull gpt-oss:20b`, then retry.",
+        "model": None,
     }

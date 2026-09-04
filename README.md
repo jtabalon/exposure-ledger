@@ -62,12 +62,12 @@ Local model downloads remain explicit and are not needed for the synthetic Asses
 make models
 ```
 
-`GET /health` reports the worker's latest persisted local-embedding readiness observation. The
-worker refreshes it every ten seconds and the API rejects observations older than thirty seconds. If
-Ollama is stopped or the configured artifact is missing, health is `degraded` and includes the
-exact local setup command; the application never calls Ollama's pull endpoint and never substitutes
-a hosted provider. `OLLAMA_BASE_URL` must be an HTTP loopback URL. Cloud-tagged artifacts and model
-inventory entries that resolve to a remote model are rejected.
+`GET /health` reports the worker's latest persisted local embedding and generation readiness
+observations. The worker refreshes them every ten seconds and the API rejects observations older
+than thirty seconds. If Ollama is stopped or either configured artifact is missing, health is
+`degraded` and includes the exact local setup command; the application never calls Ollama's pull
+endpoint and never substitutes a hosted provider. `OLLAMA_BASE_URL` must be an HTTP loopback URL.
+Cloud-tagged artifacts and model inventory entries that resolve to a remote model are rejected.
 
 Create and inspect the tracer Assessment Run through the versioned API:
 
@@ -181,7 +181,11 @@ make check
 `make test` starts PostgreSQL and creates isolated databases for API integration tests. Deterministic
 known-answer providers verify fusion, isolation, outage behavior, and recall reporting. A real-model
 evaluation remains a separate release gate because CI does not download or assume access to the
-pinned local artifact.
+pinned local artifact. After explicitly installing the models with `make models`, run that gate with:
+
+```bash
+make check-real-model
+```
 
 ## Core documentation
 

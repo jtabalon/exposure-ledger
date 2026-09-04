@@ -1,5 +1,6 @@
 """Worker process for durable Assessment Runs."""
 
+import asyncio
 import logging
 import time
 from collections.abc import Iterator
@@ -19,6 +20,7 @@ from exposure_ledger import (
     CisaKevCatalog,
     CisaKevSource,
     CyberPolicy,
+    EmbeddingSpace,
     EpssSource,
     EpssSourceUnavailable,
     ExposureDiscovery,
@@ -28,6 +30,8 @@ from exposure_ledger import (
     FirstPartyAdvisorySource,
     GitHubAdvisoryResponseRejected,
     GitHubAdvisorySourceUnavailable,
+    InvestigationBudget,
+    InvestigationConfiguration,
     KevSourceUnavailable,
     OsvResponseRejected,
     OsvSource,
@@ -36,6 +40,7 @@ from exposure_ledger import (
     PolicyResult,
     RepositoryArchiveSource,
     RepositoryArchiveUnavailable,
+    RunInvestigation,
     derive_assessment_advisory_targets,
 )
 from exposure_ledger_storage import (
@@ -49,6 +54,7 @@ from exposure_ledger_storage import (
     EmbeddingProviderUnavailable,
     EvidenceRetriever,
     ExposureRepository,
+    InvestigationRepository,
     OllamaEmbeddingProvider,
     normalize_database_url,
 )
@@ -57,6 +63,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from exposure_ledger_worker.enrichment import CisaKevApiSource, FirstEpssApiSource
 from exposure_ledger_worker.github_advisories import GitHubAdvisoryApiSource
+from exposure_ledger_worker.investigations import BoundedInvestigationRunner
+from exposure_ledger_worker.local_generation import (
+    GenerationProvider,
+    OllamaGenerationProvider,
+)
 from exposure_ledger_worker.osv import OsvApiSource
 from exposure_ledger_worker.repository_archives import GitHubArchiveSource
 
@@ -128,7 +139,7 @@ def _index_evidence_or_fail(
     claim_id: UUID,
     database_url: str,
     embedding_provider: EmbeddingProvider,
-) -> bool:
+) -> EmbeddingSpace | None:
     retriever = EvidenceRetriever(database_url, embedding_provider=embedding_provider)
     readiness = embedding_provider.check_readiness()
     retriever.record_embedding_readiness(readiness)
@@ -153,10 +164,10 @@ def _index_evidence_or_fail(
                 code="embedding_content_policy_blocked",
                 message=decision.reason,
             )
-            return False
+            return None
         try:
             retriever.index_assessment(assessment_run_id, space=readiness.space)
-            return True
+            return readiness.space
         except EmbeddingProviderUnavailable as caught:
             error = caught
         except (EmbeddingIndexUnavailable, ValueError) as caught:
@@ -166,7 +177,7 @@ def _index_evidence_or_fail(
                 code="embedding_index_failed",
                 message=str(caught),
             )
-            return False
+            return None
 
     detail = error.readiness.message
     if error.readiness.setup is not None:
@@ -177,7 +188,72 @@ def _index_evidence_or_fail(
         code=error.readiness.code or "embedding_provider_unavailable",
         message=detail,
     )
-    return False
+    return None
+
+
+def _run_investigations_or_fail(
+    *,
+    repository: AssessmentRunRepository,
+    assessment_run_id: UUID,
+    claim_id: UUID,
+    database_url: str,
+    parser_version: str,
+    embedding_space: EmbeddingSpace,
+    generation_provider: GenerationProvider,
+) -> bool:
+    investigation_repository = InvestigationRepository(database_url)
+    readiness = generation_provider.check_readiness()
+    investigation_repository.record_generation_readiness(readiness)
+    if readiness.model is None:
+        detail = readiness.message
+        if readiness.setup is not None:
+            detail = f"{detail} {readiness.setup}"
+        repository.fail(
+            assessment_run_id,
+            claim_id=claim_id,
+            code=readiness.code or "generation_provider_unavailable",
+            message=detail,
+        )
+        return False
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=investigation_repository,
+        retriever=investigation_repository,
+        generator=generation_provider,
+        revision_history=investigation_repository,
+    )
+    selected = [
+        exposure
+        for exposure in ExposureRepository(database_url).list_for_assessment(assessment_run_id)
+        if exposure.selected_for_investigation
+    ]
+    for exposure in selected:
+        asyncio.run(
+            runner.run(
+                RunInvestigation(
+                    assessment_run_id=assessment_run_id,
+                    exposure_id=exposure.id,
+                    configuration=InvestigationConfiguration(
+                        application_release="0.1.0",
+                        graph_version="bounded-investigation-v1",
+                        prompt_version="claims-recommendation-v1",
+                        policy_version="0.1",
+                        parser_version=parser_version,
+                        retrieval_configuration_version="postgres-hybrid-rrf-v1",
+                        source_policy_version="explicit-source-allowlist-v1",
+                        source_adapter_versions=(
+                            "osv-v1",
+                            "cisa-kev-v1",
+                            "first-epss-v1",
+                            "github-repository-advisory-v1",
+                        ),
+                        generation_model=readiness.model,
+                        embedding_space=embedding_space,
+                    ),
+                    budget=InvestigationBudget(),
+                )
+            )
+        )
+    return True
 
 
 class WorkerSettings(BaseSettings):
@@ -193,6 +269,7 @@ class WorkerSettings(BaseSettings):
     embedding_health_seconds: float = Field(default=10, gt=0, le=20)
     ollama_base_url: str = "http://localhost:11434"
     embedding_model: str = "qwen3-embedding:0.6b"
+    generation_model: str = "gpt-oss:20b"
 
     @field_validator("database_url")
     @classmethod
@@ -260,6 +337,36 @@ def maintain_embedding_readiness(
         thread.join()
 
 
+@contextmanager
+def maintain_generation_readiness(
+    repository: InvestigationRepository,
+    provider: GenerationProvider,
+    *,
+    interval_seconds: float,
+) -> Iterator[None]:
+    """Refresh worker-owned generation health without invoking or downloading a model."""
+    stopped = Event()
+
+    def observe() -> None:
+        try:
+            repository.record_generation_readiness(provider.check_readiness())
+        except Exception:
+            logger.exception("Local generation readiness observation failed")
+
+    def heartbeat() -> None:
+        while not stopped.wait(interval_seconds):
+            observe()
+
+    observe()
+    thread = Thread(target=heartbeat, name="generation-readiness-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join()
+
+
 def process_next_assessment(
     *,
     database_url: str,
@@ -270,6 +377,7 @@ def process_next_assessment(
     epss_source: EpssSource | None = None,
     advisory_source: FirstPartyAdvisorySource | None = None,
     embedding_provider: EmbeddingProvider | None = None,
+    generation_provider: GenerationProvider | None = None,
 ) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
     repository = AssessmentRunRepository(database_url)
@@ -351,12 +459,28 @@ def process_next_assessment(
                     assessment_run.id,
                     asset_snapshot_id=snapshot.id,
                 ):
-                    if embedding_provider is not None and not _index_evidence_or_fail(
-                        repository=repository,
-                        assessment_run_id=assessment_run.id,
-                        claim_id=assessment_run.claim_id,
-                        database_url=database_url,
-                        embedding_provider=embedding_provider,
+                    embedding_space = None
+                    if embedding_provider is not None:
+                        embedding_space = _index_evidence_or_fail(
+                            repository=repository,
+                            assessment_run_id=assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            database_url=database_url,
+                            embedding_provider=embedding_provider,
+                        )
+                        if embedding_space is None:
+                            return True
+                    if generation_provider is not None and (
+                        embedding_space is None
+                        or not _run_investigations_or_fail(
+                            repository=repository,
+                            assessment_run_id=assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            database_url=database_url,
+                            parser_version=snapshot.parser_version,
+                            embedding_space=embedding_space,
+                            generation_provider=generation_provider,
+                        )
                     ):
                         return True
                     repository.complete_repository(
@@ -454,12 +578,28 @@ def process_next_assessment(
                         asset_snapshot_id=snapshot.id,
                         result=result,
                     )
-                    if embedding_provider is not None and not _index_evidence_or_fail(
-                        repository=repository,
-                        assessment_run_id=assessment_run.id,
-                        claim_id=assessment_run.claim_id,
-                        database_url=database_url,
-                        embedding_provider=embedding_provider,
+                    embedding_space = None
+                    if embedding_provider is not None:
+                        embedding_space = _index_evidence_or_fail(
+                            repository=repository,
+                            assessment_run_id=assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            database_url=database_url,
+                            embedding_provider=embedding_provider,
+                        )
+                        if embedding_space is None:
+                            return True
+                    if generation_provider is not None and (
+                        embedding_space is None
+                        or not _run_investigations_or_fail(
+                            repository=repository,
+                            assessment_run_id=assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            database_url=database_url,
+                            parser_version=snapshot.parser_version,
+                            embedding_space=embedding_space,
+                            generation_provider=generation_provider,
+                        )
                     ):
                         return True
                 except OsvSourceUnavailable as error:
@@ -503,6 +643,10 @@ def main() -> None:
         base_url=settings.ollama_base_url,
         model_artifact=settings.embedding_model,
     )
+    generation_provider = OllamaGenerationProvider(
+        base_url=settings.ollama_base_url,
+        model_artifact=settings.generation_model,
+    )
     readiness_repository = EvidenceRetriever(
         settings.database_url,
         embedding_provider=embedding_provider,
@@ -510,16 +654,24 @@ def main() -> None:
     logger.info("Exposure Ledger worker ready")
 
     try:
-        with maintain_embedding_readiness(
-            readiness_repository,
-            embedding_provider,
-            interval_seconds=settings.embedding_health_seconds,
+        with (
+            maintain_embedding_readiness(
+                readiness_repository,
+                embedding_provider,
+                interval_seconds=settings.embedding_health_seconds,
+            ),
+            maintain_generation_readiness(
+                InvestigationRepository(settings.database_url),
+                generation_provider,
+                interval_seconds=settings.embedding_health_seconds,
+            ),
         ):
             while True:
                 if not process_next_assessment(
                     database_url=settings.database_url,
                     stale_after_seconds=settings.worker_lease_seconds,
                     embedding_provider=embedding_provider,
+                    generation_provider=generation_provider,
                 ):
                     time.sleep(settings.worker_poll_seconds)
     except KeyboardInterrupt:

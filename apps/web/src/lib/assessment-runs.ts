@@ -61,7 +61,7 @@ export type PolicyDecision = {
   ruleVersion: string
   reason: string
   createdAt: string
-  enforcementPoint: "request" | "tool_call"
+  enforcementPoint: "request" | "tool_call" | "retrieved_content" | "structured_output"
 }
 
 export type AssessmentRun = {
@@ -92,7 +92,12 @@ export type PolicyDecisionCollection = {
 
 export async function loadCollection<T>(
   resource: string,
-  contractName: "Assessment" | "Asset Snapshot" | "Exposure" | "Policy",
+  contractName:
+    | "Assessment"
+    | "Asset Snapshot"
+    | "Exposure"
+    | "Investigation Revision"
+    | "Policy",
 ): Promise<{ items: T[]; error: string | null }> {
   try {
     const response = await fetch(`${apiBaseUrl()}/api/v1/${resource}`, {

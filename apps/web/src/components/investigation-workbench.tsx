@@ -95,9 +95,11 @@ export function InvestigationWorkbench({
   policyDecisions: PolicyDecision[]
   policyDecisionsError: string | null
 }) {
-  const [selectedClaimId, setSelectedClaimId] = useState(investigation.claims[0].id)
+  const [selectedClaimId, setSelectedClaimId] = useState<string | null>(
+    investigation.claims[0]?.id ?? null,
+  )
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null)
-  const selectedClaim = investigation.claims.find(({ id }) => id === selectedClaimId)!
+  const selectedClaim = investigation.claims.find(({ id }) => id === selectedClaimId)
   const navigation = [
     { label: "Assessment Runs", icon: Activity, count: String(assessmentRuns.length), active: true },
     { label: "Asset Snapshots", icon: Database, count: String(assetSnapshots.length) },
@@ -107,9 +109,11 @@ export function InvestigationWorkbench({
   ]
   const relatedEvidence = useMemo(
     () =>
-      evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
-        (left, right) => left.fusedRank - right.fusedRank,
-      ),
+      selectedClaimId
+        ? evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
+            (left, right) => left.fusedRank - right.fusedRank,
+          )
+        : [],
     [investigation.evidence, selectedClaimId],
   )
 
@@ -121,7 +125,7 @@ export function InvestigationWorkbench({
   function selectEvidence(evidenceId: string, claimIds: string[]) {
     setSelectedEvidenceId(evidenceId)
     const firstClaimId = claimIds[0]
-    if (firstClaimId && !claimIds.includes(selectedClaimId)) {
+    if (firstClaimId && (!selectedClaimId || !claimIds.includes(selectedClaimId))) {
       setSelectedClaimId(firstClaimId)
     }
   }
@@ -197,7 +201,9 @@ export function InvestigationWorkbench({
               variant="outline"
               className="shrink-0 border-amber-600/30 bg-amber-600/8 text-[10px] font-semibold tracking-[0.1em] text-amber-800 uppercase"
             >
-              Synthetic precomputed demo
+              {investigation.meta.mode === "live"
+                ? "Live local revision"
+                : "Synthetic precomputed demo"}
             </Badge>
           </div>
         </div>
@@ -225,7 +231,11 @@ export function InvestigationWorkbench({
                   <Badge variant="outline" className="bg-card font-mono">
                     {investigation.exposure.vulnerability}
                   </Badge>
-                  <span className="text-xs text-muted-foreground">Ready for review</span>
+                  <span className="text-xs text-muted-foreground">
+                    {investigation.meta.status === "complete"
+                      ? "Ready for review"
+                      : "Incomplete · review evidence gaps"}
+                  </span>
                 </div>
                 <h1 className="text-balance text-2xl leading-tight font-semibold tracking-[-0.025em] sm:text-3xl">
                   {investigation.exposure.packageName} {investigation.exposure.installedVersion}
@@ -435,6 +445,15 @@ export function InvestigationWorkbench({
             </div>
 
             <div className="space-y-2" aria-label="Investigation claims">
+              {investigation.claims.length === 0 ? (
+                <div role="status" className="border-l-2 border-amber-600 bg-amber-600/8 p-4">
+                  <p className="text-sm font-semibold">No validated Claims were retained.</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    This incomplete Revision preserves the stopping condition and evidence state
+                    without inventing a conclusion.
+                  </p>
+                </div>
+              ) : null}
               {investigation.claims.map((claim) => {
                 const selected = claim.id === selectedClaimId
                 const evidenceCount = evidenceForClaim(investigation.evidence, claim.id).length
@@ -501,7 +520,9 @@ export function InvestigationWorkbench({
                   Evidence trace
                 </SectionLabel>
                 <h2 id="evidence-heading" className="text-lg font-semibold tracking-tight">
-                  Evidence used by {selectedClaim.label}
+                  {selectedClaim
+                    ? `Evidence used by ${selectedClaim.label}`
+                    : "Evidence available to this Revision"}
                 </h2>
               </div>
               <Badge variant="secondary" className="font-mono text-[10px]">
@@ -640,7 +661,8 @@ export function InvestigationWorkbench({
                     <div className="mt-3 flex items-center gap-1.5 border-t pt-3 text-[10px] text-muted-foreground">
                       <span>Used by</span>
                       {record.claimIds.map((claimId) => {
-                        const claim = investigation.claims.find(({ id }) => id === claimId)!
+                        const claim = investigation.claims.find(({ id }) => id === claimId)
+                        if (!claim) return null
                         return (
                           <button
                             key={claimId}
@@ -670,7 +692,11 @@ export function InvestigationWorkbench({
         </div>
 
         <footer className="mx-auto flex max-w-[1600px] flex-col gap-2 border-x border-b bg-card px-5 py-4 text-[10px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-6">
-          <span>This screen contains synthetic data for interface evaluation.</span>
+          <span>
+            {investigation.meta.mode === "live"
+              ? "This Revision was generated by the local Investigation runner."
+              : "This screen contains synthetic data for interface evaluation."}
+          </span>
           <span className="font-mono">
             graph v0.1 · policy v0.1 · prompt demo-001 · retrieval{" "}
             {investigation.retrieval.configurationVersion}

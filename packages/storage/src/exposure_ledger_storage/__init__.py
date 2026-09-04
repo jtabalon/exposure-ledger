@@ -27,6 +27,11 @@ from exposure_ledger_storage.exposures import (
     SourceRecord,
     VulnerabilityRecordRecord,
 )
+from exposure_ledger_storage.investigations import (
+    GENERATION_READINESS_MAX_AGE_SECONDS,
+    InvestigationRepository,
+    InvestigationRevisionRecord,
+)
 from exposure_ledger_storage.local_embeddings import (
     EmbeddingProviderUnavailable,
     EmbeddingReadiness,
@@ -83,6 +88,9 @@ __all__ = [
     "PolicyDecisionRecord",
     "PackageInstanceRecord",
     "HYBRID_RETRIEVAL_CONFIGURATION_VERSION",
+    "GENERATION_READINESS_MAX_AGE_SECONDS",
+    "InvestigationRepository",
+    "InvestigationRevisionRecord",
     "LEXICAL_RETRIEVAL_CONFIGURATION_VERSION",
     "OllamaEmbeddingProvider",
     "RetrievalConfigurationNotCurrent",

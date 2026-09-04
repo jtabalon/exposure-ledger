@@ -124,3 +124,18 @@ def test_multi_step_escalation_uses_the_strictest_classification() -> None:
         "C2 assistance and A4 action in the operation chain are outside the first-release "
         "capability ceiling."
     )
+
+
+def test_evidence_backed_structured_output_is_allowed_at_the_output_boundary() -> None:
+    decision = CyberPolicy.decide(
+        AssessmentRequest(
+            operation=AssessmentOperation.PRODUCE_EXPOSURE_RECOMMENDATION,
+            target_scope="exposure:00000000-0000-0000-0000-000000000013",
+            authorization_scope="local operator",
+            authorization_status=AuthorizationStatus.CONFIRMED,
+        )
+    )
+
+    assert decision.result is PolicyResult.ALLOWED
+    assert decision.assistance_class is AssistanceClass.C1
+    assert decision.action_level is ActionLevel.A0

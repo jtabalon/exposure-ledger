@@ -36,6 +36,8 @@ export type InvestigationStage = {
 
 export type DemoInvestigation = {
   meta: {
+    mode: "live" | "precomputed"
+    status: "complete" | "incomplete"
     repository: string
     commit: string
     projectRoot: string
@@ -98,6 +100,8 @@ export type DemoInvestigation = {
 
 export const demoInvestigation: DemoInvestigation = {
   meta: {
+    mode: "precomputed",
+    status: "incomplete",
     repository: "northstar-labs/harbor-api",
     commit: "4f92c7d",
     projectRoot: "services/api",
