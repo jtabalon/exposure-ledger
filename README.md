@@ -85,7 +85,7 @@ create a worker task. For example, this safely records a restricted request:
 ```bash
 curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
   -H 'content-type: application/json' \
-  -d '{"mode":"synthetic","policyContext":{"operation":"draft_dependency_patch"}}'
+  -d '{"mode":"synthetic","policyContext":{"operationChain":["draft_dependency_patch"]}}'
 ```
 
 For the visible failure contract, synthetic runs may set `"scenario":"worker_failure"`. This produces a persisted `failed` state and `assessment.failed` event without invoking a real provider.

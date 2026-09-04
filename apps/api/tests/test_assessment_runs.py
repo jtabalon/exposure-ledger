@@ -192,23 +192,22 @@ def test_synthetic_assessment_survives_restart_and_replays_progress(
     ("policy_context", "expected_result", "expected_reason"),
     [
         (
-            {"operation": "draft_dependency_patch"},
+            {"operationChain": ["draft_dependency_patch"]},
             "restricted",
             "A2 actions are restricted pending the approved human-review milestone.",
         ),
         (
-            {"operation": "generate_exploit"},
+            {"operationChain": ["generate_exploit"]},
             "blocked",
             "C2 assistance is outside the first-release capability ceiling.",
         ),
         (
-            {"authorizationStatus": "uncertain", "authorizationScope": None},
+            {"operationChain": ["unrecognized_operation"]},
             "blocked",
-            "Authorization is materially uncertain; the Assessment request is blocked.",
+            "Assistance Class is materially uncertain; the Assessment request is blocked.",
         ),
         (
             {
-                "operation": "summarize_public_advisory",
                 "operationChain": ["scan_arbitrary_hosts"],
             },
             "blocked",
@@ -227,10 +226,6 @@ def test_non_allowed_policy_decisions_are_visible_without_creating_worker_tasks(
 ) -> None:
     settings = Settings(database_url=database_url)
     payload = {
-        "operation": "synthetic_exposure_assessment",
-        "targetScope": "bundled synthetic fixture",
-        "authorizationScope": "local operator",
-        "authorizationStatus": "confirmed",
         **policy_context,
     }
 
@@ -254,5 +249,23 @@ def test_non_allowed_policy_decisions_are_visible_without_creating_worker_tasks(
         decisions_response = client.get("/api/v1/policy-decisions")
         assert decisions_response.status_code == 200
         assert decisions_response.json()["items"] == [detail["policyDecision"]]
+
+    assert process_next_assessment(database_url=database_url) is False
+
+
+def test_client_cannot_assert_its_own_authorization(database_url: str) -> None:
+    settings = Settings(database_url=database_url)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/assessment-runs",
+            json={
+                "mode": "synthetic",
+                "policyContext": {"authorizationStatus": "confirmed"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert client.get("/api/v1/assessment-runs").json()["items"] == []
 
     assert process_next_assessment(database_url=database_url) is False

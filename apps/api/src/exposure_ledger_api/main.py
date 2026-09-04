@@ -12,6 +12,7 @@ from uuid import UUID
 from exposure_ledger import (
     ActionLevel,
     AssessmentOperation,
+    AssessmentRequest,
     AssistanceClass,
     AuthorizationStatus,
     CyberPolicy,
@@ -52,14 +53,14 @@ class HealthResponse(BaseModel):
 
 
 class AssessmentPolicyContext(ApiModel):
-    operation: str = AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT
-    target_scope: str | None = "bundled synthetic fixture"
-    authorization_scope: str | None = "local operator"
-    authorization_status: AuthorizationStatus = AuthorizationStatus.CONFIRMED
+    model_config = ConfigDict(extra="forbid")
+
     operation_chain: list[str] = Field(default_factory=list)
 
 
 class CreateAssessmentRunRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
     mode: Literal["synthetic"]
     scenario: AssessmentScenario = AssessmentScenario.COMPLETE
     policy_context: AssessmentPolicyContext = Field(default_factory=AssessmentPolicyContext)
@@ -188,12 +189,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     def create_assessment_run(request: CreateAssessmentRunRequest) -> AssessmentRunResponse:
         context = request.policy_context
-        decision = CyberPolicy.decide_assessment(
-            operation=context.operation,
-            target_scope=context.target_scope,
-            authorization_scope=context.authorization_scope,
-            authorization_status=context.authorization_status,
-            operation_chain=tuple(context.operation_chain),
+        decision = CyberPolicy.decide(
+            AssessmentRequest(
+                operation=AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT,
+                target_scope="bundled synthetic fixture",
+                authorization_scope="local operator",
+                authorization_status=AuthorizationStatus.CONFIRMED,
+                operation_chain=tuple(context.operation_chain),
+            )
         )
         if decision.result is not PolicyResult.ALLOWED:
             policy_record = repository.record_policy_decision(decision)

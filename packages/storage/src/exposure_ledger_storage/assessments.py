@@ -91,7 +91,7 @@ class PolicyDecisionRecord:
 
 
 class AssessmentRunRepository:
-    """Persist Assessment Runs and their event streams in PostgreSQL."""
+    """Persist Assessment request decisions, Runs, and event streams in PostgreSQL."""
 
     def __init__(self, database_url: str) -> None:
         self._database_url = database_url

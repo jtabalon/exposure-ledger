@@ -40,6 +40,32 @@ export type PolicyDecisionCollection = {
   error: string | null
 }
 
+async function loadCollection<T>(
+  resource: string,
+  contractName: "Assessment" | "Policy",
+): Promise<{ items: T[]; error: string | null }> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/api/v1/${resource}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!response.ok) {
+      return {
+        items: [],
+        error: `${contractName} API returned HTTP ${response.status}.`,
+      }
+    }
+    const data = (await response.json()) as { items?: T[] }
+    if (!Array.isArray(data.items)) {
+      return { items: [], error: `${contractName} API returned an invalid response.` }
+    }
+    return { items: data.items, error: null }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown connection error"
+    return { items: [], error: `${contractName} API unavailable: ${message}` }
+  }
+}
+
 function apiBaseUrl(): string {
   const configured = process.env.EXPOSURE_LEDGER_API_URL ?? "http://localhost:8000"
   let parsed: URL
@@ -55,47 +81,9 @@ function apiBaseUrl(): string {
 }
 
 export async function loadAssessmentRuns(): Promise<AssessmentRunCollection> {
-  try {
-    const response = await fetch(`${apiBaseUrl()}/api/v1/assessment-runs`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(3000),
-    })
-    if (!response.ok) {
-      return {
-        items: [],
-        error: `Assessment API returned HTTP ${response.status}.`,
-      }
-    }
-    const data = (await response.json()) as { items?: AssessmentRun[] }
-    if (!Array.isArray(data.items)) {
-      return { items: [], error: "Assessment API returned an invalid response." }
-    }
-    return { items: data.items, error: null }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown connection error"
-    return { items: [], error: `Assessment API unavailable: ${message}` }
-  }
+  return loadCollection<AssessmentRun>("assessment-runs", "Assessment")
 }
 
 export async function loadPolicyDecisions(): Promise<PolicyDecisionCollection> {
-  try {
-    const response = await fetch(`${apiBaseUrl()}/api/v1/policy-decisions`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(3000),
-    })
-    if (!response.ok) {
-      return {
-        items: [],
-        error: `Policy API returned HTTP ${response.status}.`,
-      }
-    }
-    const data = (await response.json()) as { items?: PolicyDecision[] }
-    if (!Array.isArray(data.items)) {
-      return { items: [], error: "Policy API returned an invalid response." }
-    }
-    return { items: data.items, error: null }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown connection error"
-    return { items: [], error: `Policy API unavailable: ${message}` }
-  }
+  return loadCollection<PolicyDecision>("policy-decisions", "Policy")
 }

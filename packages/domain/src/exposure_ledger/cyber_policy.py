@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
+from typing import Final
 
 CYBER_POLICY_STANDARD_VERSION = "0.1"
 ASSESSMENT_POLICY_RULE_VERSION = "assessment-request-v1"
@@ -44,41 +46,12 @@ class PolicyResult(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class OperationClassification:
-    assistance_class: AssistanceClass
-    action_level: ActionLevel
-
-
-_OPERATION_CLASSIFICATIONS = {
-    AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT: OperationClassification(
-        AssistanceClass.C1, ActionLevel.A1
-    ),
-    AssessmentOperation.SUMMARIZE_PUBLIC_ADVISORY: OperationClassification(
-        AssistanceClass.C0, ActionLevel.A0
-    ),
-    AssessmentOperation.DRAFT_DEPENDENCY_PATCH: OperationClassification(
-        AssistanceClass.C0, ActionLevel.A2
-    ),
-    AssessmentOperation.GENERATE_EXPLOIT: OperationClassification(
-        AssistanceClass.C2, ActionLevel.A2
-    ),
-    AssessmentOperation.SCAN_ARBITRARY_HOSTS: OperationClassification(
-        AssistanceClass.C2, ActionLevel.A4
-    ),
-    AssessmentOperation.EXTRACT_CREDENTIALS: OperationClassification(
-        AssistanceClass.C3, ActionLevel.A4
-    ),
-}
-
-
-@dataclass(frozen=True, slots=True)
-class AssessmentPolicyRequest:
-    assistance_class: AssistanceClass | None
-    action_level: ActionLevel | None
+class AssessmentRequest:
+    operation: AssessmentOperation | str
     target_scope: str | None
     authorization_scope: str | None
     authorization_status: AuthorizationStatus
-    operation_chain: tuple[OperationClassification, ...] = ()
+    operation_chain: tuple[AssessmentOperation | str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,61 +66,64 @@ class PolicyDecision:
     reason: str
 
 
-class CyberPolicy:
-    """Apply the project-owned first-release capability ceiling."""
+@dataclass(frozen=True, slots=True)
+class _Classification:
+    assistance_class: AssistanceClass
+    action_level: ActionLevel
 
-    @classmethod
-    def decide_assessment(
-        cls,
-        *,
-        operation: AssessmentOperation | str,
-        target_scope: str | None,
-        authorization_scope: str | None,
-        authorization_status: AuthorizationStatus,
-        operation_chain: tuple[AssessmentOperation | str, ...] = (),
-    ) -> PolicyDecision:
-        classification = _classify_operation(operation)
-        chain = tuple(_classify_operation(item) for item in operation_chain)
-        if classification is None or any(item is None for item in chain):
-            return cls.decide(
-                AssessmentPolicyRequest(
-                    assistance_class=None,
-                    action_level=None,
-                    target_scope=target_scope,
-                    authorization_scope=authorization_scope,
-                    authorization_status=authorization_status,
-                )
-            )
-        return cls.decide(
-            AssessmentPolicyRequest(
-                assistance_class=classification.assistance_class,
-                action_level=classification.action_level,
-                target_scope=target_scope,
-                authorization_scope=authorization_scope,
-                authorization_status=authorization_status,
-                operation_chain=tuple(item for item in chain if item is not None),
-            )
+
+_OPERATION_CLASSIFICATIONS: Final = {
+    AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT: _Classification(
+        AssistanceClass.C1, ActionLevel.A1
+    ),
+    AssessmentOperation.SUMMARIZE_PUBLIC_ADVISORY: _Classification(
+        AssistanceClass.C0, ActionLevel.A0
+    ),
+    AssessmentOperation.DRAFT_DEPENDENCY_PATCH: _Classification(AssistanceClass.C0, ActionLevel.A2),
+    AssessmentOperation.GENERATE_EXPLOIT: _Classification(AssistanceClass.C2, ActionLevel.A2),
+    AssessmentOperation.SCAN_ARBITRARY_HOSTS: _Classification(AssistanceClass.C2, ActionLevel.A4),
+    AssessmentOperation.EXTRACT_CREDENTIALS: _Classification(AssistanceClass.C3, ActionLevel.A4),
+}
+
+_ASSISTANCE_ORDER: Final = {value: index for index, value in enumerate(AssistanceClass)}
+_ACTION_ORDER: Final = {value: index for index, value in enumerate(ActionLevel)}
+
+
+class CyberPolicy:
+    """Classify operations and apply the project-owned capability ceiling."""
+
+    @staticmethod
+    def decision_table() -> MappingProxyType[tuple[AssistanceClass, ActionLevel], PolicyResult]:
+        """Expose the immutable standard matrix for auditing and safety evaluation."""
+        return MappingProxyType(
+            {
+                (assistance_class, action_level): _result_for(assistance_class, action_level)
+                for assistance_class in AssistanceClass
+                for action_level in ActionLevel
+            }
         )
 
     @staticmethod
-    def decide(request: AssessmentPolicyRequest) -> PolicyDecision:
-        if request.assistance_class is None:
+    def decide(request: AssessmentRequest) -> PolicyDecision:
+        classifications = tuple(
+            _classify_operation(operation)
+            for operation in (request.operation, *request.operation_chain)
+        )
+        if any(classification is None for classification in classifications):
             return _decision(
                 request,
+                assistance_class=None,
+                action_level=None,
                 result=PolicyResult.BLOCKED,
                 reason=(
                     "Assistance Class is materially uncertain; the Assessment request is blocked."
                 ),
             )
-        if request.action_level is None:
-            return _decision(
-                request,
-                result=PolicyResult.BLOCKED,
-                reason="Action Level is materially uncertain; the Assessment request is blocked.",
-            )
         if not request.target_scope or not request.target_scope.strip():
             return _decision(
                 request,
+                assistance_class=None,
+                action_level=None,
                 result=PolicyResult.BLOCKED,
                 reason="Target scope is materially uncertain; the Assessment request is blocked.",
             )
@@ -158,12 +134,16 @@ class CyberPolicy:
         ):
             return _decision(
                 request,
+                assistance_class=None,
+                action_level=None,
                 result=PolicyResult.BLOCKED,
                 reason="Authorization is materially uncertain; the Assessment request is blocked.",
             )
         if request.authorization_status is AuthorizationStatus.DENIED:
             return _decision(
                 request,
+                assistance_class=None,
+                action_level=None,
                 result=PolicyResult.BLOCKED,
                 reason=(
                     "Authorization is denied for the target scope; the Assessment request is "
@@ -171,86 +151,85 @@ class CyberPolicy:
                 ),
             )
 
-        classifications = (
-            OperationClassification(request.assistance_class, request.action_level),
-            *request.operation_chain,
+        known_classifications = tuple(
+            classification for classification in classifications if classification is not None
         )
         assistance_class = max(
-            (classification.assistance_class for classification in classifications),
-            key=list(AssistanceClass).index,
+            (classification.assistance_class for classification in known_classifications),
+            key=_ASSISTANCE_ORDER.__getitem__,
         )
         action_level = max(
-            (classification.action_level for classification in classifications),
-            key=list(ActionLevel).index,
+            (classification.action_level for classification in known_classifications),
+            key=_ACTION_ORDER.__getitem__,
         )
-
-        if assistance_class in {AssistanceClass.C2, AssistanceClass.C3} and action_level in {
-            ActionLevel.A3,
-            ActionLevel.A4,
-        }:
-            request_part = "operation chain" if request.operation_chain else "Assessment request"
-            return _decision(
-                request,
-                assistance_class=assistance_class,
-                action_level=action_level,
-                result=PolicyResult.BLOCKED,
-                reason=(
-                    f"{assistance_class} assistance and {action_level} action in the "
-                    f"{request_part} are outside the first-release capability ceiling."
-                ),
-            )
-        if assistance_class in {AssistanceClass.C2, AssistanceClass.C3}:
-            return _decision(
-                request,
-                assistance_class=assistance_class,
-                action_level=action_level,
-                result=PolicyResult.BLOCKED,
-                reason=(
-                    f"{assistance_class} assistance is outside the first-release capability "
-                    "ceiling."
-                ),
-            )
-        if action_level in {ActionLevel.A3, ActionLevel.A4}:
-            return _decision(
-                request,
-                assistance_class=assistance_class,
-                action_level=action_level,
-                result=PolicyResult.BLOCKED,
-                reason=f"{action_level} actions are prohibited by the first-release policy.",
-            )
-        if action_level is ActionLevel.A2:
-            return _decision(
-                request,
-                assistance_class=assistance_class,
-                action_level=action_level,
-                result=PolicyResult.RESTRICTED,
-                reason="A2 actions are restricted pending the approved human-review milestone.",
-            )
-
+        result = _result_for(assistance_class, action_level)
         return _decision(
             request,
             assistance_class=assistance_class,
             action_level=action_level,
-            result=PolicyResult.ALLOWED,
-            reason=(
-                f"{assistance_class} assistance at {action_level} is permitted for the "
-                "confirmed target scope."
+            result=result,
+            reason=_reason_for(
+                assistance_class,
+                action_level,
+                result,
+                composed=bool(request.operation_chain),
             ),
         )
 
 
-def _decision(
-    request: AssessmentPolicyRequest,
+def _result_for(
+    assistance_class: AssistanceClass,
+    action_level: ActionLevel,
+) -> PolicyResult:
+    if assistance_class in {AssistanceClass.C2, AssistanceClass.C3}:
+        return PolicyResult.BLOCKED
+    if action_level in {ActionLevel.A3, ActionLevel.A4}:
+        return PolicyResult.BLOCKED
+    if action_level is ActionLevel.A2:
+        return PolicyResult.RESTRICTED
+    return PolicyResult.ALLOWED
+
+
+def _reason_for(
+    assistance_class: AssistanceClass,
+    action_level: ActionLevel,
+    result: PolicyResult,
     *,
+    composed: bool,
+) -> str:
+    subject = "operation chain" if composed else "Assessment request"
+    if assistance_class in {AssistanceClass.C2, AssistanceClass.C3} and action_level in {
+        ActionLevel.A3,
+        ActionLevel.A4,
+    }:
+        return (
+            f"{assistance_class} assistance and {action_level} action in the {subject} are "
+            "outside the first-release capability ceiling."
+        )
+    if assistance_class in {AssistanceClass.C2, AssistanceClass.C3}:
+        return f"{assistance_class} assistance is outside the first-release capability ceiling."
+    if action_level in {ActionLevel.A3, ActionLevel.A4}:
+        return f"{action_level} actions are prohibited by the first-release policy."
+    if result is PolicyResult.RESTRICTED:
+        return "A2 actions are restricted pending the approved human-review milestone."
+    return (
+        f"{assistance_class} assistance at {action_level} is permitted for the confirmed "
+        "target scope."
+    )
+
+
+def _decision(
+    request: AssessmentRequest,
+    *,
+    assistance_class: AssistanceClass | None,
+    action_level: ActionLevel | None,
     result: PolicyResult,
     reason: str,
-    assistance_class: AssistanceClass | None = None,
-    action_level: ActionLevel | None = None,
 ) -> PolicyDecision:
     return PolicyDecision(
         standard_version=CYBER_POLICY_STANDARD_VERSION,
-        assistance_class=assistance_class or request.assistance_class,
-        action_level=action_level or request.action_level,
+        assistance_class=assistance_class,
+        action_level=action_level,
         target_scope=request.target_scope,
         authorization_scope=request.authorization_scope,
         result=result,
@@ -259,9 +238,7 @@ def _decision(
     )
 
 
-def _classify_operation(
-    operation: AssessmentOperation | str,
-) -> OperationClassification | None:
+def _classify_operation(operation: AssessmentOperation | str) -> _Classification | None:
     try:
         normalized = AssessmentOperation(operation)
     except ValueError:

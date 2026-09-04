@@ -32,6 +32,8 @@ erDiagram
 - Evidence Records, Investigation Revisions, Policy Decisions, and Dispositions are append-only.
 - Every allowed Assessment Run has a request-gate Policy Decision. Restricted and blocked request
   decisions are retained without an Assessment Run, so denial is auditable without creating work.
+- Assessment Runs created before the request gate are linked to an explicit blocked legacy decision;
+  unfinished legacy work is failed closed during migration and cannot be claimed by a worker.
 - A human Disposition never carries forward automatically to a new Asset Snapshot.
 
 ## Evidence relationships
