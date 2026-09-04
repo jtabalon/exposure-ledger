@@ -9,6 +9,7 @@ from uuid import UUID
 
 from exposure_ledger_storage import (
     DEFAULT_DATABASE_URL,
+    AssessmentMode,
     AssessmentRunRepository,
     AssessmentScenario,
     normalize_database_url,
@@ -82,9 +83,10 @@ def process_next_assessment(*, database_url: str, stale_after_seconds: float = 3
             claim_id=assessment_run.claim_id,
             lease_seconds=stale_after_seconds,
         ):
-            if assessment_run.mode != "synthetic":
-                raise ValueError(f"Unsupported Assessment mode: {assessment_run.mode}")
-            if assessment_run.scenario == AssessmentScenario.WORKER_FAILURE:
+            if (
+                assessment_run.mode == AssessmentMode.SYNTHETIC
+                and assessment_run.scenario == AssessmentScenario.WORKER_FAILURE
+            ):
                 repository.fail(
                     assessment_run.id,
                     claim_id=assessment_run.claim_id,
@@ -92,10 +94,16 @@ def process_next_assessment(*, database_url: str, stale_after_seconds: float = 3
                     message="Synthetic worker failure requested for contract verification.",
                 )
                 return True
-            repository.complete_synthetic(
-                assessment_run.id,
-                claim_id=assessment_run.claim_id,
-            )
+            if assessment_run.mode == AssessmentMode.SYNTHETIC:
+                repository.complete_synthetic(
+                    assessment_run.id,
+                    claim_id=assessment_run.claim_id,
+                )
+            else:
+                repository.complete_repository(
+                    assessment_run.id,
+                    claim_id=assessment_run.claim_id,
+                )
     except Exception:
         logger.exception("Assessment Run %s failed", assessment_run.id)
         repository.fail(

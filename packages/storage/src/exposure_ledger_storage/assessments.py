@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 
 _ASSESSMENT_RUN_SELECT = """
     SELECT id, mode, scenario, label, synthetic, status, created_at, started_at,
-           completed_at, error_code, error_message, claimed_at, claim_id
+           completed_at, error_code, error_message, claimed_at, claim_id, asset_snapshot_id
     FROM assessment_runs
 """
 
@@ -33,6 +33,7 @@ class AssessmentStatus(StrEnum):
 
 class AssessmentMode(StrEnum):
     SYNTHETIC = "synthetic"
+    REPOSITORY = "repository"
 
 
 class AssessmentScenario(StrEnum):
@@ -45,6 +46,7 @@ class AssessmentEventType(StrEnum):
     STARTED = "assessment.started"
     RESUMED = "assessment.resumed"
     SYNTHETIC_PROGRESS = "assessment.synthetic_progress"
+    ASSET_SNAPSHOT_CAPTURED = "assessment.asset_snapshot_captured"
     COMPLETED = "assessment.completed"
     FAILED = "assessment.failed"
 
@@ -64,6 +66,7 @@ class AssessmentRun:
     error_message: str | None
     claimed_at: datetime | None
     claim_id: UUID | None
+    asset_snapshot_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,14 +118,49 @@ class AssessmentRunRepository:
         policy_decision: PolicyDecision,
         scenario: AssessmentScenario = AssessmentScenario.COMPLETE,
     ) -> AssessmentRun:
-        if policy_decision.result is not PolicyResult.ALLOWED:
-            raise ValueError("Only an allowed Policy Decision can create an Assessment Run.")
-        assessment_run = AssessmentRun(
-            id=uuid4(),
+        return self._create(
             mode=AssessmentMode.SYNTHETIC,
             scenario=scenario,
             label="Synthetic Assessment Run",
             synthetic=True,
+            asset_snapshot_id=None,
+            policy_decision=policy_decision,
+        )
+
+    def create_repository(
+        self,
+        *,
+        asset_snapshot_id: UUID,
+        label: str,
+        policy_decision: PolicyDecision,
+    ) -> AssessmentRun:
+        return self._create(
+            mode=AssessmentMode.REPOSITORY,
+            scenario=AssessmentScenario.COMPLETE,
+            label=label,
+            synthetic=False,
+            asset_snapshot_id=asset_snapshot_id,
+            policy_decision=policy_decision,
+        )
+
+    def _create(
+        self,
+        *,
+        mode: AssessmentMode,
+        scenario: AssessmentScenario,
+        label: str,
+        synthetic: bool,
+        asset_snapshot_id: UUID | None,
+        policy_decision: PolicyDecision,
+    ) -> AssessmentRun:
+        if policy_decision.result is not PolicyResult.ALLOWED:
+            raise ValueError("Only an allowed Policy Decision can create an Assessment Run.")
+        assessment_run = AssessmentRun(
+            id=uuid4(),
+            mode=mode,
+            scenario=scenario,
+            label=label,
+            synthetic=synthetic,
             status=AssessmentStatus.QUEUED,
             created_at=datetime.now(UTC),
             started_at=None,
@@ -131,13 +169,15 @@ class AssessmentRunRepository:
             error_message=None,
             claimed_at=None,
             claim_id=None,
+            asset_snapshot_id=asset_snapshot_id,
         )
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             connection.execute(
                 """
                 INSERT INTO assessment_runs (
-                    id, mode, scenario, label, synthetic, status, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    id, mode, scenario, label, synthetic, status, created_at,
+                    asset_snapshot_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     assessment_run.id,
@@ -147,6 +187,7 @@ class AssessmentRunRepository:
                     assessment_run.synthetic,
                     assessment_run.status,
                     assessment_run.created_at,
+                    assessment_run.asset_snapshot_id,
                 ),
             )
             self._insert_event(
@@ -156,7 +197,7 @@ class AssessmentRunRepository:
                 event_type=AssessmentEventType.QUEUED,
                 payload={
                     "status": AssessmentStatus.QUEUED,
-                    "message": "Synthetic Assessment Run queued.",
+                    "message": f"{assessment_run.label} queued.",
                 },
                 occurred_at=assessment_run.created_at,
             )
@@ -328,9 +369,36 @@ class AssessmentRunRepository:
                 error_message=None,
                 claimed_at=claimed_at,
                 claim_id=claim_id,
+                asset_snapshot_id=assessment_run.asset_snapshot_id,
             )
 
     def complete_synthetic(self, assessment_run_id: UUID, *, claim_id: UUID) -> bool:
+        return self._complete(
+            assessment_run_id,
+            claim_id=claim_id,
+            progress_event=AssessmentEventType.SYNTHETIC_PROGRESS,
+            progress_message="Synthetic dependency evaluation completed.",
+            completed_message="Synthetic Assessment Run completed.",
+        )
+
+    def complete_repository(self, assessment_run_id: UUID, *, claim_id: UUID) -> bool:
+        return self._complete(
+            assessment_run_id,
+            claim_id=claim_id,
+            progress_event=AssessmentEventType.ASSET_SNAPSHOT_CAPTURED,
+            progress_message="Immutable Asset Snapshot captured and normalized.",
+            completed_message="Repository Assessment Run completed.",
+        )
+
+    def _complete(
+        self,
+        assessment_run_id: UUID,
+        *,
+        claim_id: UUID,
+        progress_event: AssessmentEventType,
+        progress_message: str,
+        completed_message: str,
+    ) -> bool:
         now = datetime.now(UTC)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             if not self._owns_claim(connection, assessment_run_id, claim_id=claim_id):
@@ -339,10 +407,10 @@ class AssessmentRunRepository:
                 connection,
                 assessment_run_id,
                 sequence=self._next_sequence(connection, assessment_run_id),
-                event_type=AssessmentEventType.SYNTHETIC_PROGRESS,
+                event_type=progress_event,
                 payload={
                     "status": AssessmentStatus.RUNNING,
-                    "message": "Synthetic dependency evaluation completed.",
+                    "message": progress_message,
                     "progress": 75,
                 },
                 occurred_at=now,
@@ -363,7 +431,7 @@ class AssessmentRunRepository:
                 event_type=AssessmentEventType.COMPLETED,
                 payload={
                     "status": AssessmentStatus.COMPLETED,
-                    "message": "Synthetic Assessment Run completed.",
+                    "message": completed_message,
                     "progress": 100,
                 },
                 occurred_at=now,

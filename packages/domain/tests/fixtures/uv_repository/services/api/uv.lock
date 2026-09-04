@@ -1,0 +1,46 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "Demo_App"
+version = "0.1.0"
+source = { editable = "services/api" }
+dependencies = [
+    { name = "HTTP_X" },
+    { name = "platform-only", marker = "sys_platform == 'linux'" },
+    { name = "old-python", marker = "python_version < '3.12'" },
+]
+
+[package.optional-dependencies]
+security = [
+    { name = "feature_lib" },
+]
+
+[[package]]
+name = "http-x"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "leaf.lib" },
+]
+
+[[package]]
+name = "leaf-lib"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "platform-only"
+version = "4.0.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "old-python"
+version = "0.9.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "feature-lib"
+version = "5.1.0"
+source = { registry = "https://pypi.org/simple" }

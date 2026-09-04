@@ -17,16 +17,17 @@ export type PolicyDecision = {
 
 export type AssessmentRun = {
   id: string
-  mode: "synthetic"
+  mode: "repository" | "synthetic"
   scenario: "complete" | "worker_failure"
   label: string
-  synthetic: true
+  synthetic: boolean
   status: AssessmentRunStatus
   createdAt: string
   startedAt: string | null
   completedAt: string | null
   errorCode: string | null
   errorMessage: string | null
+  assetSnapshotId: string | null
   policyDecision: PolicyDecision
 }
 
@@ -40,9 +41,9 @@ export type PolicyDecisionCollection = {
   error: string | null
 }
 
-async function loadCollection<T>(
+export async function loadCollection<T>(
   resource: string,
-  contractName: "Assessment" | "Policy",
+  contractName: "Assessment" | "Asset Snapshot" | "Policy",
 ): Promise<{ items: T[]; error: string | null }> {
   try {
     const response = await fetch(`${apiBaseUrl()}/api/v1/${resource}`, {

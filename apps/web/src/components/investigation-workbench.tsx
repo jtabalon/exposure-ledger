@@ -31,7 +31,9 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { AssessmentRunPanel } from "@/components/assessment-run-panel"
+import { AssetSnapshotPanel } from "@/components/asset-snapshot-panel"
 import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
+import type { AssetSnapshot } from "@/lib/asset-snapshots"
 import { evidenceForClaim } from "@/lib/evidence"
 import type {
   DemoInvestigation,
@@ -74,12 +76,16 @@ export function InvestigationWorkbench({
   investigation,
   assessmentRuns,
   assessmentRunsError,
+  assetSnapshots,
+  assetSnapshotsError,
   policyDecisions,
   policyDecisionsError,
 }: {
   investigation: DemoInvestigation
   assessmentRuns: AssessmentRun[]
   assessmentRunsError: string | null
+  assetSnapshots: AssetSnapshot[]
+  assetSnapshotsError: string | null
   policyDecisions: PolicyDecision[]
   policyDecisionsError: string | null
 }) {
@@ -88,6 +94,7 @@ export function InvestigationWorkbench({
   const selectedClaim = investigation.claims.find(({ id }) => id === selectedClaimId)!
   const navigation = [
     { label: "Assessment Runs", icon: Activity, count: String(assessmentRuns.length), active: true },
+    { label: "Asset Snapshots", icon: Database, count: String(assetSnapshots.length) },
     { label: "Exposures", icon: Radar, count: "28" },
     { label: "Investigations", icon: FileSearch, count: "8" },
     { label: "Evaluations", icon: FlaskConical, count: "v0.3" },
@@ -185,12 +192,14 @@ export function InvestigationWorkbench({
           </div>
         </div>
 
-      <AssessmentRunPanel
-        assessmentRuns={assessmentRuns}
-        error={assessmentRunsError}
-        policyDecisions={policyDecisions}
-        policyDecisionsError={policyDecisionsError}
-      />
+        <AssetSnapshotPanel snapshots={assetSnapshots} error={assetSnapshotsError} />
+
+        <AssessmentRunPanel
+          assessmentRuns={assessmentRuns}
+          error={assessmentRunsError}
+          policyDecisions={policyDecisions}
+          policyDecisionsError={policyDecisionsError}
+        />
 
         <div className="hairline-grid border-b bg-card/55 px-4 py-6 sm:px-6 lg:px-8 lg:py-7">
           <div className="mx-auto max-w-[1600px]">

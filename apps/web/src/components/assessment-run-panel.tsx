@@ -122,7 +122,7 @@ export function AssessmentRunPanel({
                         </span>
                       </span>
                       <Badge variant="outline" className="border-amber-600/30 text-[9px]">
-                        SYNTHETIC
+                        {assessmentRun.synthetic ? "SYNTHETIC" : "LIVE REPOSITORY"}
                       </Badge>
                     </button>
                   </li>
@@ -153,7 +153,10 @@ export function AssessmentRunPanel({
                 </Badge>
               </div>
               <dl className="grid gap-x-5 sm:grid-cols-2">
-                <DetailRow label="Mode" value="Synthetic only" />
+                <DetailRow
+                  label="Mode"
+                  value={selected.synthetic ? "Synthetic" : "Live repository"}
+                />
                 <DetailRow label="Created" value={formatTimestamp(selected.createdAt)} />
                 <DetailRow
                   label="Started"
