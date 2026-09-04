@@ -27,6 +27,8 @@ from exposure_ledger import (
     validate_asset_snapshot_request,
 )
 from exposure_ledger_storage import (
+    LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
+    SOURCE_POLICY_VERSION,
     AssessmentEvent,
     AssessmentMode,
     AssessmentRun,
@@ -37,10 +39,21 @@ from exposure_ledger_storage import (
     AssetSnapshotRepository,
     EvidencePassageRecord,
     EvidenceRecordRecord,
+    EvidenceRetriever,
     ExposureRecord,
     ExposureRepository,
+    ExposureRetrievalScopeNotFound,
     PackageInstanceRecord,
     PolicyDecisionRecord,
+    RetrievalConfigurationNotCurrent,
+    RetrievalQuery,
+    RetrievalResult,
+    RetrievedCapture,
+    RetrievedEvidencePassage,
+    RetrievedExposureContext,
+    RetrievedPassageIdentity,
+    RetrievedSource,
+    SourcePolicy,
 )
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -336,6 +349,119 @@ class ExposureListResponse(ApiModel):
     items: list[ExposureResponse]
 
 
+class RetrievalSourcePolicyResponse(ApiModel):
+    version: str
+    allowed_source_identities: list[str]
+
+
+class RetrievalQueryContextResponse(ApiModel):
+    query: str
+    assessment_run_id: UUID
+    exposure_id: UUID
+    source_policy: RetrievalSourcePolicyResponse
+    evidence_types: list[str]
+    retrieval_configuration_version: str
+    limit: int
+
+
+class RetrievedSourceResponse(ApiModel):
+    id: UUID
+    identity: str
+    authority: str
+    location: str
+
+    @classmethod
+    def from_record(cls, source: RetrievedSource) -> "RetrievedSourceResponse":
+        return cls.model_validate(source, from_attributes=True)
+
+
+class RetrievedCaptureResponse(ApiModel):
+    identity: str
+    captured_at: datetime
+    content_digest: str
+    payload_identity: str
+    attribution: str
+
+    @classmethod
+    def from_record(cls, capture: RetrievedCapture) -> "RetrievedCaptureResponse":
+        return cls.model_validate(capture, from_attributes=True)
+
+
+class RetrievedPassageResponse(ApiModel):
+    id: UUID
+    identity: str
+    kind: str
+    selector: str
+    content: str
+
+    @classmethod
+    def from_record(cls, passage: RetrievedPassageIdentity) -> "RetrievedPassageResponse":
+        return cls.model_validate(passage, from_attributes=True)
+
+
+class RetrievedEvidencePassageResponse(ApiModel):
+    lexical_rank: int
+    lexical_score: float
+    passage: RetrievedPassageResponse
+    source: RetrievedSourceResponse
+    capture: RetrievedCaptureResponse
+    exposure_context: "RetrievedExposureContextResponse"
+    evidence_record_id: UUID
+
+    @classmethod
+    def from_record(cls, retrieved: RetrievedEvidencePassage) -> "RetrievedEvidencePassageResponse":
+        return cls(
+            lexical_rank=retrieved.lexical_rank,
+            lexical_score=retrieved.lexical_score,
+            passage=RetrievedPassageResponse.from_record(retrieved.passage),
+            source=RetrievedSourceResponse.from_record(retrieved.source),
+            capture=RetrievedCaptureResponse.from_record(retrieved.capture),
+            exposure_context=RetrievedExposureContextResponse.from_record(
+                retrieved.exposure_context
+            ),
+            evidence_record_id=retrieved.evidence_record_id,
+        )
+
+
+class RetrievedExposureContextResponse(ApiModel):
+    package_name: str
+    package_version: str
+    vulnerability_aliases: list[str]
+
+    @classmethod
+    def from_record(cls, context: RetrievedExposureContext) -> "RetrievedExposureContextResponse":
+        return cls(
+            package_name=context.package_name,
+            package_version=context.package_version,
+            vulnerability_aliases=list(context.vulnerability_aliases),
+        )
+
+
+class RetrievalResponse(ApiModel):
+    query_context: RetrievalQueryContextResponse
+    items: list[RetrievedEvidencePassageResponse]
+
+    @classmethod
+    def from_result(cls, result: RetrievalResult) -> "RetrievalResponse":
+        return cls(
+            query_context=RetrievalQueryContextResponse(
+                query=result.query.text,
+                assessment_run_id=result.query.assessment_run_id,
+                exposure_id=result.query.exposure_id,
+                source_policy=RetrievalSourcePolicyResponse(
+                    version=result.query.source_policy.version,
+                    allowed_source_identities=list(
+                        result.query.source_policy.allowed_source_identities
+                    ),
+                ),
+                evidence_types=list(result.query.evidence_types),
+                retrieval_configuration_version=(result.query.retrieval_configuration_version),
+                limit=result.query.limit,
+            ),
+            items=[RetrievedEvidencePassageResponse.from_record(item) for item in result.passages],
+        )
+
+
 def _not_found(assessment_run_id: UUID) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -378,12 +504,14 @@ def create_app(
     repository = AssessmentRunRepository(configured_settings.database_url)
     snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
     exposure_repository = ExposureRepository(configured_settings.database_url)
+    evidence_retriever = EvidenceRetriever(configured_settings.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         repository.check_ready()
         snapshot_repository.check_ready()
         exposure_repository.check_ready()
+        evidence_retriever.check_ready()
         yield
 
     application = FastAPI(
@@ -655,6 +783,63 @@ def create_app(
                 for item in exposure_repository.list_for_assessment(assessment_run_id)
             ]
         )
+
+    @application.get(
+        "/api/v1/assessment-runs/{assessment_run_id}/exposures/{exposure_id}/evidence-passages",
+        response_model=RetrievalResponse,
+        response_model_by_alias=True,
+        tags=["exposures"],
+    )
+    def retrieve_exposure_evidence_passages(
+        assessment_run_id: UUID,
+        exposure_id: UUID,
+        query: Annotated[str, Query(min_length=1, max_length=500)],
+        source_identity: Annotated[list[str], Query(alias="sourceIdentity", min_length=1)],
+        evidence_type: Annotated[list[str], Query(alias="evidenceType", min_length=1)],
+        retrieval_configuration_version: Annotated[
+            str, Query(alias="retrievalConfigurationVersion")
+        ] = LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
+        limit: Annotated[int, Query(ge=1, le=100)] = 10,
+    ) -> RetrievalResponse:
+        if repository.get(assessment_run_id) is None:
+            raise _not_found(assessment_run_id)
+        retrieval_query = RetrievalQuery(
+            assessment_run_id=assessment_run_id,
+            exposure_id=exposure_id,
+            text=query,
+            source_policy=SourcePolicy(
+                version=SOURCE_POLICY_VERSION,
+                allowed_source_identities=tuple(source_identity),
+            ),
+            evidence_types=tuple(evidence_type),
+            retrieval_configuration_version=retrieval_configuration_version,
+            limit=limit,
+        )
+        try:
+            result = evidence_retriever.retrieve(retrieval_query)
+        except RetrievalConfigurationNotCurrent as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "retrieval_configuration_not_current",
+                    "message": str(error),
+                    "currentVersion": LEXICAL_RETRIEVAL_CONFIGURATION_VERSION,
+                },
+            ) from error
+        except ExposureRetrievalScopeNotFound as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "exposure_not_found",
+                    "message": str(error),
+                },
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "invalid_retrieval_query", "message": str(error)},
+            ) from error
+        return RetrievalResponse.from_result(result)
 
     @application.get(
         "/api/v1/assessment-runs/{assessment_run_id}/events",

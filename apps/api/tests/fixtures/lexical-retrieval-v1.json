@@ -1,0 +1,98 @@
+{
+  "version": "lexical-retrieval-known-answer-v1",
+  "retrievalConfigurationVersion": "postgres-lexical-v1",
+  "sourcePolicyVersion": "explicit-source-allowlist-v1",
+  "limit": 10,
+  "passages": {
+    "targetAffected": {
+      "identity": "sha256:220e1c9e3e30bc946cb7a212ed485ebf0925dfa9184ee879543233f306cccd7a",
+      "kind": "affected",
+      "selector": "/affected/0",
+      "source": {
+        "identity": "osv",
+        "authority": "Open Source Vulnerabilities",
+        "location": "https://api.osv.dev/v1/vulns/PYSEC-2026-40"
+      },
+      "capture": {
+        "identity": "sha256:c54a1484c550c8c11297ffa43942b564a384c8964177db8b399577b8fd137564",
+        "capturedAt": "2026-09-03T12:30:00Z",
+        "contentDigest": "sha256:2e29b52877a32914eb23c652a1b0131193839bda6b1ce53a3d4848e006dcfd0e",
+        "payloadIdentity": "PYSEC-2026-40",
+        "attribution": "Open Source Vulnerabilities (OSV)"
+      }
+    },
+    "targetQueryResult": {
+      "identity": "sha256:7b81c8a9f97418ec1c9f5079cfad1eccc19b752f346fdcab232676d779ef05dd",
+      "kind": "query_result",
+      "selector": "/results/0",
+      "source": {
+        "identity": "osv",
+        "authority": "Open Source Vulnerabilities",
+        "location": "https://api.osv.dev/v1/querybatch"
+      },
+      "capture": {
+        "identity": "sha256:d57985d30c4e101693fdfbc0129bc9fb55b621ea8b104ff631d267505725e263",
+        "capturedAt": "2026-09-03T12:30:00Z",
+        "contentDigest": "sha256:e7d885bd105e043ca85900d879af052e4ac5cc08354aa06f6969db82b6c532e0",
+        "payloadIdentity": "lexical-known-answer-page-v1",
+        "attribution": "Open Source Vulnerabilities (OSV)"
+      }
+    }
+  },
+  "exposureContext": {
+    "packageName": "feature-lib",
+    "packageVersion": "5.1.0",
+    "vulnerabilityAliases": [
+      "CVE-2026-4000",
+      "GHSA-4444-5555-6666",
+      "PYSEC-2026-40"
+    ]
+  },
+  "cases": [
+    {
+      "query": "feature-lib",
+      "evidenceTypes": ["affected"],
+      "expectedPassages": ["targetAffected"]
+    },
+    {
+      "query": "CVE-2026-4000",
+      "evidenceTypes": ["affected"],
+      "expectedPassages": ["targetAffected"]
+    },
+    {
+      "query": "5.0 5.2",
+      "evidenceTypes": ["affected"],
+      "expectedPassages": ["targetAffected"]
+    },
+    {
+      "query": "upgrade",
+      "evidenceTypes": ["affected"],
+      "expectedPassages": ["targetAffected"]
+    },
+    {
+      "query": "CVE-2026-4000",
+      "evidenceTypes": ["query_result", "affected"],
+      "expectedPassages": ["targetQueryResult", "targetAffected"]
+    }
+  ],
+  "emptyCases": [
+    {
+      "scope": "target",
+      "query": "feature-lib",
+      "sourceIdentities": ["first-party-advisory"],
+      "evidenceTypes": ["affected"]
+    },
+    {
+      "scope": "unrelated",
+      "query": "feature-lib",
+      "sourceIdentities": ["osv"],
+      "evidenceTypes": ["affected"]
+    },
+    {
+      "scope": "target",
+      "query": "PYSEC-2026-99",
+      "sourceIdentities": ["osv"],
+      "evidenceTypes": ["query_result"]
+    }
+  ]
+}
