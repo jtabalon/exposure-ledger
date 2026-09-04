@@ -16,7 +16,7 @@ describe("AssetSnapshotPanel", () => {
             projectRoot: "services/api",
             lockfilePath: "services/api/uv.lock",
             lockfileDigest:
-              "sha256:390d60e25c213f27f05ab252c870719ddece955b9af3689a9d77dc546edab685",
+              "sha256:6f36f370f6f43bfe19c0082ef6ef5e51a8fe478f9f6226fbaa39863ec5f3894d",
             environmentProfile: {
               pythonVersion: "3.12.2",
               operatingSystem: "linux",
@@ -54,6 +54,7 @@ describe("AssetSnapshotPanel", () => {
     expect(html).toContain("security")
     expect(html).toContain("http-x")
     expect(html).toContain("Direct")
+    expect(html).toContain("registry: https://pypi.org/simple")
     expect(html).toContain("demo-app → http-x → leaf-lib")
     expect(html).toContain("Transitive")
   })

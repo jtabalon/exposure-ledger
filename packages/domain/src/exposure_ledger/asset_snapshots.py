@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import tomllib
 import zipfile
@@ -25,6 +24,25 @@ from packaging.version import InvalidVersion, Version
 ASSET_SNAPSHOT_PARSER_VERSION = "uv-lock-v1"
 _COMMIT_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 _REPOSITORY_SEGMENT_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+_QUOTED_MARKER_VALUE_PATTERN = re.compile(r"'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\"")
+_SUPPORTED_MARKER_VARIABLES = frozenset(
+    {
+        "extra",
+        "os_name",
+        "platform_machine",
+        "platform_system",
+        "python_full_version",
+        "python_version",
+        "sys_platform",
+    }
+)
+_ALL_MARKER_VARIABLES = _SUPPORTED_MARKER_VARIABLES | {
+    "implementation_name",
+    "implementation_version",
+    "platform_python_implementation",
+    "platform_release",
+    "platform_version",
+}
 
 
 class OperatingSystem(StrEnum):
@@ -85,12 +103,20 @@ class RepositoryArchiveUnavailable(RuntimeError):
     """The approved public repository archive could not be retrieved."""
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class PackageSource:
+    fields: tuple[tuple[str, str], ...]
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self.fields)
+
+
 @dataclass(frozen=True, slots=True)
 class PackageInstance:
     name: str
     version: str
     direct: bool
-    source: str
+    source: PackageSource
     dependency_paths: tuple[tuple[str, ...], ...]
 
 
@@ -128,10 +154,10 @@ class AssetSnapshotRejected(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class _LockedPackage:
-    key: tuple[str, str, str]
+    key: tuple[str, str | None, PackageSource]
     name: str
-    version: str
-    source: str
+    version: str | None
+    source: PackageSource
     data: Mapping[str, Any]
 
 
@@ -150,17 +176,12 @@ class AssetSnapshotCapture:
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def capture(self, request: CaptureAssetSnapshot) -> AssetSnapshot:
-        repository = _canonical_repository(request.repository)
-        commit = _immutable_commit(request.commit)
-        project_root = _safe_relative_path(request.project_root, allow_root=True)
-        lockfile_path = _safe_relative_path(request.lockfile_path, allow_root=False)
-        if PurePosixPath(lockfile_path).name != "uv.lock":
-            raise AssetSnapshotRejected("unsupported_lockfile", "Only uv.lock is supported.")
+        validated = validate_asset_snapshot_request(request)
 
-        archive = self._archive_source.fetch(repository, commit)
+        archive = self._archive_source.fetch(validated.repository, validated.commit)
         lockfile_bytes = _read_lockfile_from_archive(
             archive.content,
-            lockfile_path=lockfile_path,
+            lockfile_path=validated.lockfile_path,
             limits=self._limits,
         )
         try:
@@ -172,30 +193,56 @@ class AssetSnapshotCapture:
 
         packages = _parse_uv_lock(
             lockfile_content,
-            project_root=project_root,
-            environment=request.environment_profile,
+            project_root=validated.project_root,
+            lockfile_path=validated.lockfile_path,
+            environment=validated.environment_profile,
             max_dependency_paths=self._limits.max_dependency_paths,
         )
         return AssetSnapshot(
-            repository=repository,
-            commit=commit,
-            project_root=project_root,
-            lockfile_path=lockfile_path,
+            repository=validated.repository,
+            commit=validated.commit,
+            project_root=validated.project_root,
+            lockfile_path=validated.lockfile_path,
             lockfile_digest=f"sha256:{hashlib.sha256(lockfile_bytes).hexdigest()}",
             lockfile_content=lockfile_content,
-            environment_profile=request.environment_profile,
+            environment_profile=validated.environment_profile,
             packages=packages,
             parser_version=ASSET_SNAPSHOT_PARSER_VERSION,
             captured_at=self._clock(),
         )
 
 
+def validate_asset_snapshot_request(request: CaptureAssetSnapshot) -> CaptureAssetSnapshot:
+    """Validate and canonicalize an Asset Snapshot request without retrieving content."""
+    repository = _canonical_repository(request.repository)
+    commit = _immutable_commit(request.commit)
+    project_root = _safe_relative_path(request.project_root, allow_root=True)
+    lockfile_path = _safe_relative_path(request.lockfile_path, allow_root=False)
+    if PurePosixPath(lockfile_path).name != "uv.lock":
+        raise AssetSnapshotRejected("unsupported_lockfile", "Only uv.lock is supported.")
+    return CaptureAssetSnapshot(
+        repository=repository,
+        commit=commit,
+        project_root=project_root,
+        lockfile_path=lockfile_path,
+        environment_profile=request.environment_profile,
+    )
+
+
 def _canonical_repository(value: str) -> str:
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise AssetSnapshotRejected(
+            "invalid_repository",
+            "repository must identify a canonical public GitHub repository",
+        ) from error
     if (
         parsed.scheme != "https"
-        or parsed.hostname != "github.com"
-        or parsed.port is not None
+        or hostname != "github.com"
+        or port is not None
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
@@ -336,6 +383,7 @@ def _parse_uv_lock(
     content: str,
     *,
     project_root: str,
+    lockfile_path: str,
     environment: EnvironmentProfile,
     max_dependency_paths: int,
 ) -> tuple[PackageInstance, ...]:
@@ -355,7 +403,12 @@ def _parse_uv_lock(
         for package in (_locked_package(raw, environment) for raw in raw_packages)
         if package is not None
     )
-    roots = [package for package in packages if _package_project_root(package.data) == project_root]
+    lockfile_directory = str(PurePosixPath(lockfile_path).parent)
+    roots = [
+        package
+        for package in packages
+        if _package_project_root(package.data, lockfile_directory) == project_root
+    ]
     if len(roots) != 1:
         raise AssetSnapshotRejected(
             "ambiguous_project_root",
@@ -379,57 +432,67 @@ def _parse_uv_lock(
     for candidates in by_name.values():
         candidates.sort(key=lambda package: package.key)
 
-    paths: dict[tuple[str, str, str], set[tuple[str, ...]]] = defaultdict(set)
-    sources: dict[tuple[str, str, str], str] = {}
-    queue: deque[tuple[_LockedPackage, tuple[str, ...], frozenset[str]]] = deque()
+    paths: dict[tuple[str, str | None, PackageSource], set[tuple[str, ...]]] = defaultdict(set)
+    queue: deque[
+        tuple[
+            _LockedPackage,
+            tuple[str, ...],
+            tuple[tuple[str, str | None, PackageSource], ...],
+            frozenset[str],
+        ]
+    ] = deque()
     for dependency in _dependencies_for(root, frozenset(environment.selected_extras), environment):
-        target = _resolve_dependency(dependency, by_name, environment)
+        target = _resolve_dependency(dependency, by_name)
         queue.append(
             (
                 target,
                 (root.name, target.name),
+                (root.key, target.key),
                 frozenset(_dependency_extras(dependency)),
             )
         )
 
     total_paths = 0
-    expanded: set[tuple[tuple[str, str, str], tuple[str, ...], frozenset[str]]] = set()
+    expanded: set[tuple[tuple[str, str | None, PackageSource], tuple[str, ...], frozenset[str]]] = (
+        set()
+    )
     while queue:
-        package, path, active_extras = queue.popleft()
+        package, path, key_path, active_extras = queue.popleft()
         state = (package.key, path, active_extras)
         if state in expanded:
             continue
         expanded.add(state)
-        if path not in paths[package.key]:
+        if package.version is not None and path not in paths[package.key]:
             paths[package.key].add(path)
             total_paths += 1
             if total_paths > max_dependency_paths:
                 raise AssetSnapshotRejected(
                     "dependency_graph_too_large", "uv.lock contains too many Dependency Paths"
                 )
-        sources[package.key] = package.source
         for dependency in _dependencies_for(package, active_extras, environment):
-            target = _resolve_dependency(dependency, by_name, environment)
-            if target.name in path:
+            target = _resolve_dependency(dependency, by_name)
+            if target.key in key_path:
                 continue
             queue.append(
                 (
                     target,
                     (*path, target.name),
+                    (*key_path, target.key),
                     frozenset(_dependency_extras(dependency)),
                 )
             )
 
     result = []
     for key, package_paths in paths.items():
-        name, version, _ = key
+        name, version, source = key
+        assert version is not None
         ordered_paths = tuple(sorted(package_paths, key=lambda path: (len(path), path)))
         result.append(
             PackageInstance(
                 name=name,
                 version=version,
                 direct=any(len(path) == 2 for path in ordered_paths),
-                source=sources[key],
+                source=source,
                 dependency_paths=ordered_paths,
             )
         )
@@ -446,9 +509,13 @@ def _locked_package(
     raw_name = data.get("name")
     raw_version = data.get("version")
     raw_source = data.get("source")
-    if not isinstance(raw_name, str) or not isinstance(raw_version, str):
-        raise AssetSnapshotRejected("invalid_lockfile", "every package needs a name and version")
-    source_mapping = _mapping(raw_source, "package source")
+    if not isinstance(raw_name, str) or (
+        raw_version is not None and not isinstance(raw_version, str)
+    ):
+        raise AssetSnapshotRejected(
+            "invalid_lockfile", "every package needs a name and an optional text version"
+        )
+    source = _package_source(raw_source, "package source")
     resolution_markers = data.get("resolution-markers", [])
     if not isinstance(resolution_markers, list):
         raise AssetSnapshotRejected("invalid_lockfile", "package resolution-markers must be a list")
@@ -457,11 +524,10 @@ def _locked_package(
     ):
         return None
     try:
-        version = str(Version(raw_version))
+        version = str(Version(raw_version)) if raw_version is not None else None
     except InvalidVersion as error:
         raise AssetSnapshotRejected("invalid_lockfile", "package version is invalid") from error
     name = canonicalize_name(raw_name)
-    source = json.dumps(source_mapping, sort_keys=True, separators=(",", ":"))
     return _LockedPackage(
         key=(name, version, source), name=name, version=version, source=source, data=data
     )
@@ -499,7 +565,6 @@ def _dependency_list(value: object) -> tuple[Mapping[str, Any], ...]:
 def _resolve_dependency(
     dependency: Mapping[str, Any],
     by_name: Mapping[str, Sequence[_LockedPackage]],
-    environment: EnvironmentProfile,
 ) -> _LockedPackage:
     name = dependency.get("name")
     if not isinstance(name, str):
@@ -520,9 +585,7 @@ def _resolve_dependency(
         ]
     source = dependency.get("source")
     if source is not None:
-        source_key = json.dumps(
-            _mapping(source, "dependency source"), sort_keys=True, separators=(",", ":")
-        )
+        source_key = _package_source(source, "dependency source")
         candidates = [candidate for candidate in candidates if candidate.source == source_key]
     if len(candidates) != 1:
         raise AssetSnapshotRejected(
@@ -548,6 +611,18 @@ def _marker_applies(
 ) -> bool:
     if not isinstance(value, str):
         raise AssetSnapshotRejected("invalid_lockfile", "environment marker must be text")
+    unquoted = _QUOTED_MARKER_VALUE_PATTERN.sub("", value)
+    unsupported = {
+        variable
+        for variable in _ALL_MARKER_VARIABLES - _SUPPORTED_MARKER_VARIABLES
+        if re.search(rf"\b{re.escape(variable)}\b", unquoted)
+    }
+    if unsupported:
+        raise AssetSnapshotRejected(
+            "unsupported_environment_marker",
+            "uv.lock marker depends on fields not pinned by the Environment Profile: "
+            + ", ".join(sorted(unsupported)),
+        )
     try:
         marker = Marker(value)
         extras = active_extras or frozenset({""})
@@ -560,8 +635,8 @@ def _marker_applies(
 
 def _marker_environment(environment: EnvironmentProfile, extra: str) -> dict[str, str]:
     python = Version(environment.python_version)
-    release = (*python.release, 0, 0, 0)
-    python_full_version = ".".join(str(part) for part in release[:3])
+    release = (*python.release, 0, 0)
+    python_full_version = str(python)
     python_version = ".".join(str(part) for part in release[:2])
     os_values = {
         OperatingSystem.LINUX: ("posix", "linux", "Linux"),
@@ -569,15 +644,30 @@ def _marker_environment(environment: EnvironmentProfile, extra: str) -> dict[str
         OperatingSystem.WINDOWS: ("nt", "win32", "Windows"),
     }
     os_name, sys_platform, platform_system = os_values[environment.operating_system]
+    architecture_family = {
+        Architecture.AMD64: "x86_64",
+        Architecture.X86_64: "x86_64",
+        Architecture.AARCH64: "arm64",
+        Architecture.ARM64: "arm64",
+    }[environment.architecture]
+    platform_machine = {
+        OperatingSystem.LINUX: {
+            "x86_64": "x86_64",
+            "arm64": "aarch64",
+        },
+        OperatingSystem.MACOS: {
+            "x86_64": "x86_64",
+            "arm64": "arm64",
+        },
+        OperatingSystem.WINDOWS: {
+            "x86_64": "AMD64",
+            "arm64": "ARM64",
+        },
+    }[environment.operating_system][architecture_family]
     return {
-        "implementation_name": "cpython",
-        "implementation_version": python_full_version,
         "os_name": os_name,
-        "platform_machine": environment.architecture,
-        "platform_python_implementation": "CPython",
-        "platform_release": "",
+        "platform_machine": platform_machine,
         "platform_system": platform_system,
-        "platform_version": "",
         "python_full_version": python_full_version,
         "python_version": python_version,
         "sys_platform": sys_platform,
@@ -600,12 +690,31 @@ def _validate_requires_python(value: object, environment: EnvironmentProfile) ->
         )
 
 
-def _package_project_root(package: Mapping[str, Any]) -> str | None:
+def _package_project_root(package: Mapping[str, Any], lockfile_directory: str) -> str | None:
     source = _mapping(package.get("source"), "package source")
     root = source.get("editable", source.get("virtual"))
     if not isinstance(root, str):
         return None
-    return _safe_relative_path(root, allow_root=True)
+    return _resolve_repository_path(lockfile_directory, root)
+
+
+def _resolve_repository_path(base: str, relative: str) -> str:
+    if "\\" in relative or "\x00" in relative:
+        raise AssetSnapshotRejected("invalid_lockfile", "package source path is unsafe")
+    path = PurePosixPath(relative)
+    if path.is_absolute():
+        raise AssetSnapshotRejected("invalid_lockfile", "package source path is unsafe")
+    resolved = [] if base == "." else list(PurePosixPath(base).parts)
+    for part in path.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved:
+                raise AssetSnapshotRejected("invalid_lockfile", "package source path is unsafe")
+            resolved.pop()
+        else:
+            resolved.append(part)
+    return "/".join(resolved) or "."
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -614,3 +723,10 @@ def _mapping(value: object, label: str) -> Mapping[str, Any]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise AssetSnapshotRejected("invalid_lockfile", f"{label} must be a table")
     return value
+
+
+def _package_source(value: object, label: str) -> PackageSource:
+    source = _mapping(value, label)
+    if not source or not all(isinstance(item, str) and item for item in source.values()):
+        raise AssetSnapshotRejected("invalid_lockfile", f"{label} must contain text values")
+    return PackageSource(fields=tuple(sorted(source.items())))

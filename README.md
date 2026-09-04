@@ -95,12 +95,14 @@ curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
   }'
 ```
 
-The request is policy-gated before GitHub is contacted. Capture reads the archive and lockfile as
-untrusted data in memory: it never installs dependencies, imports modules, runs builds or hooks, or
-executes repository content. `GET /api/v1/asset-snapshots` exposes the pinned scope, digest,
-Environment Profile, normalized packages, and Dependency Paths shown in the workbench.
+The API policy-gates and durably queues the request. The worker records a second Policy Decision at
+the repository-fetch boundary, constrains egress to public GitHub codeload addresses, and reads the
+archive and lockfile as untrusted data in memory. It never installs dependencies, imports modules,
+runs builds or hooks, or executes repository content. `GET /api/v1/asset-snapshots` exposes the
+pinned scope, digest, Environment Profile, normalized packages, and Dependency Paths shown in the
+workbench.
 
-SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench lists the same live runs and always labels this path `SYNTHETIC`.
+SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
 
 Every Assessment request is classified by application-owned rules before a run is queued. The
 response and workbench show its versioned Policy Decision, including the Assistance Class, Action

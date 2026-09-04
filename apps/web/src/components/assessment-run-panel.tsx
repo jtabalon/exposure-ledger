@@ -249,6 +249,9 @@ export function AssessmentRunPanel({
                     <span>
                       Standard {decision.standardVersion} · Rule {decision.ruleVersion}
                     </span>
+                    <span>
+                      {decision.enforcementPoint === "request" ? "Request gate" : "Tool-call gate"}
+                    </span>
                   </div>
                 </li>
               ))}

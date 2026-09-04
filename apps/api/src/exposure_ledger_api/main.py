@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -12,10 +12,8 @@ from uuid import UUID
 from exposure_ledger import (
     ActionLevel,
     Architecture,
-    ArchiveLimits,
     AssessmentOperation,
     AssessmentRequest,
-    AssetSnapshotCapture,
     AssetSnapshotRejected,
     AssistanceClass,
     AuthorizationStatus,
@@ -24,8 +22,7 @@ from exposure_ledger import (
     EnvironmentProfile,
     OperatingSystem,
     PolicyResult,
-    RepositoryArchiveSource,
-    RepositoryArchiveUnavailable,
+    validate_asset_snapshot_request,
 )
 from exposure_ledger_storage import (
     AssessmentEvent,
@@ -43,7 +40,6 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from exposure_ledger_api.github import GitHubArchiveSource
 from exposure_ledger_api.settings import Settings
 
 APP_VERSION = "0.1.0"
@@ -91,6 +87,7 @@ class PolicyDecisionResponse(ApiModel):
     rule_version: str
     reason: str
     created_at: datetime
+    enforcement_point: str
 
     @classmethod
     def from_record(cls, record: PolicyDecisionRecord) -> "PolicyDecisionResponse":
@@ -135,6 +132,8 @@ class PolicyDecisionListResponse(ApiModel):
 
 
 class EnvironmentProfileRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
     python_version: str
     operating_system: OperatingSystem
     architecture: Architecture
@@ -264,17 +263,10 @@ def _encode_sse(event: AssessmentEvent) -> str:
 
 def create_app(
     settings: Settings | None = None,
-    *,
-    archive_source: RepositoryArchiveSource | None = None,
 ) -> FastAPI:
     configured_settings = settings or Settings()
     repository = AssessmentRunRepository(configured_settings.database_url)
     snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
-    archive_limits = ArchiveLimits()
-    snapshot_capture = AssetSnapshotCapture(
-        archive_source or GitHubArchiveSource(max_bytes=archive_limits.max_compressed_bytes),
-        limits=archive_limits,
-    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -370,7 +362,7 @@ def create_app(
                     architecture=request.environment_profile.architecture,
                     selected_extras=tuple(request.environment_profile.selected_extras),
                 )
-                captured = snapshot_capture.capture(
+                capture_request = validate_asset_snapshot_request(
                     CaptureAssetSnapshot(
                         repository=request.repository,
                         commit=request.commit,
@@ -380,27 +372,51 @@ def create_app(
                     )
                 )
             except AssetSnapshotRejected as error:
-                repository.record_policy_decision(decision)
+                repository.record_policy_decision(
+                    replace(
+                        decision,
+                        result=PolicyResult.BLOCKED,
+                        reason=(
+                            f"Target scope is invalid; the Assessment request is blocked: {error}"
+                        ),
+                    )
+                )
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={"code": error.code, "message": str(error)},
                 ) from error
-            except RepositoryArchiveUnavailable as error:
-                repository.record_policy_decision(decision)
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail={"code": "repository_unavailable", "message": str(error)},
-                ) from error
             except ValueError as error:
-                repository.record_policy_decision(decision)
+                repository.record_policy_decision(
+                    replace(
+                        decision,
+                        result=PolicyResult.BLOCKED,
+                        reason=(
+                            "Environment Profile is invalid; the Assessment request is blocked: "
+                            f"{error}"
+                        ),
+                    )
+                )
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={"code": "invalid_environment_profile", "message": str(error)},
                 ) from error
-            snapshot = snapshot_repository.create(captured)
+            target_scope = f"{capture_request.repository}@{capture_request.commit}"
+            decision = CyberPolicy.decide(
+                AssessmentRequest(
+                    operation=operation,
+                    target_scope=target_scope,
+                    authorization_scope="local operator",
+                    authorization_status=AuthorizationStatus.CONFIRMED,
+                    operation_chain=tuple(context.operation_chain),
+                )
+            )
+        if isinstance(request, CreateRepositoryAssessmentRunRequest):
             assessment_run = repository.create_repository(
-                asset_snapshot_id=snapshot.id,
-                label=f"{snapshot.repository.removeprefix('https://github.com/')}@{snapshot.commit[:12]}",
+                capture_request=capture_request,
+                label=(
+                    f"{capture_request.repository.removeprefix('https://github.com/')}"
+                    f"@{capture_request.commit[:12]}"
+                ),
                 policy_decision=decision,
             )
         else:

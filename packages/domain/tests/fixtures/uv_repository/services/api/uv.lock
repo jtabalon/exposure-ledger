@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 [[package]]
 name = "Demo_App"
 version = "0.1.0"
-source = { editable = "services/api" }
+source = { editable = "." }
 dependencies = [
     { name = "HTTP_X" },
     { name = "platform-only", marker = "sys_platform == 'linux'" },

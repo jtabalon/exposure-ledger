@@ -9,6 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
   "exposure-ledger-domain",
   "exposure-ledger-storage",
+  "httpcore>=1.0",
   "httpx>=0.28",
   "langgraph>=0.4",
   "psycopg[binary]>=3.2",

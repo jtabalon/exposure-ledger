@@ -38,8 +38,8 @@ Each module is deep: callers cross a small interface while the volatile source, 
 
 ## Data flow
 
-1. The operator selects one public repository revision, one Python project root, one supported lockfile, and one Environment Profile.
-2. The snapshot module statically parses content without installing, importing, building, or executing the repository.
+1. The operator selects one public repository revision, one Python project root, one supported lockfile, and one Environment Profile; the API validates and policy-gates that immutable request before durably queuing it.
+2. The worker records a tool-call Policy Decision, constrains retrieval to the fixed public GitHub archive origin, and the snapshot module statically parses the bounded archive without installing, importing, building, or executing the repository.
 3. Exposure discovery normalizes PyPI identities, queries OSV, coalesces vulnerability aliases, and deterministically ranks package-specific Exposures.
 4. The top five Exposures receive Investigations. Evidence acquisition captures first-party and public-source material with timestamps and digests.
 5. Retrieval constructs source-aware passages and performs metadata-filtered full-text and vector retrieval within one Embedding Space.
@@ -60,6 +60,7 @@ Each module is deep: callers cross a small interface while the volatile source, 
 
 - Retrieved content is data, never instruction.
 - Tools are narrow, typed, target-scoped, and independently authorized.
+- Repository retrieval runs only in the worker trust boundary, with redirects and non-public address resolution rejected independently of request validation.
 - No general shell, SQL, HTTP, or filesystem tool is model-accessible.
 - Every material Claim is evidence-linked or explicitly labeled as an inference.
 - Chain-of-thought is neither persisted nor displayed.

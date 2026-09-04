@@ -11,6 +11,12 @@ function repositoryLabel(repository: string): string {
   return repository.replace("https://github.com/", "")
 }
 
+function sourceLabel(source: Record<string, unknown>): string {
+  return Object.entries(source)
+    .map(([kind, value]) => `${kind}: ${String(value)}`)
+    .join(", ")
+}
+
 export function AssetSnapshotPanel({
   snapshots,
   error,
@@ -51,9 +57,9 @@ export function AssetSnapshotPanel({
           </div>
         ) : snapshots.length === 0 ? (
           <div className="border border-dashed p-3 text-xs leading-5 text-muted-foreground">
-            No Asset Snapshots yet. Capture one through
+            No Asset Snapshots yet. Create a repository Assessment through
             <code className="ml-1 font-mono text-foreground">
-              POST /api/v1/asset-snapshots
+              POST /api/v1/assessment-runs
             </code>
             .
           </div>
@@ -128,22 +134,28 @@ export function AssetSnapshotPanel({
                   {selected.packages.length} normalized packages · {selected.parserVersion}
                 </div>
                 <ul className="mt-2 divide-y" aria-label="Normalized dependencies">
-                  {selected.packages.map((packageInstance) => (
+                  {selected.packages.map((packageInstance) => {
+                    const source = sourceLabel(packageInstance.source)
+                    return (
                     <li
-                      key={`${packageInstance.name}-${packageInstance.version}`}
-                      className="grid gap-1 py-2 text-xs sm:grid-cols-[160px_90px_1fr] sm:gap-3"
+                      key={`${packageInstance.name}-${packageInstance.version}-${source}`}
+                      className="grid gap-1 py-2 text-xs sm:grid-cols-[150px_80px_180px_1fr] sm:gap-3"
                     >
                       <span className="font-mono font-semibold">
                         {packageInstance.name} {packageInstance.version}
                       </span>
                       <span>{packageInstance.direct ? "Direct" : "Transitive"}</span>
+                      <span className="truncate font-mono text-[10px] text-muted-foreground">
+                        {source}
+                      </span>
                       <span className="font-mono text-[10px] text-muted-foreground">
                         {packageInstance.dependencyPaths
                           .map((path) => path.join(" → "))
                           .join("; ")}
                       </span>
                     </li>
-                  ))}
+                    )
+                  })}
                 </ul>
               </div>
             ) : null}

@@ -13,6 +13,7 @@ export type PolicyDecision = {
   ruleVersion: string
   reason: string
   createdAt: string
+  enforcementPoint: "request" | "tool_call"
 }
 
 export type AssessmentRun = {

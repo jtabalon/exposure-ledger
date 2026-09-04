@@ -60,48 +60,55 @@ class AssetSnapshotRepository:
     def create(self, snapshot: AssetSnapshot) -> AssetSnapshotRecord:
         environment_id = self._environment_id(snapshot.environment_profile)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            existing_id = connection.execute(
+            candidate_id = uuid4()
+            inserted = connection.execute(
                 """
-                SELECT id
-                FROM asset_snapshots
-                WHERE repository = %s AND commit_sha = %s AND project_root = %s
-                  AND lockfile_path = %s AND lockfile_digest = %s
-                  AND environment_profile_id = %s
+                INSERT INTO asset_snapshots (
+                    id, repository, commit_sha, project_root, lockfile_path,
+                    lockfile_digest, lockfile_content, environment_profile_id,
+                    parser_version, captured_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (
+                    repository, commit_sha, project_root, lockfile_path,
+                    lockfile_digest, environment_profile_id
+                ) DO NOTHING
+                RETURNING id
                 """,
                 (
+                    candidate_id,
                     snapshot.repository,
                     snapshot.commit,
                     snapshot.project_root,
                     snapshot.lockfile_path,
                     snapshot.lockfile_digest,
+                    snapshot.lockfile_content,
                     environment_id,
+                    snapshot.parser_version,
+                    snapshot.captured_at,
                 ),
             ).fetchone()
-            if existing_id is not None:
-                snapshot_id = UUID(str(existing_id[0]))
+            if inserted is not None:
+                snapshot_id = UUID(str(inserted[0]))
             else:
-                snapshot_id = uuid4()
-                connection.execute(
+                existing = connection.execute(
                     """
-                    INSERT INTO asset_snapshots (
-                        id, repository, commit_sha, project_root, lockfile_path,
-                        lockfile_digest, lockfile_content, environment_profile_id,
-                        parser_version, captured_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    SELECT id FROM asset_snapshots
+                    WHERE repository = %s AND commit_sha = %s AND project_root = %s
+                      AND lockfile_path = %s AND lockfile_digest = %s
+                      AND environment_profile_id = %s
                     """,
                     (
-                        snapshot_id,
                         snapshot.repository,
                         snapshot.commit,
                         snapshot.project_root,
                         snapshot.lockfile_path,
                         snapshot.lockfile_digest,
-                        snapshot.lockfile_content,
                         environment_id,
-                        snapshot.parser_version,
-                        snapshot.captured_at,
                     ),
-                )
+                ).fetchone()
+                assert existing is not None
+                snapshot_id = UUID(str(existing[0]))
+            if inserted is not None:
                 for package in snapshot.packages:
                     package_id = uuid4()
                     connection.execute(
@@ -116,7 +123,9 @@ class AssetSnapshotRepository:
                             package.name,
                             package.version,
                             package.direct,
-                            package.source,
+                            json.dumps(
+                                package.source.as_dict(), sort_keys=True, separators=(",", ":")
+                            ),
                         ),
                     )
                     with connection.cursor() as cursor:
@@ -127,6 +136,10 @@ class AssetSnapshotRepository:
                             """,
                             [(package_id, list(path)) for path in package.dependency_paths],
                         )
+                connection.execute(
+                    "UPDATE asset_snapshots SET sealed = true WHERE id = %s",
+                    (snapshot_id,),
+                )
         record = self.get(snapshot_id)
         assert record is not None
         return record
@@ -146,7 +159,7 @@ class AssetSnapshotRepository:
                 FROM asset_snapshots
                 JOIN environment_profiles
                   ON environment_profiles.id = asset_snapshots.environment_profile_id
-                WHERE asset_snapshots.id = %s
+                WHERE asset_snapshots.id = %s AND asset_snapshots.sealed
                 """,
                 (snapshot_id,),
             ).fetchone()
@@ -204,14 +217,39 @@ class AssetSnapshotRepository:
             ids = [
                 UUID(str(row[0]))
                 for row in connection.execute(
-                    "SELECT id FROM asset_snapshots ORDER BY captured_at DESC, id DESC"
+                    """
+                    SELECT id FROM asset_snapshots
+                    WHERE sealed
+                    ORDER BY captured_at DESC, id DESC
+                    """
                 ).fetchall()
             ]
         return [record for snapshot_id in ids if (record := self.get(snapshot_id)) is not None]
 
     def _environment_id(self, profile: EnvironmentProfile) -> UUID:
         with psycopg.connect(self._database_url) as connection, connection.transaction():
-            row = connection.execute(
+            candidate_id = uuid4()
+            inserted = connection.execute(
+                """
+                INSERT INTO environment_profiles (
+                    id, python_version, operating_system, architecture, selected_extras
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (
+                    python_version, operating_system, architecture, selected_extras
+                ) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    candidate_id,
+                    profile.python_version,
+                    profile.operating_system,
+                    profile.architecture,
+                    list(profile.selected_extras),
+                ),
+            ).fetchone()
+            if inserted is not None:
+                return UUID(str(inserted[0]))
+            existing = connection.execute(
                 """
                 SELECT id FROM environment_profiles
                 WHERE python_version = %s AND operating_system = %s
@@ -224,21 +262,5 @@ class AssetSnapshotRepository:
                     list(profile.selected_extras),
                 ),
             ).fetchone()
-            if row is not None:
-                return UUID(str(row[0]))
-            environment_id = uuid4()
-            connection.execute(
-                """
-                INSERT INTO environment_profiles (
-                    id, python_version, operating_system, architecture, selected_extras
-                ) VALUES (%s, %s, %s, %s, %s)
-                """,
-                (
-                    environment_id,
-                    profile.python_version,
-                    profile.operating_system,
-                    profile.architecture,
-                    list(profile.selected_extras),
-                ),
-            )
-            return environment_id
+            assert existing is not None
+            return UUID(str(existing[0]))

@@ -11,9 +11,11 @@ from exposure_ledger.asset_snapshots import (
     EnvironmentProfile,
     OperatingSystem,
     PackageInstance,
+    PackageSource,
     RepositoryArchive,
     RepositoryArchiveSource,
     RepositoryArchiveUnavailable,
+    validate_asset_snapshot_request,
 )
 from exposure_ledger.cyber_policy import (
     ActionLevel,
@@ -52,10 +54,12 @@ __all__ = [
     "PolicyResult",
     "OperatingSystem",
     "PackageInstance",
+    "PackageSource",
     "Recommendation",
     "RecommendationDecision",
     "RecommendationPolicy",
     "RepositoryArchive",
     "RepositoryArchiveSource",
     "RepositoryArchiveUnavailable",
+    "validate_asset_snapshot_request",
 ]
