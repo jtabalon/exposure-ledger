@@ -451,5 +451,6 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         13,
         14,
         15,
+        16,
     ]
     assert enforcement_point == ("enforcement_point",)
