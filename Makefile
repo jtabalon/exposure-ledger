@@ -21,7 +21,8 @@ migrate:
 	PYTHONPATH="$(APP_PYTHONPATH)" uv run python -m exposure_ledger_storage.migrate
 
 api:
-	PYTHONPATH="$(APP_PYTHONPATH)" uv run uvicorn exposure_ledger_api.main:app --reload --port 8000
+	EXPOSURE_LEDGER_ENABLE_LOCAL_DISPOSITIONS=true PYTHONPATH="$(APP_PYTHONPATH)" \
+		uv run uvicorn exposure_ledger_api.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers --reload
 
 worker:
 	PYTHONPATH="$(APP_PYTHONPATH)" uv run python -m exposure_ledger_worker.main

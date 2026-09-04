@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
@@ -512,6 +512,48 @@ class InvestigationStoppingCondition(StrEnum):
     FOLLOW_UP_POLICY_BLOCKED = "follow_up_policy_blocked"
     FOLLOW_UP_UNAVAILABLE = "follow_up_unavailable"
     FOLLOW_UP_LIMIT_REACHED = "follow_up_limit_reached"
+
+
+class DispositionKind(StrEnum):
+    REMEDIATE = "remediate"
+    MONITOR = "monitor"
+    NOT_AFFECTED = "not_affected"
+    ACCEPT_RISK = "accept_risk"
+    REQUEST_MORE_EVIDENCE = "request_more_evidence"
+
+
+@dataclass(frozen=True, slots=True)
+class Disposition:
+    """One immutable human decision pinned to the Revision that was reviewed."""
+
+    id: UUID
+    investigation_id: UUID
+    investigation_revision_id: UUID
+    exposure_id: UUID
+    asset_snapshot_id: UUID
+    kind: DispositionKind
+    author: str
+    rationale: str | None
+    expiration_date: date | None
+    review_date: date | None
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        kind = DispositionKind(self.kind)
+        author = self.author.strip()
+        rationale = (self.rationale.strip() or None) if self.rationale else None
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "author", author)
+        object.__setattr__(self, "rationale", rationale)
+        if not author:
+            raise ValueError("Disposition author must not be blank")
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise ValueError("Disposition creation time must include a timezone")
+        if kind is DispositionKind.ACCEPT_RISK:
+            if rationale is None:
+                raise ValueError("Risk acceptance requires a rationale")
+            if self.expiration_date is None and self.review_date is None:
+                raise ValueError("Risk acceptance requires an expiration or review date")
 
 
 class InvestigationStage(StrEnum):

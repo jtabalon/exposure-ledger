@@ -14,6 +14,10 @@ const workbenchProps = {
   exposuresError: null,
   policyDecisions: [],
   policyDecisionsError: null,
+  revisionHistory: [],
+  dispositions: [],
+  dispositionWritesEnabled: false,
+  recordDispositionAction: async () => ({ status: "idle" as const, message: "" }),
 }
 
 describe("InvestigationWorkbench", () => {
@@ -71,6 +75,7 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain("2.4.3")
     expect(html).toContain("Synthetic public vulnerability record")
     expect(html).toContain("2.4.2")
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Record disposition/)
   })
 
   it("does not prescribe action when no remediation is indicated", () => {
@@ -166,5 +171,76 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain("Not authorized")
     expect(html).toContain(incomplete.stoppingReason)
     expect(html).not.toContain("chain-of-thought")
+  })
+
+  it("presents immutable Revision history separately from human Dispositions", () => {
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench
+        investigation={{
+          ...demoInvestigation,
+          meta: { ...demoInvestigation.meta, mode: "live" as const, revision: "REV-0002" },
+        }}
+        {...workbenchProps}
+        revisionHistory={[
+          {
+            investigationId: "investigation-1",
+            id: "revision-2",
+            revisionNumber: 2,
+            assessmentRunId: "assessment-2",
+            assetSnapshotId: "snapshot-1",
+            createdAt: "2026-09-04T15:00:00Z",
+            status: "complete",
+            stoppingCondition: "completed",
+            recommendation: "Monitor",
+            changes: [
+              "Recommendation: Planned Remediation → Monitor",
+              "Prompt: claims-recommendation-v1 → claims-recommendation-v2",
+            ],
+          },
+          {
+            investigationId: "investigation-1",
+            id: "revision-1",
+            revisionNumber: 1,
+            assessmentRunId: "assessment-1",
+            assetSnapshotId: "snapshot-1",
+            createdAt: "2026-09-04T14:00:00Z",
+            status: "complete",
+            stoppingCondition: "completed",
+            recommendation: "Planned Remediation",
+            changes: ["Initial Revision"],
+          },
+        ]}
+        dispositions={[
+          {
+            id: "disposition-1",
+            investigationId: "investigation-1",
+            investigationRevisionId: "revision-1",
+            exposureId: "exposure-1",
+            assetSnapshotId: "snapshot-1",
+            kind: "remediate",
+            author: "AppSec reviewer",
+            rationale: "The published fixed version is approved for rollout.",
+            expirationDate: null,
+            reviewDate: null,
+            createdAt: "2026-09-04T16:00:00Z",
+          },
+        ]}
+        dispositionWritesEnabled
+      />,
+    )
+
+    expect(html).toContain("Investigation history")
+    expect(html).toContain("Creation circumstances")
+    expect(html).toContain("Recommendation: Planned Remediation → Monitor")
+    expect(html).toContain("Prompt: claims-recommendation-v1 → claims-recommendation-v2")
+    expect(html).toContain("System Recommendation")
+    expect(html).toContain("Human Dispositions")
+    expect(html).toContain("Remediate")
+    expect(html).toContain("AppSec reviewer")
+    expect(html).toContain("Risk acceptance requires a rationale")
+    expect(html).toContain("Authenticated as the configured local operator")
+    expect(html).toContain('name="kind"')
+    expect(html).toContain('value="accept_risk"')
+    expect(html).toContain('name="reviewDate"')
   })
 })

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from time import monotonic
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -19,6 +20,8 @@ from exposure_ledger import (
     ClaimEvidenceRelationship,
     ClaimKind,
     CyberPolicy,
+    Disposition,
+    DispositionKind,
     EmbeddingSpace,
     EvidenceFollowUpArguments,
     EvidenceFollowUpAuthorization,
@@ -422,7 +425,7 @@ def test_follow_up_migration_preserves_legacy_incomplete_revisions(
                 DROP COLUMN follow_up_policy_decision_id
             """
         )
-        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 16")
+        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 17")
 
     apply_migrations(database_url)
 
@@ -497,6 +500,326 @@ def test_revision_persists_the_model_proposal_and_deterministic_follow_up_author
     assert payload["followUp"]["authorization"]["policyDecision"]["enforcementPoint"] == (
         "tool_call"
     )
+
+
+def test_risk_acceptance_requires_rationale_and_an_expiration_or_review_date(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    repository = InvestigationRepository(database_url)
+    repository.append(revision)
+    investigation_id = repository.list_for_exposure(exposure.id)[0].investigation_id
+    app = create_app(
+        Settings(
+            database_url=database_url,
+            enable_local_dispositions=True,
+            local_operator="AppSec reviewer",
+        )
+    )
+    request = {
+        "investigationRevisionId": str(revision.id),
+        "kind": "accept_risk",
+    }
+
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        disabled = client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={**request, "reviewDate": (NOW + timedelta(days=30)).date().isoformat()},
+        )
+    assert disabled.status_code == 403
+    assert disabled.json()["detail"]["code"] == "local_dispositions_disabled"
+
+    with TestClient(app) as remote_client:
+        remote = remote_client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={
+                **request,
+                "rationale": "Compensating controls reduce the immediate risk.",
+                "reviewDate": (NOW + timedelta(days=30)).date().isoformat(),
+            },
+        )
+    assert remote.status_code == 403
+    assert remote.json()["detail"]["code"] == "local_dispositions_loopback_required"
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        missing_rationale = client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={**request, "reviewDate": (NOW + timedelta(days=30)).date().isoformat()},
+        )
+        missing_date = client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={**request, "rationale": "Compensating controls reduce the immediate risk."},
+        )
+        blank_rationale = client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={
+                **request,
+                "rationale": "   ",
+                "expirationDate": (NOW + timedelta(days=30)).date().isoformat(),
+            },
+        )
+        accepted = client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={
+                **request,
+                "rationale": "Compensating controls reduce the immediate risk.",
+                "reviewDate": (NOW + timedelta(days=30)).date().isoformat(),
+            },
+        )
+
+    assert missing_rationale.status_code == 422
+    assert missing_rationale.json()["detail"]["code"] == "invalid_disposition"
+    assert missing_date.status_code == 422
+    assert missing_date.json()["detail"]["code"] == "invalid_disposition"
+    assert blank_rationale.status_code == 422
+    assert blank_rationale.json()["detail"]["code"] == "invalid_disposition"
+    assert accepted.status_code == 201
+    assert accepted.json() == {
+        "id": accepted.json()["id"],
+        "investigationId": str(investigation_id),
+        "investigationRevisionId": str(revision.id),
+        "exposureId": str(exposure.id),
+        "assetSnapshotId": str(exposure.asset_snapshot_id),
+        "kind": "accept_risk",
+        "author": "AppSec reviewer",
+        "rationale": "Compensating controls reduce the immediate risk.",
+        "expirationDate": None,
+        "reviewDate": (NOW + timedelta(days=30)).date().isoformat(),
+        "createdAt": accepted.json()["createdAt"],
+    }
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        other_kinds = [
+            client.post(
+                f"/api/v1/investigations/{investigation_id}/dispositions",
+                json={
+                    **request,
+                    "kind": kind,
+                    "rationale": "Human review completed.",
+                    "reviewDate": (NOW + timedelta(days=30)).date().isoformat(),
+                },
+            )
+            for kind in ("remediate", "monitor", "not_affected", "request_more_evidence")
+        ]
+
+    assert [response.status_code for response in other_kinds] == [201, 201, 201, 201]
+    assert [response.json()["kind"] for response in other_kinds] == [
+        "remediate",
+        "monitor",
+        "not_affected",
+        "request_more_evidence",
+    ]
+    assert all(response.json()["reviewDate"] is not None for response in other_kinds)
+
+
+def test_investigation_history_keeps_recommendations_and_dispositions_distinct(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    first = _revision(exposure)
+    repository.append(first)
+    second = replace(
+        first,
+        id=uuid4(),
+        recommendation=replace(
+            first.recommendation,
+            recommendation=Recommendation.MONITOR,
+            summary="Monitor the captured Exposure for updated maintainer guidance.",
+        ),
+        configuration=replace(first.configuration, prompt_version="claims-recommendation-v2"),
+        created_at=NOW + timedelta(minutes=1),
+    )
+    repository.append(second)
+    investigation_id = repository.list_for_exposure(exposure.id)[0].investigation_id
+    app = create_app(
+        Settings(
+            database_url=database_url,
+            enable_local_dispositions=True,
+            local_operator="AppSec reviewer",
+        )
+    )
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        disposition = client.post(
+            f"/api/v1/investigations/{investigation_id}/dispositions",
+            json={
+                "investigationRevisionId": str(first.id),
+                "kind": "remediate",
+                "rationale": "The published fixed version is approved for rollout.",
+            },
+        )
+        history = client.get(f"/api/v1/exposures/{exposure.id}/investigation")
+
+    assert disposition.status_code == 201
+    assert history.status_code == 200
+    payload = history.json()
+    assert payload["investigationId"] == str(investigation_id)
+    assert payload["exposureId"] == str(exposure.id)
+    assert payload["assetSnapshotId"] == str(exposure.asset_snapshot_id)
+    assert [item["revisionNumber"] for item in payload["revisions"]] == [2, 1]
+    assert [item["recommendation"]["value"] for item in payload["revisions"]] == [
+        "monitor",
+        "planned_remediation",
+    ]
+    assert payload["revisions"][0]["configuration"]["promptVersion"] == ("claims-recommendation-v2")
+    assert payload["dispositions"][0]["kind"] == "remediate"
+    assert "recommendation" not in payload["dispositions"][0]
+
+
+def test_concurrent_dispositions_append_without_mutating_prior_decisions(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    revision = _revision(exposure)
+    repository.append(revision)
+    investigation_id = repository.list_for_exposure(exposure.id)[0].investigation_id
+    dispositions = tuple(
+        Disposition(
+            id=uuid4(),
+            investigation_id=investigation_id,
+            investigation_revision_id=revision.id,
+            exposure_id=exposure.id,
+            asset_snapshot_id=exposure.asset_snapshot_id,
+            kind=kind,
+            author=author,
+            rationale=rationale,
+            expiration_date=None,
+            review_date=None,
+            created_at=NOW + timedelta(seconds=offset),
+        )
+        for offset, kind, author, rationale in (
+            (1, DispositionKind.REMEDIATE, "Reviewer A", "Schedule the fixed release."),
+            (2, DispositionKind.MONITOR, "Reviewer B", "Watch for updated guidance."),
+        )
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        appended = tuple(executor.map(repository.append_disposition, dispositions))
+
+    assert set(appended) == set(dispositions)
+    assert {item.id for item in repository.list_dispositions(investigation_id)} == {
+        item.id for item in dispositions
+    }
+    with (
+        psycopg.connect(database_url) as connection,
+        pytest.raises(psycopg.errors.RaiseException, match="Dispositions are append-only"),
+    ):
+        connection.execute(
+            "UPDATE dispositions SET rationale = 'changed' WHERE id = %s",
+            (dispositions[0].id,),
+        )
+
+
+def test_concurrent_reassessments_append_separate_revision_numbers(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    revisions = (
+        _revision(exposure, created_at=NOW),
+        _revision(exposure, created_at=NOW + timedelta(seconds=1)),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        appended = tuple(executor.map(repository.append, revisions))
+
+    assert set(appended) == set(revisions)
+    records = repository.list_for_exposure(exposure.id)
+    assert {record.revision.id for record in records} == {revision.id for revision in revisions}
+    assert {record.revision_number for record in records} == {1, 2}
+
+
+def test_dispositions_do_not_carry_to_a_new_environment_profile(database_url: str) -> None:
+    first_exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    first_revision = _revision(first_exposure)
+    repository.append(first_revision)
+    first_investigation_id = repository.list_for_exposure(first_exposure.id)[0].investigation_id
+    repository.append_disposition(
+        Disposition(
+            id=uuid4(),
+            investigation_id=first_investigation_id,
+            investigation_revision_id=first_revision.id,
+            exposure_id=first_exposure.id,
+            asset_snapshot_id=first_exposure.asset_snapshot_id,
+            kind=DispositionKind.NOT_AFFECTED,
+            author="AppSec reviewer",
+            rationale="The affected feature is not enabled in this Environment Profile.",
+            expiration_date=None,
+            review_date=None,
+            created_at=NOW,
+        )
+    )
+
+    next_request = repository_payload()
+    next_request["environmentProfile"] = {
+        **next_request["environmentProfile"],  # type: ignore[dict-item]
+        "architecture": "aarch64",
+    }
+    app = create_app(
+        Settings(
+            database_url=database_url,
+            enable_local_dispositions=True,
+            local_operator="AppSec reviewer",
+        )
+    )
+    with TestClient(app) as client:
+        next_run = client.post("/api/v1/assessment-runs", json=next_request).json()
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(),
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
+    )
+    next_exposure = ExposureRepository(database_url).list_for_assessment(next_run["id"])[0]
+    next_revision = _revision(next_exposure, created_at=NOW + timedelta(minutes=1))
+    repository.append(next_revision)
+
+    with TestClient(app) as client:
+        history = client.get(f"/api/v1/exposures/{next_exposure.id}/investigation")
+
+    assert next_exposure.asset_snapshot_id != first_exposure.asset_snapshot_id
+    assert next_exposure.id != first_exposure.id
+    assert history.status_code == 200
+    assert history.json()["dispositions"] == []
+
+    with TestClient(app) as client:
+        carried = client.post(
+            f"/api/v1/investigations/{history.json()['investigationId']}/dispositions",
+            json={
+                "investigationRevisionId": str(next_revision.id),
+                "assetSnapshotId": str(first_exposure.asset_snapshot_id),
+                "kind": "not_affected",
+                "rationale": "Attempted carry-forward.",
+            },
+        )
+    assert carried.status_code == 422
+    assert carried.json()["detail"][0]["type"] == "extra_forbidden"
+    with (
+        psycopg.connect(database_url) as connection,
+        pytest.raises(
+            psycopg.errors.RaiseException,
+            match="Disposition is outside the reviewed Revision scope",
+        ),
+    ):
+        connection.execute(
+            """
+            INSERT INTO dispositions (
+                id, investigation_id, investigation_revision_id, exposure_id,
+                asset_snapshot_id, kind, author, rationale, created_at
+            ) VALUES (%s, %s, %s, %s, %s, 'monitor', 'Reviewer', NULL, %s)
+            """,
+            (
+                uuid4(),
+                UUID(history.json()["investigationId"]),
+                next_revision.id,
+                next_exposure.id,
+                first_exposure.asset_snapshot_id,
+                NOW,
+            ),
+        )
 
 
 def test_revision_append_is_fenced_by_the_current_assessment_claim(database_url: str) -> None:

@@ -1,4 +1,4 @@
-import { loadCollection } from "./assessment-runs"
+import { apiBaseUrl, loadCollection } from "./assessment-runs"
 import type { AssetSnapshot } from "./asset-snapshots"
 import type { DemoInvestigation, EvidenceRelationship } from "./demo-investigation"
 import type { Exposure } from "./exposures"
@@ -132,6 +132,61 @@ export type InvestigationRevisionCollection = {
   error: string | null
 }
 
+export const dispositionKinds = [
+  "remediate",
+  "monitor",
+  "not_affected",
+  "accept_risk",
+  "request_more_evidence",
+] as const
+
+export type DispositionKind = (typeof dispositionKinds)[number]
+
+export type Disposition = {
+  id: string
+  investigationId: string
+  investigationRevisionId: string
+  exposureId: string
+  assetSnapshotId: string
+  kind: DispositionKind
+  author: string
+  rationale: string | null
+  expirationDate: string | null
+  reviewDate: string | null
+  createdAt: string
+}
+
+export type InvestigationHistory = {
+  investigationId: string
+  exposureId: string
+  assetSnapshotId: string
+  revisions: InvestigationRevision[]
+  dispositions: Disposition[]
+}
+
+export type RevisionHistoryEntry = {
+  investigationId: string
+  id: string
+  revisionNumber: number
+  assessmentRunId: string
+  assetSnapshotId: string
+  createdAt: string
+  status: InvestigationRevision["status"]
+  stoppingCondition: string
+  recommendation: string
+  changes: string[]
+}
+
+export type DispositionActionState = {
+  status: "idle" | "success" | "error"
+  message: string
+}
+
+export type DispositionTarget = {
+  investigationId: string
+  investigationRevisionId: string
+}
+
 export async function loadAssessmentInvestigationRevisions(
   assessmentRunId: string,
 ): Promise<InvestigationRevisionCollection> {
@@ -139,6 +194,28 @@ export async function loadAssessmentInvestigationRevisions(
     `assessment-runs/${assessmentRunId}/investigation-revisions`,
     "Investigation Revision",
   )
+}
+
+export async function loadInvestigationHistory(
+  exposureId: string,
+): Promise<{ item: InvestigationHistory | null; error: string | null }> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/api/v1/exposures/${exposureId}/investigation`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!response.ok) {
+      return { item: null, error: `Investigation history API returned HTTP ${response.status}.` }
+    }
+    const item = (await response.json()) as InvestigationHistory
+    if (!Array.isArray(item.revisions) || !Array.isArray(item.dispositions)) {
+      return { item: null, error: "Investigation history API returned an invalid response." }
+    }
+    return { item, error: null }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown connection error"
+    return { item: null, error: `Investigation history API unavailable: ${message}` }
+  }
 }
 
 const recommendationLabels: Record<
@@ -150,6 +227,74 @@ const recommendationLabels: Record<
   monitor: "Monitor",
   no_remediation_indicated: "No Remediation Indicated",
   more_evidence_required: "More Evidence Required",
+}
+
+const versionFields: {
+  label: string
+  value: (revision: InvestigationRevision) => string
+}[] = [
+  { label: "Application", value: (revision) => revision.configuration.applicationRelease },
+  { label: "Graph", value: (revision) => revision.configuration.graphVersion },
+  { label: "Prompt", value: (revision) => revision.configuration.promptVersion },
+  { label: "Policy", value: (revision) => revision.configuration.policyVersion },
+  { label: "Parser", value: (revision) => revision.configuration.parserVersion },
+  {
+    label: "Retrieval",
+    value: (revision) => revision.configuration.retrievalConfigurationVersion,
+  },
+  { label: "Source policy", value: (revision) => revision.configuration.sourcePolicyVersion },
+  {
+    label: "Source adapters",
+    value: (revision) => revision.configuration.sourceAdapterVersions.join(", "),
+  },
+  {
+    label: "Generation artifact",
+    value: (revision) =>
+      `${revision.configuration.generationModel.provider}/${revision.configuration.generationModel.modelArtifact}@${revision.configuration.generationModel.artifactDigest}`,
+  },
+  {
+    label: "Embedding Space",
+    value: (revision) => revision.configuration.embeddingSpace.identity,
+  },
+]
+
+export function summarizeRevisionHistory(
+  investigationId: string,
+  revisions: InvestigationRevision[],
+): RevisionHistoryEntry[] {
+  return revisions.map((revision, index) => {
+    const previous = revisions[index + 1]
+    const changes: string[] = []
+    if (previous) {
+      if (revision.recommendation.value !== previous.recommendation.value) {
+        changes.push(
+          `Recommendation: ${recommendationLabels[previous.recommendation.value]} → ${recommendationLabels[revision.recommendation.value]}`,
+        )
+      }
+      for (const field of versionFields) {
+        const currentValue = field.value(revision)
+        const previousValue = field.value(previous)
+        if (currentValue !== previousValue) {
+          changes.push(`${field.label}: ${previousValue} → ${currentValue}`)
+        }
+      }
+      if (changes.length === 0) changes.push("Configuration and Recommendation unchanged")
+    } else {
+      changes.push("Initial Revision")
+    }
+    return {
+      investigationId,
+      id: revision.id,
+      revisionNumber: revision.revisionNumber,
+      assessmentRunId: revision.assessmentRunId,
+      assetSnapshotId: revision.assetSnapshotId,
+      createdAt: revision.createdAt,
+      status: revision.status,
+      stoppingCondition: revision.stoppingCondition,
+      recommendation: recommendationLabels[revision.recommendation.value],
+      changes,
+    }
+  })
 }
 
 export function revisionToWorkbench(

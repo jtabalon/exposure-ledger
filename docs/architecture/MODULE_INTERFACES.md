@@ -55,5 +55,18 @@ These seams were agreed during design and are the only initial surfaces tested d
 9. **Investigation orchestration:** `InvestigationRunner.run` either completes without a follow-up,
    follows one independently authorized captured-evidence search, or returns a visible incomplete
    Investigation Revision without executing an invalid, blocked, unavailable, or over-budget proposal.
+10. **Investigation history:** the HTTP and persistence contracts append and load immutable
+   Investigation Revisions and human Dispositions. Database integration tests may exercise the
+   append-only and scope constraints directly because those constraints are part of the public
+   PostgreSQL persistence boundary.
 
 Tests cross these interfaces and avoid assertions against private graph nodes, SQL layout, or internal helper calls.
+
+## Investigation history and Disposition interface
+
+The HTTP contract exposes the complete immutable history for one package-specific Exposure and
+accepts human Dispositions only against an explicitly identified, sealed Investigation Revision.
+Each Disposition pins its Investigation, Revision, Exposure, and Asset Snapshot identities. The
+persistence boundary validates that tuple transactionally before append, so a decision cannot be
+reused by a different Asset Snapshot or Environment Profile. Recommendation remains system-authored
+Revision output; Disposition remains a separate human-authored event stream.

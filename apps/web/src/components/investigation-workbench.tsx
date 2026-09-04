@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState, type ReactNode } from "react"
+import { useActionState, useMemo, useState, type ReactNode } from "react"
 import {
   Activity,
   ArrowRight,
@@ -47,6 +47,12 @@ import type {
   EvidenceRelationship,
   InvestigationStage,
 } from "@/lib/demo-investigation"
+import type {
+  Disposition,
+  DispositionActionState,
+  DispositionKind,
+  RevisionHistoryEntry,
+} from "@/lib/investigations"
 import { cn } from "@/lib/utils"
 
 const stageIcons: Record<InvestigationStage["mode"], typeof CheckCircle2> = {
@@ -60,6 +66,31 @@ const relationshipStyles: Record<EvidenceRelationship, string> = {
   supports: "border-emerald-700/20 bg-emerald-700/7 text-emerald-800",
   contradicts: "border-red-700/20 bg-red-700/7 text-red-800",
   contextual: "border-amber-700/20 bg-amber-700/7 text-amber-800",
+}
+
+const revisionStatusStyles = {
+  complete: "border-emerald-700/25 bg-emerald-600/8 text-emerald-800",
+  incomplete: "border-amber-700/25 bg-amber-600/8 text-amber-800",
+} as const
+
+const dispositionLabels: Record<DispositionKind, string> = {
+  remediate: "Remediate",
+  monitor: "Monitor",
+  not_affected: "Not affected",
+  accept_risk: "Accept risk",
+  request_more_evidence: "Request more evidence",
+}
+
+const initialDispositionState: DispositionActionState = { status: "idle", message: "" }
+
+const utcTimestamp = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "UTC",
+})
+
+function formatTimestamp(value: string): string {
+  return `${utcTimestamp.format(new Date(value))} UTC`
 }
 
 function recommendationOutcome(label: string) {
@@ -92,6 +123,278 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
   )
 }
 
+function InvestigationDecisionHistory({
+  revisionHistory,
+  dispositions,
+  historyError,
+  dispositionWritesEnabled,
+  recordDispositionAction,
+}: {
+  revisionHistory: RevisionHistoryEntry[]
+  dispositions: Disposition[]
+  historyError?: string | null
+  dispositionWritesEnabled: boolean
+  recordDispositionAction: (
+    state: DispositionActionState,
+    formData: FormData,
+  ) => Promise<DispositionActionState>
+}) {
+  const [kind, setKind] = useState<DispositionKind>("remediate")
+  const [state, formAction, pending] = useActionState(
+    recordDispositionAction,
+    initialDispositionState,
+  )
+  const currentRevision = revisionHistory[0]
+  const revisionNumbers = new Map(
+    revisionHistory.map((revision) => [revision.id, revision.revisionNumber]),
+  )
+
+  return (
+    <section
+      id="investigation-history"
+      aria-labelledby="investigation-history-heading"
+      className="border-b bg-background px-4 py-6 sm:px-6 lg:px-8"
+    >
+      <div className="mx-auto grid max-w-[1600px] gap-6 xl:grid-cols-[1.35fr_0.9fr]">
+        <div>
+          <SectionLabel>
+            <History className="size-3.5" aria-hidden="true" />
+            Investigation history
+          </SectionLabel>
+          <div className="mb-4 flex items-end justify-between gap-4">
+            <div>
+              <h2 id="investigation-history-heading" className="text-lg font-semibold">
+                Immutable Revisions
+              </h2>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Each reassessment appends a complete record. Prior conclusions never change.
+              </p>
+            </div>
+            <span className="font-mono text-xs text-muted-foreground">
+              {revisionHistory.length} total
+            </span>
+          </div>
+          {historyError ? (
+            <div role="alert" className="border-l-2 border-red-600 bg-red-600/7 p-3 text-xs">
+              {historyError}
+            </div>
+          ) : revisionHistory.length === 0 ? (
+            <div className="border border-dashed p-3 text-xs text-muted-foreground">
+              Revision history is available after a live Investigation completes.
+            </div>
+          ) : (
+            <ol className="space-y-3" aria-label="Investigation Revision history">
+              {revisionHistory.map((revision) => (
+                <li key={revision.id} className="rounded-md border bg-card p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="font-mono text-sm font-semibold">
+                        REV-{String(revision.revisionNumber).padStart(4, "0")}
+                      </div>
+                      <div className="mt-1 font-mono text-[10px] text-muted-foreground">
+                        {revision.id}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          "text-[9px] uppercase",
+                          revisionStatusStyles[revision.status],
+                        )}
+                      >
+                        {revision.status === "complete" ? (
+                          <CheckCircle2 className="size-3" aria-hidden="true" />
+                        ) : (
+                          <TriangleAlert className="size-3" aria-hidden="true" />
+                        )}
+                        {revision.status}
+                      </Badge>
+                      <Badge
+                        variant="secondary"
+                        className={cn(
+                          "text-[9px]",
+                          revision.stoppingCondition === "completed"
+                            ? "text-emerald-800"
+                            : "text-amber-800",
+                        )}
+                      >
+                        <CircleDot className="size-3" aria-hidden="true" />
+                        {revision.stoppingCondition.replaceAll("_", " ")}
+                      </Badge>
+                    </div>
+                  </div>
+                  <dl className="mt-3 grid gap-2 border-y py-3 text-xs sm:grid-cols-2">
+                    <div>
+                      <dt className="text-muted-foreground">System Recommendation</dt>
+                      <dd className="mt-0.5 font-semibold">{revision.recommendation}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground">Created</dt>
+                      <dd className="mt-0.5 font-mono">{formatTimestamp(revision.createdAt)}</dd>
+                    </div>
+                  </dl>
+                  <details className="mt-3 text-xs" open={revision === currentRevision}>
+                    <summary className="cursor-pointer font-semibold">Creation circumstances</summary>
+                    <dl className="mt-2 grid gap-x-3 gap-y-1 text-[10px] text-muted-foreground sm:grid-cols-[112px_1fr]">
+                      <dt>Assessment Run</dt>
+                      <dd className="break-all font-mono">{revision.assessmentRunId}</dd>
+                      <dt>Asset Snapshot</dt>
+                      <dd className="break-all font-mono">{revision.assetSnapshotId}</dd>
+                      <dt>Changes</dt>
+                      <dd>
+                        <ul className="space-y-1">
+                          {revision.changes.map((change) => (
+                            <li key={change}>{change}</li>
+                          ))}
+                        </ul>
+                      </dd>
+                    </dl>
+                  </details>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+
+        <div id="dispositions">
+          <SectionLabel>
+            <ClipboardCheck className="size-3.5" aria-hidden="true" />
+            Human Dispositions
+          </SectionLabel>
+          <h2 className="text-lg font-semibold">Recorded decisions</h2>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            A Disposition is a human decision event. It does not replace the system Recommendation
+            and applies only to this Asset Snapshot and Environment Profile.
+          </p>
+
+          {dispositions.length ? (
+            <ol className="mt-4 space-y-2" aria-label="Human Dispositions">
+              {dispositions.map((disposition) => (
+                <li key={disposition.id} className="rounded-md border bg-card p-3 text-xs">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold">{dispositionLabels[disposition.kind]}</span>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      REV-
+                      {String(
+                        revisionNumbers.get(disposition.investigationRevisionId) ?? "?",
+                      ).padStart(4, "0")}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-muted-foreground">
+                    {disposition.author} · {formatTimestamp(disposition.createdAt)}
+                  </div>
+                  {disposition.rationale ? (
+                    <p className="mt-2 leading-5">{disposition.rationale}</p>
+                  ) : null}
+                  {disposition.expirationDate || disposition.reviewDate ? (
+                    <div className="mt-2 font-mono text-[10px] text-muted-foreground">
+                      {disposition.expirationDate ? (
+                        <span>Expires {disposition.expirationDate}</span>
+                      ) : null}
+                      {disposition.expirationDate && disposition.reviewDate ? (
+                        <span aria-hidden="true"> · </span>
+                      ) : null}
+                      {disposition.reviewDate ? (
+                        <span>Review by {disposition.reviewDate}</span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-4 border border-dashed p-3 text-xs text-muted-foreground">
+              No human Dispositions have been recorded for this Investigation.
+            </p>
+          )}
+
+          {dispositionWritesEnabled && currentRevision ? (
+            <form action={formAction} className="mt-4 space-y-3 rounded-md border bg-card p-4">
+              <h3 className="text-sm font-semibold">Record a Disposition</h3>
+              <p className="text-xs text-muted-foreground">
+                Authenticated as the configured local operator. This decision will be pinned to REV-
+                {String(currentRevision.revisionNumber).padStart(4, "0")} by the server.
+              </p>
+              <label className="block text-xs font-medium">
+                Decision
+                <select
+                  name="kind"
+                  value={kind}
+                  onChange={(event) => setKind(event.target.value as DispositionKind)}
+                  className="mt-1 block h-9 w-full rounded-md border bg-background px-3 text-sm"
+                >
+                  {Object.entries(dispositionLabels).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-xs font-medium">
+                Rationale {kind === "accept_risk" ? "(required)" : "(optional)"}
+                <textarea
+                  name="rationale"
+                  required={kind === "accept_risk"}
+                  maxLength={4000}
+                  rows={3}
+                  className="mt-1 block w-full rounded-md border bg-background px-3 py-2 text-sm"
+                />
+              </label>
+              <fieldset className="grid gap-3 sm:grid-cols-2">
+                <legend className="mb-2 text-xs text-muted-foreground sm:col-span-2">
+                  Optional decision dates. Risk acceptance requires a rationale plus an expiration
+                  or review date.
+                </legend>
+                <label className="text-xs font-medium">
+                  Expiration date
+                  <input
+                    type="date"
+                    name="expirationDate"
+                    className="mt-1 block h-9 w-full rounded-md border bg-background px-3 text-sm"
+                  />
+                </label>
+                <label className="text-xs font-medium">
+                  Review date
+                  <input
+                    type="date"
+                    name="reviewDate"
+                    className="mt-1 block h-9 w-full rounded-md border bg-background px-3 text-sm"
+                  />
+                </label>
+              </fieldset>
+              {state.message ? (
+                <p
+                  aria-live="polite"
+                  className={cn(
+                    "flex items-center gap-1.5 text-xs",
+                    state.status === "error" ? "text-red-700" : "text-emerald-700",
+                  )}
+                >
+                  {state.status === "error" ? (
+                    <TriangleAlert className="size-3.5" aria-hidden="true" />
+                  ) : (
+                    <CheckCircle2 className="size-3.5" aria-hidden="true" />
+                  )}
+                  <span>{state.message}</span>
+                </p>
+              ) : null}
+              <Button type="submit" disabled={pending} size="sm">
+                {pending ? "Recording…" : "Append human Disposition"}
+              </Button>
+            </form>
+          ) : (
+            <p className="mt-4 border border-dashed p-3 text-xs leading-5 text-muted-foreground">
+              This deployment is read-only. Human Disposition writes are available only to the
+              authenticated OS-local operator when local writes are explicitly enabled.
+            </p>
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export function InvestigationWorkbench({
   investigation,
   assessmentRuns,
@@ -102,6 +405,11 @@ export function InvestigationWorkbench({
   exposuresError,
   policyDecisions,
   policyDecisionsError,
+  revisionHistory,
+  dispositions,
+  investigationHistoryError,
+  dispositionWritesEnabled,
+  recordDispositionAction,
 }: {
   investigation: DemoInvestigation
   assessmentRuns: AssessmentRun[]
@@ -112,6 +420,14 @@ export function InvestigationWorkbench({
   exposuresError: string | null
   policyDecisions: PolicyDecision[]
   policyDecisionsError: string | null
+  revisionHistory: RevisionHistoryEntry[]
+  dispositions: Disposition[]
+  investigationHistoryError?: string | null
+  dispositionWritesEnabled: boolean
+  recordDispositionAction: (
+    state: DispositionActionState,
+    formData: FormData,
+  ) => Promise<DispositionActionState>
 }) {
   const [selectedClaimId, setSelectedClaimId] = useState<string | null>(
     investigation.claims[0]?.id ?? null,
@@ -280,11 +596,20 @@ export function InvestigationWorkbench({
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
-                <Button variant="outline" size="sm" className="bg-card">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="bg-card"
+                  onClick={() => document.querySelector("#investigation-history")?.scrollIntoView()}
+                >
                   <BookOpenText data-icon="inline-start" />
                   Revision history
                 </Button>
-                <Button size="sm">
+                <Button
+                  size="sm"
+                  disabled={!dispositionWritesEnabled || revisionHistory.length === 0}
+                  onClick={() => document.querySelector("#dispositions form")?.scrollIntoView()}
+                >
                   Record disposition
                   <ArrowRight data-icon="inline-end" />
                 </Button>
@@ -380,6 +705,14 @@ export function InvestigationWorkbench({
             )}
           </div>
         </div>
+
+        <InvestigationDecisionHistory
+          revisionHistory={revisionHistory}
+          dispositions={dispositions}
+          historyError={investigationHistoryError}
+          dispositionWritesEnabled={dispositionWritesEnabled}
+          recordDispositionAction={recordDispositionAction}
+        />
 
         <div className="mx-auto grid max-w-[1600px] divide-y border-x bg-card xl:grid-cols-[0.86fr_1.08fr_1.22fr] xl:divide-x xl:divide-y-0">
           <section aria-labelledby="exposure-heading" className="min-w-0 p-5 lg:p-6">
