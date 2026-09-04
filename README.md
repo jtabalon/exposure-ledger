@@ -148,6 +148,25 @@ Investigation access accepts `localhost`, one numeric host/hostaddr, or an expli
 libpq service definitions, multi-host URLs, and DNS hostnames are rejected instead of multiplying
 the per-address connection timeout.
 
+Review all immutable Revisions and human Dispositions for one Exposure with
+`GET /api/v1/exposures/<exposure-id>/investigation`. The workbench shows Revision identity,
+creation time and Assessment Run, stopping condition, Recommendation changes, and changes to pinned
+application, graph, prompt, policy, parser, retrieval, Source adapter, generation, and Embedding
+Space versions. A local AppSec engineer can append a separate human Disposition with
+`POST /api/v1/investigations/<investigation-id>/dispositions`. Supported decisions are remediate,
+monitor, not affected, accept risk, and request more evidence. Risk acceptance requires a rationale
+and an expiration or review date. Dispositions are database-enforced append-only events pinned to
+the reviewed Revision and Asset Snapshot; they never replace a Recommendation or carry to a new
+Asset Snapshot or Environment Profile.
+
+Disposition writes are an OS-local operator capability, not a hosted-demo capability. The checked-in
+development commands bind both Next.js and FastAPI to `127.0.0.1`, derive the author label from
+`EXPOSURE_LEDGER_LOCAL_OPERATOR`, and enable writes explicitly with
+`EXPOSURE_LEDGER_ENABLE_LOCAL_DISPOSITIONS=true`. Production mode defaults to read-only, and the
+server action refuses to proxy mutations to a non-loopback API URL. The API independently rejects
+Disposition writes whose client address is not loopback, and the checked-in API command disables
+proxy-header interpretation so forwarded addresses cannot weaken that boundary.
+
 After evidence capture, the worker records a retrieved-content Policy Decision, then records passage
 representations in PostgreSQL under an immutable Embedding Space. Its identity covers the local
 provider, model artifact and immutable digest, dimensions, retrieval instruction, normalizer, and
