@@ -21,6 +21,7 @@ from exposure_ledger import (
     CyberPolicy,
     EnvironmentProfile,
     ExposureRanking,
+    ExposureSeverity,
     OperatingSystem,
     PolicyResult,
     validate_asset_snapshot_request,
@@ -235,7 +236,7 @@ class VulnerabilityRecordResponse(ApiModel):
 
 
 class ExposureRankingResponse(ApiModel):
-    severity: Literal["critical", "high", "moderate", "low", "unknown"]
+    severity: ExposureSeverity
     direct_dependency: bool
     dependency_depth: int
     fixed_version_available: bool

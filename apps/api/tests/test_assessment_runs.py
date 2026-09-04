@@ -12,8 +12,12 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE exposure_discoveries")
     connection.execute("DROP TABLE assessment_run_exposures")
     connection.execute("DROP TABLE exposures")
+    connection.execute(
+        "ALTER TABLE package_instances DROP CONSTRAINT package_instances_id_snapshot_key"
+    )
     connection.execute("DROP TABLE vulnerability_aliases")
     connection.execute("DROP TABLE vulnerability_records")
     connection.execute("DROP FUNCTION reject_exposure_mutation")

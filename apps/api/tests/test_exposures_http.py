@@ -3,11 +3,12 @@ from __future__ import annotations
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from uuid import UUID
 
-from exposure_ledger import OsvPackageQuery, RepositoryArchive
+from exposure_ledger import AssessmentResult, OsvBatchResponse, OsvPackageQuery, RepositoryArchive
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
+from exposure_ledger_storage import ExposureRepository
 from exposure_ledger_worker.main import process_next_assessment
 from fastapi.testclient import TestClient
 
@@ -32,7 +33,7 @@ class CapturedOsvSource:
     def __init__(self) -> None:
         self.batches: list[tuple[OsvPackageQuery, ...]] = []
 
-    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> dict[str, Any]:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         self.batches.append(queries)
         assert queries == (
             OsvPackageQuery(name="feature-lib", version="5.1.0"),
@@ -41,53 +42,56 @@ class CapturedOsvSource:
             OsvPackageQuery(name="platform-only", version="4.0.0"),
         )
         shared_aliases = ["CVE-2026-4000", "GHSA-4444-5555-6666"]
-        return {
-            "results": [
-                {
-                    "vulns": [
-                        {
-                            "id": "PYSEC-2026-40",
-                            "aliases": shared_aliases,
-                            "database_specific": {"severity": "HIGH"},
-                            "affected": [
-                                {
-                                    "package": {
-                                        "ecosystem": "PyPI",
-                                        "name": "feature_lib",
-                                    },
-                                    "ranges": [
-                                        {
-                                            "type": "ECOSYSTEM",
-                                            "events": [
-                                                {"introduced": "5.0"},
-                                                {"fixed": "5.2"},
-                                            ],
-                                        }
-                                    ],
-                                }
-                            ],
-                        }
-                    ]
-                },
-                {
-                    "vulns": [
-                        {
-                            "id": "GHSA-4444-5555-6666",
-                            "aliases": ["CVE-2026-4000", "PYSEC-2026-40"],
-                            "database_specific": {"severity": "HIGH"},
-                            "affected": [
-                                {
-                                    "package": {"ecosystem": "PyPI", "name": "http-x"},
-                                    "versions": ["2.3.0"],
-                                }
-                            ],
-                        }
-                    ]
-                },
-                {},
-                {},
-            ]
-        }
+        return OsvBatchResponse.capture(
+            {
+                "results": [
+                    {
+                        "vulns": [
+                            {
+                                "id": "PYSEC-2026-40",
+                                "aliases": shared_aliases,
+                                "database_specific": {"severity": "HIGH"},
+                                "affected": [
+                                    {
+                                        "package": {
+                                            "ecosystem": "PyPI",
+                                            "name": "feature_lib",
+                                        },
+                                        "ranges": [
+                                            {
+                                                "type": "ECOSYSTEM",
+                                                "events": [
+                                                    {"introduced": "5.0"},
+                                                    {"fixed": "5.2"},
+                                                ],
+                                            }
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    {
+                        "vulns": [
+                            {
+                                "id": "GHSA-4444-5555-6666",
+                                "aliases": ["CVE-2026-4000", "PYSEC-2026-40"],
+                                "database_specific": {"severity": "HIGH"},
+                                "affected": [
+                                    {
+                                        "package": {"ecosystem": "PyPI", "name": "http-x"},
+                                        "versions": ["2.3.0"],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    {},
+                    {},
+                ]
+            },
+            expected_results=len(queries),
+        )
 
 
 def repository_payload() -> dict[str, object]:
@@ -159,6 +163,13 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
             "https://api.osv.dev/v1",
         }
         assert all(item["result"] == "allowed" for item in decisions)
+
+        replayed = ExposureRepository(database_url).record(
+            assessment_run_id=UUID(first_run["id"]),
+            asset_snapshot_id=UUID(first[0]["assetSnapshotId"]),
+            result=AssessmentResult(vulnerability_records=(), exposures=()),
+        )
+        assert [str(item.id) for item in replayed] == [item["id"] for item in first]
 
         second_run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
     assert process_next_assessment(

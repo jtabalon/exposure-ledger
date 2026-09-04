@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
-from exposure_ledger import AssessmentResult, ExposureRanking, VulnerabilityRecord
+from exposure_ledger import (
+    AssessmentResult,
+    ExposureRanking,
+    ExposureSeverity,
+    VulnerabilityRecord,
+)
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -56,6 +62,11 @@ class ExposureRepository:
         asset_snapshot_id: UUID,
         result: AssessmentResult,
     ) -> list[ExposureRecord]:
+        if self.is_recorded(
+            assessment_run_id,
+            asset_snapshot_id=asset_snapshot_id,
+        ):
+            return self.list_for_assessment(assessment_run_id)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
             vulnerability_ids = {
                 vulnerability.identity: self._vulnerability_id(connection, vulnerability)
@@ -117,7 +128,36 @@ class ExposureRepository:
                         exposure.ranking.score,
                     ),
                 )
+            connection.execute(
+                """
+                INSERT INTO exposure_discoveries (
+                    assessment_run_id, asset_snapshot_id, exposure_count, completed_at
+                ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT (assessment_run_id) DO NOTHING
+                """,
+                (assessment_run_id, asset_snapshot_id, len(result.exposures), datetime.now(UTC)),
+            )
         return self.list_for_assessment(assessment_run_id)
+
+    def is_recorded(
+        self,
+        assessment_run_id: UUID,
+        *,
+        asset_snapshot_id: UUID,
+    ) -> bool:
+        with psycopg.connect(self._database_url) as connection:
+            row = connection.execute(
+                """
+                SELECT asset_snapshot_id FROM exposure_discoveries
+                WHERE assessment_run_id = %s
+                """,
+                (assessment_run_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        if UUID(str(row[0])) != asset_snapshot_id:
+            raise ValueError("Assessment Run Exposure discovery belongs to another Asset Snapshot")
+        return True
 
     def list_for_assessment(self, assessment_run_id: UUID) -> list[ExposureRecord]:
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
@@ -265,7 +305,7 @@ class ExposureRepository:
                 dependency_paths=paths,
             ),
             ranking=ExposureRanking(
-                severity=str(row["severity"]),
+                severity=ExposureSeverity(str(row["severity"])),
                 direct_dependency=bool(row["direct_dependency"]),
                 dependency_depth=int(row["dependency_depth"]),
                 fixed_version_available=bool(row["fixed_version_available"]),

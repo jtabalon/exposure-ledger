@@ -10,6 +10,7 @@ from exposure_ledger import (
     EnvironmentProfile,
     ExposureDiscovery,
     OperatingSystem,
+    OsvBatchResponse,
     OsvPackageQuery,
     PackageInstance,
     PackageSource,
@@ -21,9 +22,9 @@ class CapturedOsvSource:
         self.response = response
         self.queries: tuple[OsvPackageQuery, ...] = ()
 
-    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> dict[str, Any]:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         self.queries = queries
-        return self.response
+        return OsvBatchResponse.capture(self.response, expected_results=len(queries))
 
 
 def snapshot_with(*packages: PackageInstance) -> AssetSnapshot:
@@ -384,3 +385,49 @@ def test_discovery_applies_a_pypi_wildcard_record_to_each_matching_package() -> 
 
     assert [exposure.package.name for exposure in result.exposures] == ["first", "second"]
     assert len(result.vulnerability_records) == 1
+
+
+def test_ranking_ignores_fixes_from_disjoint_and_git_ranges() -> None:
+    source = CapturedOsvSource(
+        {
+            "results": [
+                {
+                    "vulns": [
+                        {
+                            "id": "PYSEC-2026-1001",
+                            "affected": [
+                                {
+                                    "package": {"ecosystem": "PyPI", "name": "multi-range"},
+                                    "ranges": [
+                                        {
+                                            "type": "ECOSYSTEM",
+                                            "events": [{"introduced": "1.0"}],
+                                        },
+                                        {
+                                            "type": "ECOSYSTEM",
+                                            "events": [
+                                                {"introduced": "3.0"},
+                                                {"fixed": "4.0"},
+                                            ],
+                                        },
+                                        {
+                                            "type": "GIT",
+                                            "repo": "https://github.com/example/multi-range",
+                                            "events": [
+                                                {"introduced": "a" * 40},
+                                                {"fixed": "b" * 40},
+                                            ],
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+
+    result = ExposureDiscovery(source).discover(snapshot_with(pypi_package("multi-range", "2.0")))
+
+    assert result.exposures[0].ranking.fixed_version_available is False

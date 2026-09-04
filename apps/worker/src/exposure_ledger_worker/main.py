@@ -170,6 +170,17 @@ def process_next_assessment(
                         message=str(error),
                     )
                     return True
+                exposure_repository = ExposureRepository(database_url)
+                if exposure_repository.is_recorded(
+                    assessment_run.id,
+                    asset_snapshot_id=snapshot.id,
+                ):
+                    repository.complete_repository(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        asset_snapshot_id=snapshot.id,
+                    )
+                    return True
                 osv_decision = CyberPolicy.decide(
                     AssessmentRequest(
                         operation=AssessmentOperation.PUBLIC_OSV_LOOKUP,
@@ -188,8 +199,10 @@ def process_next_assessment(
                     )
                     return True
                 try:
-                    result = ExposureDiscovery(osv_source or OsvApiSource()).discover(captured)
-                    ExposureRepository(database_url).record(
+                    result = ExposureDiscovery(osv_source or OsvApiSource()).discover(
+                        snapshot.as_domain()
+                    )
+                    exposure_repository.record(
                         assessment_run_id=assessment_run.id,
                         asset_snapshot_id=snapshot.id,
                         result=result,

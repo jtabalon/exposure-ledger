@@ -5,13 +5,14 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpcore
 import httpx
-from exposure_ledger import OsvPackageQuery, OsvSourceUnavailable
+from exposure_ledger import OsvBatchResponse, OsvPackageQuery, OsvSourceUnavailable
 
 _OSV_ORIGIN = "https://api.osv.dev"
 _MAX_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -28,18 +29,23 @@ class OsvApiSource:
         *,
         timeout_seconds: float = 20.0,
         transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
+        self._timeout_seconds = timeout_seconds
         self._timeout = httpx.Timeout(timeout_seconds)
         self._transport = transport
+        self._clock = clock or time.monotonic
 
-    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> Mapping[str, Any]:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         if not queries:
-            return {"results": []}
+            return OsvBatchResponse(results=())
         if len(queries) > _MAX_QUERIES:
             raise OsvSourceUnavailable("The OSV package batch exceeds the query limit.")
+        deadline = self._clock() + self._timeout_seconds
         transport = self._transport
         if transport is None:
             address = _public_osv_address(f"{_OSV_ORIGIN}/v1/querybatch")
+            _remaining_time(deadline, self._clock)
             transport = _PinnedOsvTransport(address)
         vulnerability_ids: list[set[str]] = [set() for _ in queries]
         pending: list[tuple[int, OsvPackageQuery, str | None]] = [
@@ -70,6 +76,8 @@ class OsvApiSource:
                                 for _, query, token in pending
                             ]
                         },
+                        deadline=deadline,
+                        clock=self._clock,
                     )
                     page_results = response_payload.get("results")
                     if not isinstance(page_results, Sequence) or isinstance(
@@ -108,18 +116,21 @@ class OsvApiSource:
                         client,
                         "GET",
                         f"{_OSV_ORIGIN}/v1/vulns/{quote(identifier, safe='')}",
+                        deadline=deadline,
+                        clock=self._clock,
                     )
                     for identifier in sorted(set[str]().union(*vulnerability_ids))
                 }
         except httpx.HTTPError as error:
             raise OsvSourceUnavailable("The public OSV API could not be retrieved.") from error
 
-        return {
+        payload = {
             "results": [
                 {"vulns": [records[identifier] for identifier in sorted(identifiers)]}
                 for identifiers in vulnerability_ids
             ]
         }
+        return OsvBatchResponse.capture(payload, expected_results=len(queries))
 
 
 def _request_json(
@@ -128,19 +139,25 @@ def _request_json(
     url: str,
     *,
     json_body: dict[str, object] | None = None,
+    deadline: float,
+    clock: Callable[[], float],
 ) -> dict[str, Any]:
+    timeout_seconds = _remaining_time(deadline, clock)
     with client.stream(
         method,
         url,
         json=json_body,
         headers={"Accept": "application/json"},
+        timeout=timeout_seconds,
     ) as response:
+        _remaining_time(deadline, clock)
         if response.is_redirect:
             raise OsvSourceUnavailable("OSV redirects are not accepted.")
         if response.status_code != 200:
             raise OsvSourceUnavailable("The public OSV API returned an unsuccessful response.")
         content = bytearray()
         for chunk in response.iter_bytes():
+            _remaining_time(deadline, clock)
             content.extend(chunk)
             if len(content) > _MAX_RESPONSE_BYTES:
                 raise OsvSourceUnavailable("The public OSV response exceeds the size limit.")
@@ -151,6 +168,13 @@ def _request_json(
     if not isinstance(payload, dict):
         raise OsvSourceUnavailable("The public OSV API returned an invalid JSON object.")
     return payload
+
+
+def _remaining_time(deadline: float, clock: Callable[[], float]) -> float:
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise OsvSourceUnavailable("The public OSV lookup exceeded its time budget.")
+    return remaining
 
 
 class _PinnedOsvNetworkBackend(httpcore.NetworkBackend):

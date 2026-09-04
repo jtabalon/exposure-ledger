@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from exposure_ledger import OsvPackageQuery, RepositoryArchive
+from exposure_ledger import OsvBatchResponse, OsvPackageQuery, RepositoryArchive
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_worker.main import process_next_assessment
@@ -32,8 +32,8 @@ class FixtureArchiveSource:
 
 
 class EmptyOsvSource:
-    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> dict[str, object]:
-        return {"results": [{} for _ in queries]}
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
+        return OsvBatchResponse(results=tuple(() for _ in queries))
 
 
 def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(

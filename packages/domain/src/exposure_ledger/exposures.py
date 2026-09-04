@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Any, Protocol
 
 from packaging.utils import canonicalize_name
@@ -19,8 +20,58 @@ class OsvPackageQuery:
     version: str
 
 
+class OsvEventKind(StrEnum):
+    INTRODUCED = "introduced"
+    FIXED = "fixed"
+    LAST_AFFECTED = "last_affected"
+    LIMIT = "limit"
+
+
+@dataclass(frozen=True, slots=True)
+class OsvRangeEvent:
+    kind: OsvEventKind
+    version: str
+
+
+@dataclass(frozen=True, slots=True)
+class OsvRange:
+    range_type: str
+    events: tuple[OsvRangeEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OsvAffectedPackage:
+    ecosystem: str
+    name: str
+    versions: tuple[str, ...]
+    ranges: tuple[OsvRange, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OsvVulnerability:
+    identifier: str
+    aliases: tuple[str, ...]
+    severity: str | None
+    affected: tuple[OsvAffectedPackage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OsvBatchResponse:
+    results: tuple[tuple[OsvVulnerability, ...], ...]
+
+    @classmethod
+    def capture(cls, payload: Mapping[str, Any], *, expected_results: int) -> OsvBatchResponse:
+        """Validate and freeze one provider response at the OSV source boundary."""
+        results = payload.get("results")
+        if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
+            raise OsvResponseRejected("OSV batch response must contain a results array")
+        if len(results) != expected_results:
+            raise OsvResponseRejected("OSV batch response must align with the requested packages")
+        return cls(results=tuple(_capture_osv_result(result) for result in results))
+
+
 class OsvSource(Protocol):
-    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> Mapping[str, Any]: ...
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,9 +80,17 @@ class VulnerabilityRecord:
     aliases: tuple[str, ...]
 
 
+class ExposureSeverity(StrEnum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MODERATE = "moderate"
+    LOW = "low"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class ExposureRanking:
-    severity: str
+    severity: ExposureSeverity
     direct_dependency: bool
     dependency_depth: int
     fixed_version_available: bool
@@ -82,25 +141,13 @@ class ExposureDiscovery:
             OsvPackageQuery(name=canonicalize_name(package.name), version=package.version)
             for package in packages
         )
-        payload = self._source.query_batch(queries)
-        results = payload.get("results")
-        if not isinstance(results, Sequence) or isinstance(results, (str, bytes)):
-            raise OsvResponseRejected("OSV batch response must contain a results array")
-        if len(results) != len(queries):
+        response = self._source.query_batch(queries)
+        if len(response.results) != len(queries):
             raise OsvResponseRejected("OSV batch response must align with the requested packages")
 
         raw_candidates: list[tuple[PackageInstance, tuple[str, ...], ExposureRanking]] = []
-        for package, result in zip(packages, results, strict=True):
-            if not isinstance(result, Mapping):
-                raise OsvResponseRejected("Each OSV batch result must be an object")
-            vulnerabilities = result.get("vulns", [])
-            if not isinstance(vulnerabilities, Sequence) or isinstance(
-                vulnerabilities, (str, bytes)
-            ):
-                raise OsvResponseRejected("OSV vulnerabilities must be an array")
+        for package, vulnerabilities in zip(packages, response.results, strict=True):
             for vulnerability in vulnerabilities:
-                if not isinstance(vulnerability, Mapping):
-                    raise OsvResponseRejected("Each OSV vulnerability must be an object")
                 if not _affects_package(vulnerability, package):
                     continue
                 aliases = _aliases(vulnerability)
@@ -174,12 +221,94 @@ def _coalesced_aliases(
     }
 
 
-def _aliases(vulnerability: Mapping[str, Any]) -> tuple[str, ...]:
-    identifier = vulnerability.get("id")
-    aliases = vulnerability.get("aliases", [])
-    values = [identifier] if isinstance(identifier, str) else []
-    if isinstance(aliases, Sequence) and not isinstance(aliases, (str, bytes)):
-        values.extend(alias for alias in aliases if isinstance(alias, str))
+def _capture_osv_result(result: object) -> tuple[OsvVulnerability, ...]:
+    if not isinstance(result, Mapping):
+        raise OsvResponseRejected("Each OSV batch result must be an object")
+    vulnerabilities = result.get("vulns", [])
+    if not isinstance(vulnerabilities, Sequence) or isinstance(vulnerabilities, (str, bytes)):
+        raise OsvResponseRejected("OSV vulnerabilities must be an array")
+    return tuple(_capture_osv_vulnerability(item) for item in vulnerabilities)
+
+
+def _capture_osv_vulnerability(value: object) -> OsvVulnerability:
+    if not isinstance(value, Mapping):
+        raise OsvResponseRejected("Each OSV vulnerability must be an object")
+    identifier = value.get("id")
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise OsvResponseRejected("Each OSV vulnerability must have an identifier")
+    aliases = value.get("aliases", [])
+    if not isinstance(aliases, Sequence) or isinstance(aliases, (str, bytes)):
+        raise OsvResponseRejected("OSV vulnerability aliases must be an array")
+    database_specific = value.get("database_specific")
+    raw_severity = (
+        database_specific.get("severity") if isinstance(database_specific, Mapping) else None
+    )
+    affected = value.get("affected", [])
+    if not isinstance(affected, Sequence) or isinstance(affected, (str, bytes)):
+        raise OsvResponseRejected("OSV affected packages must be an array")
+    return OsvVulnerability(
+        identifier=identifier,
+        aliases=tuple(alias for alias in aliases if isinstance(alias, str)),
+        severity=raw_severity if isinstance(raw_severity, str) else None,
+        affected=tuple(_capture_osv_affected(item) for item in affected),
+    )
+
+
+def _capture_osv_affected(value: object) -> OsvAffectedPackage:
+    if not isinstance(value, Mapping):
+        raise OsvResponseRejected("Each OSV affected package must be an object")
+    package = value.get("package")
+    if not isinstance(package, Mapping):
+        raise OsvResponseRejected("Each OSV affected package must identify its package")
+    ecosystem = package.get("ecosystem")
+    name = package.get("name")
+    if not isinstance(ecosystem, str) or not isinstance(name, str):
+        raise OsvResponseRejected("Each OSV affected package must have an ecosystem and name")
+    versions = value.get("versions", [])
+    ranges = value.get("ranges", [])
+    if not isinstance(versions, Sequence) or isinstance(versions, (str, bytes)):
+        raise OsvResponseRejected("OSV affected versions must be an array")
+    if not isinstance(ranges, Sequence) or isinstance(ranges, (str, bytes)):
+        raise OsvResponseRejected("OSV affected ranges must be an array")
+    return OsvAffectedPackage(
+        ecosystem=ecosystem,
+        name=name,
+        versions=tuple(item for item in versions if isinstance(item, str)),
+        ranges=tuple(_capture_osv_range(item) for item in ranges),
+    )
+
+
+def _capture_osv_range(value: object) -> OsvRange:
+    if not isinstance(value, Mapping):
+        raise OsvResponseRejected("Each OSV affected range must be an object")
+    range_type = value.get("type")
+    events = value.get("events", [])
+    if not isinstance(range_type, str):
+        raise OsvResponseRejected("Each OSV affected range must have a type")
+    if not isinstance(events, Sequence) or isinstance(events, (str, bytes)):
+        raise OsvResponseRejected("OSV range events must be an array")
+    return OsvRange(
+        range_type=range_type,
+        events=tuple(_capture_osv_event(item) for item in events),
+    )
+
+
+def _capture_osv_event(value: object) -> OsvRangeEvent:
+    if not isinstance(value, Mapping):
+        raise OsvResponseRejected("Each OSV range event must be an object")
+    boundaries = [
+        (OsvEventKind(kind), version)
+        for kind in OsvEventKind
+        if isinstance((version := value.get(kind)), str)
+    ]
+    if len(boundaries) != 1:
+        raise OsvResponseRejected("OSV range events must contain one supported boundary")
+    kind, version = boundaries[0]
+    return OsvRangeEvent(kind=kind, version=version)
+
+
+def _aliases(vulnerability: OsvVulnerability) -> tuple[str, ...]:
+    values = [vulnerability.identifier, *vulnerability.aliases]
     normalized = tuple(sorted({value.strip().upper() for value in values if value.strip()}))
     if not normalized:
         raise OsvResponseRejected("Each OSV vulnerability must have an identifier")
@@ -191,87 +320,62 @@ def _vulnerability_identity(aliases: tuple[str, ...]) -> str:
     return f"sha256:{digest}"
 
 
-def _affects_package(vulnerability: Mapping[str, Any], package: PackageInstance) -> bool:
-    affected = vulnerability.get("affected", [])
-    if not isinstance(affected, Sequence) or isinstance(affected, (str, bytes)):
-        return False
-    for item in affected:
-        if not isinstance(item, Mapping):
-            continue
-        osv_package = item.get("package")
-        if not isinstance(osv_package, Mapping):
-            continue
-        name = osv_package.get("name")
-        if (
-            osv_package.get("ecosystem") != "PyPI"
-            or not isinstance(name, str)
-            or (name != "*" and canonicalize_name(name) != canonicalize_name(package.name))
-        ):
-            continue
-        if _affected_item_matches(item, package.version):
-            return True
-    return False
-
-
-def _affected_item_matches(affected: Mapping[str, Any], version: str) -> bool:
-    candidate = _version(version)
-    versions = affected.get("versions", [])
-    if (
-        isinstance(versions, Sequence)
-        and not isinstance(versions, (str, bytes))
-        and any(_version(item) == candidate for item in versions if isinstance(item, str))
-    ):
-        return True
-    ranges = affected.get("ranges", [])
-    if not isinstance(ranges, Sequence) or isinstance(ranges, (str, bytes)):
-        return False
+def _affects_package(vulnerability: OsvVulnerability, package: PackageInstance) -> bool:
     return any(
-        isinstance(item, Mapping)
-        and item.get("type") == "ECOSYSTEM"
-        and _range_matches(item, candidate)
-        for item in ranges
+        _affected_item_matches(item, package.version)
+        for item in _matching_affected_items(vulnerability, package)
     )
 
 
-def _range_matches(osv_range: Mapping[str, Any], candidate: Version) -> bool:
-    events = osv_range.get("events", [])
-    if not isinstance(events, Sequence) or isinstance(events, (str, bytes)):
-        return False
-    limits = [
-        limit
-        for event in events
-        if isinstance(event, Mapping) and isinstance((limit := event.get("limit")), str)
-    ]
+def _matching_affected_items(
+    vulnerability: OsvVulnerability, package: PackageInstance
+) -> tuple[OsvAffectedPackage, ...]:
+    matches: list[OsvAffectedPackage] = []
+    normalized_name = canonicalize_name(package.name)
+    for item in vulnerability.affected:
+        if item.ecosystem != "PyPI" or (
+            item.name != "*" and canonicalize_name(item.name) != normalized_name
+        ):
+            continue
+        matches.append(item)
+    return tuple(matches)
+
+
+def _affected_item_matches(affected: OsvAffectedPackage, version: str) -> bool:
+    candidate = _version(version)
+    if any(_version(item) == candidate for item in affected.versions):
+        return True
+    return any(
+        item.range_type == "ECOSYSTEM" and _range_matches(item, candidate)
+        for item in affected.ranges
+    )
+
+
+def _range_matches(osv_range: OsvRange, candidate: Version) -> bool:
+    limits = [event.version for event in osv_range.events if event.kind is OsvEventKind.LIMIT]
     if limits and not any(limit == "*" or candidate < _version(limit) for limit in limits):
         return False
     timeline = sorted(
-        (event for event in events if isinstance(event, Mapping) and "limit" not in event),
+        (event for event in osv_range.events if event.kind is not OsvEventKind.LIMIT),
         key=_event_sort_key,
     )
     active = False
     for event in timeline:
-        introduced = event.get("introduced")
-        if isinstance(introduced, str):
-            if introduced == "0" or candidate >= _version(introduced):
+        if event.kind is OsvEventKind.INTRODUCED:
+            if event.version == "0" or candidate >= _version(event.version):
                 active = True
             continue
-        fixed = event.get("fixed")
-        if isinstance(fixed, str):
-            if candidate >= _version(fixed):
+        if event.kind is OsvEventKind.FIXED:
+            if candidate >= _version(event.version):
                 active = False
             continue
-        last_affected = event.get("last_affected")
-        if isinstance(last_affected, str) and candidate > _version(last_affected):
+        if event.kind is OsvEventKind.LAST_AFFECTED and candidate > _version(event.version):
             active = False
     return active
 
 
-def _event_sort_key(event: Mapping[str, Any]) -> tuple[Version, str]:
-    for kind in ("introduced", "fixed", "last_affected"):
-        value = event.get(kind)
-        if isinstance(value, str):
-            return (_version(value), kind)
-    raise OsvResponseRejected("OSV range events must contain one supported boundary")
+def _event_sort_key(event: OsvRangeEvent) -> tuple[Version, str]:
+    return (_version(event.version), event.kind)
 
 
 def _version(value: str) -> Version:
@@ -281,28 +385,26 @@ def _version(value: str) -> Version:
         raise OsvResponseRejected(f"OSV contains an invalid PyPI version: {value}") from error
 
 
-def _ranking(vulnerability: Mapping[str, Any], package: PackageInstance) -> ExposureRanking:
-    database_specific = vulnerability.get("database_specific")
-    raw_severity = (
-        database_specific.get("severity") if isinstance(database_specific, Mapping) else None
-    )
-    severity = str(raw_severity).lower() if isinstance(raw_severity, str) else "unknown"
+def _ranking(vulnerability: OsvVulnerability, package: PackageInstance) -> ExposureRanking:
+    severity = vulnerability.severity.lower() if vulnerability.severity else "unknown"
     if severity == "medium":
         severity = "moderate"
     if severity not in {"critical", "high", "moderate", "low"}:
         severity = "unknown"
+    normalized_severity = ExposureSeverity(severity)
     severity_points = {
-        "critical": 40,
-        "high": 30,
-        "moderate": 20,
-        "low": 10,
-    }.get(severity, 0)
+        ExposureSeverity.CRITICAL: 40,
+        ExposureSeverity.HIGH: 30,
+        ExposureSeverity.MODERATE: 20,
+        ExposureSeverity.LOW: 10,
+        ExposureSeverity.UNKNOWN: 0,
+    }[normalized_severity]
     depth = min((len(path) - 1 for path in package.dependency_paths), default=0)
     fixed = _has_fixed_version(vulnerability, package)
     score = severity_points + (20 if package.direct else 0) + (10 if fixed else 0)
     score += max(0, 10 - depth)
     return ExposureRanking(
-        severity=severity,
+        severity=normalized_severity,
         direct_dependency=package.direct,
         dependency_depth=depth,
         fixed_version_available=fixed,
@@ -310,40 +412,21 @@ def _ranking(vulnerability: Mapping[str, Any], package: PackageInstance) -> Expo
     )
 
 
-def _has_fixed_version(vulnerability: Mapping[str, Any], package: PackageInstance) -> bool:
-    affected = vulnerability.get("affected", [])
-    if not isinstance(affected, Sequence) or isinstance(affected, (str, bytes)):
-        return False
-    normalized_name = canonicalize_name(package.name)
+def _has_fixed_version(vulnerability: OsvVulnerability, package: PackageInstance) -> bool:
     installed_version = _version(package.version)
-    for item in affected:
-        if not isinstance(item, Mapping):
-            continue
-        osv_package = item.get("package")
-        if not isinstance(osv_package, Mapping):
-            continue
-        name = osv_package.get("name")
-        if (
-            osv_package.get("ecosystem") != "PyPI"
-            or not isinstance(name, str)
-            or (name != "*" and canonicalize_name(name) != normalized_name)
-        ):
-            continue
-        ranges = item.get("ranges", [])
-        if isinstance(ranges, Sequence) and not isinstance(ranges, (str, bytes)):
-            for osv_range in ranges:
-                if not isinstance(osv_range, Mapping):
-                    continue
-                events = osv_range.get("events", [])
-                if (
-                    isinstance(events, Sequence)
-                    and not isinstance(events, (str, bytes))
-                    and any(
-                        isinstance(event, Mapping)
-                        and isinstance((fixed := event.get("fixed")), str)
-                        and _version(fixed) > installed_version
-                        for event in events
-                    )
-                ):
-                    return True
+    for item in _matching_affected_items(vulnerability, package):
+        for osv_range in item.ranges:
+            if (
+                osv_range.range_type == "ECOSYSTEM"
+                and _range_matches(osv_range, installed_version)
+                and _range_has_future_fix(osv_range, installed_version)
+            ):
+                return True
     return False
+
+
+def _range_has_future_fix(osv_range: OsvRange, installed_version: Version) -> bool:
+    return any(
+        event.kind is OsvEventKind.FIXED and _version(event.version) > installed_version
+        for event in osv_range.events
+    )
