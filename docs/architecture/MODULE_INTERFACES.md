@@ -52,5 +52,18 @@ These seams were agreed during design and are the only initial surfaces tested d
 8. **Retrieval:** an Exposure-scoped, metadata-filtered query and one explicit Embedding Space
    produce deterministic full-text, vector, and fused ranks, or a typed unavailable result. Known
    answers report recall@k without changing rank order.
+9. **Investigation history:** the HTTP and persistence contracts append and load immutable
+   Investigation Revisions and human Dispositions. Database integration tests may exercise the
+   append-only and scope constraints directly because those constraints are part of the public
+   PostgreSQL persistence boundary.
 
 Tests cross these interfaces and avoid assertions against private graph nodes, SQL layout, or internal helper calls.
+
+## Investigation history and Disposition interface
+
+The HTTP contract exposes the complete immutable history for one package-specific Exposure and
+accepts human Dispositions only against an explicitly identified, sealed Investigation Revision.
+Each Disposition pins its Investigation, Revision, Exposure, and Asset Snapshot identities. The
+persistence boundary validates that tuple transactionally before append, so a decision cannot be
+reused by a different Asset Snapshot or Environment Profile. Recommendation remains system-authored
+Revision output; Disposition remains a separate human-authored event stream.

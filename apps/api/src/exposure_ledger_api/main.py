@@ -5,9 +5,10 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import UTC, date, datetime
+from ipaddress import ip_address
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from exposure_ledger import (
     ActionLevel,
@@ -19,6 +20,8 @@ from exposure_ledger import (
     AuthorizationStatus,
     CaptureAssetSnapshot,
     CyberPolicy,
+    Disposition,
+    DispositionKind,
     EmbeddingSpace,
     EnvironmentProfile,
     ExposureRanking,
@@ -848,6 +851,42 @@ class InvestigationRevisionListResponse(ApiModel):
     items: list[InvestigationRevisionResponse]
 
 
+class CreateDispositionRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    investigation_revision_id: UUID
+    kind: DispositionKind
+    rationale: str | None = Field(default=None, max_length=4000)
+    expiration_date: date | None = None
+    review_date: date | None = None
+
+
+class DispositionResponse(ApiModel):
+    id: UUID
+    investigation_id: UUID
+    investigation_revision_id: UUID
+    exposure_id: UUID
+    asset_snapshot_id: UUID
+    kind: DispositionKind
+    author: str
+    rationale: str | None
+    expiration_date: date | None
+    review_date: date | None
+    created_at: datetime
+
+    @classmethod
+    def from_domain(cls, disposition: Disposition) -> "DispositionResponse":
+        return cls.model_validate(disposition, from_attributes=True)
+
+
+class InvestigationHistoryResponse(ApiModel):
+    investigation_id: UUID
+    exposure_id: UUID
+    asset_snapshot_id: UUID
+    revisions: list[InvestigationRevisionResponse]
+    dispositions: list[DispositionResponse]
+
+
 def _not_found(assessment_run_id: UUID) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -1207,6 +1246,100 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 for item in investigation_repository.list_for_assessment(assessment_run_id)
             ]
         )
+
+    @application.get(
+        "/api/v1/exposures/{exposure_id}/investigation",
+        response_model=InvestigationHistoryResponse,
+        response_model_by_alias=True,
+        tags=["investigations"],
+    )
+    def get_investigation_history(exposure_id: UUID) -> InvestigationHistoryResponse:
+        records = investigation_repository.list_for_exposure(exposure_id)
+        if not records:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "investigation_not_found",
+                    "message": f"Exposure {exposure_id} has no Investigation history.",
+                },
+            )
+        investigation_id = records[0].investigation_id
+        return InvestigationHistoryResponse(
+            investigation_id=investigation_id,
+            exposure_id=exposure_id,
+            asset_snapshot_id=records[0].revision.asset_snapshot_id,
+            revisions=[InvestigationRevisionResponse.from_record(item) for item in records],
+            dispositions=[
+                DispositionResponse.from_domain(item)
+                for item in investigation_repository.list_dispositions(investigation_id)
+            ],
+        )
+
+    @application.post(
+        "/api/v1/investigations/{investigation_id}/dispositions",
+        response_model=DispositionResponse,
+        response_model_by_alias=True,
+        status_code=status.HTTP_201_CREATED,
+        tags=["investigations"],
+    )
+    def append_disposition(
+        investigation_id: UUID,
+        payload: CreateDispositionRequest,
+        request: Request,
+    ) -> DispositionResponse:
+        if not configured_settings.enable_local_dispositions:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "local_dispositions_disabled",
+                    "message": "Human Disposition writes are disabled for this deployment.",
+                },
+            )
+        try:
+            client_address = ip_address(request.client.host if request.client else "")
+        except ValueError:
+            client_address = None
+        mapped_address = getattr(client_address, "ipv4_mapped", None)
+        if client_address is None or not (
+            client_address.is_loopback
+            or (mapped_address is not None and mapped_address.is_loopback)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "local_dispositions_loopback_required",
+                    "message": "Human Disposition writes require an OS-local connection.",
+                },
+            )
+        try:
+            revision_record = investigation_repository.get_revision(
+                investigation_id,
+                payload.investigation_revision_id,
+            )
+            if revision_record is None:
+                raise ValueError("Disposition does not identify a sealed Investigation Revision")
+            revision = revision_record.revision
+            disposition = Disposition(
+                id=uuid4(),
+                investigation_id=investigation_id,
+                investigation_revision_id=revision.id,
+                exposure_id=revision.exposure_id,
+                asset_snapshot_id=revision.asset_snapshot_id,
+                kind=payload.kind,
+                author=configured_settings.local_operator,
+                rationale=payload.rationale,
+                expiration_date=payload.expiration_date,
+                review_date=payload.review_date,
+                created_at=datetime.now(UTC),
+            )
+            return DispositionResponse.from_domain(
+                investigation_repository.append_disposition(disposition)
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "invalid_disposition", "message": str(error)},
+            ) from error
 
     @application.get(
         "/api/v1/assessment-runs/{assessment_run_id}/exposures/{exposure_id}/evidence-passages",

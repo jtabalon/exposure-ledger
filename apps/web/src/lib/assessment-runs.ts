@@ -135,7 +135,7 @@ export async function loadCollection<T>(
   }
 }
 
-function apiBaseUrl(): string {
+export function apiBaseUrl(): string {
   const configured = process.env.EXPOSURE_LEDGER_API_URL ?? "http://localhost:8000"
   let parsed: URL
   try {

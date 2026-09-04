@@ -15,6 +15,8 @@ from exposure_ledger import (
     Claim,
     ClaimEvidenceRelationship,
     ClaimKind,
+    Disposition,
+    DispositionKind,
     EmbeddingSpace,
     EvidenceRelationship,
     GenerationModel,
@@ -82,7 +84,12 @@ class InvestigationRepository:
     def check_ready(self) -> None:
         try:
             with psycopg.connect(self._database_url) as connection:
-                connection.execute("SELECT EXISTS (SELECT 1 FROM investigation_revisions)")
+                connection.execute(
+                    """
+                    SELECT EXISTS (SELECT 1 FROM investigation_revisions),
+                           EXISTS (SELECT 1 FROM dispositions)
+                    """
+                )
         except psycopg.Error as error:
             raise RuntimeError(
                 "PostgreSQL is unavailable or not migrated. "
@@ -460,6 +467,14 @@ class InvestigationRepository:
 
     def list_for_exposure(self, exposure_id: UUID) -> list[InvestigationRevisionRecord]:
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            row = connection.execute(
+                "SELECT id FROM investigations WHERE exposure_id = %s",
+                (exposure_id,),
+            ).fetchone()
+        return self.list_for_investigation(UUID(str(row["id"]))) if row is not None else []
+
+    def list_for_investigation(self, investigation_id: UUID) -> list[InvestigationRevisionRecord]:
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
                 """
                 SELECT investigation_revisions.*, investigations.id AS investigation_identity,
@@ -487,12 +502,24 @@ class InvestigationRepository:
                 JOIN policy_decisions
                   ON policy_decisions.id =
                      investigation_revisions.output_policy_decision_id
-                WHERE investigation_revisions.exposure_id = %s
+                WHERE investigation_revisions.investigation_id = %s
                 ORDER BY investigation_revisions.revision_number DESC
                 """,
-                (exposure_id,),
+                (investigation_id,),
             ).fetchall()
             return [self._from_row(connection, row) for row in rows]
+
+    def get_revision(
+        self, investigation_id: UUID, revision_id: UUID
+    ) -> InvestigationRevisionRecord | None:
+        return next(
+            (
+                record
+                for record in self.list_for_investigation(investigation_id)
+                if record.revision.id == revision_id
+            ),
+            None,
+        )
 
     def list_for_assessment(self, assessment_run_id: UUID) -> list[InvestigationRevisionRecord]:
         assessment_run_id = UUID(str(assessment_run_id))
@@ -518,6 +545,82 @@ class InvestigationRepository:
             key=lambda record: (record.revision.created_at, str(record.revision.id)),
             reverse=True,
         )
+
+    def append_disposition(self, disposition: Disposition) -> Disposition:
+        """Append one human Disposition after locking its Investigation scope."""
+        with (
+            psycopg.connect(self._database_url, row_factory=dict_row) as connection,
+            connection.transaction(),
+        ):
+            investigation = connection.execute(
+                "SELECT id FROM investigations WHERE id = %s FOR UPDATE",
+                (disposition.investigation_id,),
+            ).fetchone()
+            if investigation is None:
+                raise ValueError("Disposition does not identify an Investigation")
+            scope = connection.execute(
+                """
+                SELECT exposure_id, asset_snapshot_id
+                FROM investigation_revisions
+                WHERE id = %s AND investigation_id = %s AND sealed
+                """,
+                (disposition.investigation_revision_id, disposition.investigation_id),
+            ).fetchone()
+            if scope is None or (
+                UUID(str(scope["exposure_id"])),
+                UUID(str(scope["asset_snapshot_id"])),
+            ) != (disposition.exposure_id, disposition.asset_snapshot_id):
+                raise ValueError("Disposition is outside the reviewed Revision scope")
+            connection.execute(
+                """
+                INSERT INTO dispositions (
+                    id, investigation_id, investigation_revision_id, exposure_id,
+                    asset_snapshot_id, kind, author, rationale, expiration_date,
+                    review_date, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    disposition.id,
+                    disposition.investigation_id,
+                    disposition.investigation_revision_id,
+                    disposition.exposure_id,
+                    disposition.asset_snapshot_id,
+                    disposition.kind,
+                    disposition.author,
+                    disposition.rationale,
+                    disposition.expiration_date,
+                    disposition.review_date,
+                    disposition.created_at,
+                ),
+            )
+        return disposition
+
+    def list_dispositions(self, investigation_id: UUID) -> list[Disposition]:
+        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM dispositions
+                WHERE investigation_id = %s
+                ORDER BY created_at DESC, id DESC
+                """,
+                (investigation_id,),
+            ).fetchall()
+        return [
+            Disposition(
+                id=UUID(str(row["id"])),
+                investigation_id=UUID(str(row["investigation_id"])),
+                investigation_revision_id=UUID(str(row["investigation_revision_id"])),
+                exposure_id=UUID(str(row["exposure_id"])),
+                asset_snapshot_id=UUID(str(row["asset_snapshot_id"])),
+                kind=DispositionKind(str(row["kind"])),
+                author=str(row["author"]),
+                rationale=str(row["rationale"]) if row["rationale"] is not None else None,
+                expiration_date=row["expiration_date"],
+                review_date=row["review_date"],
+                created_at=cast(datetime, row["created_at"]),
+            )
+            for row in rows
+        ]
 
     @staticmethod
     def _validate_scope(

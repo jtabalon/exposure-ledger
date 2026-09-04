@@ -1028,6 +1028,73 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
         """,
     ),
+    (
+        16,
+        """
+        CREATE TABLE dispositions (
+            id uuid PRIMARY KEY,
+            investigation_id uuid NOT NULL REFERENCES investigations(id) ON DELETE RESTRICT,
+            investigation_revision_id uuid NOT NULL
+                REFERENCES investigation_revisions(id) ON DELETE RESTRICT,
+            exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
+            asset_snapshot_id uuid NOT NULL REFERENCES asset_snapshots(id) ON DELETE RESTRICT,
+            kind text NOT NULL CHECK (kind IN (
+                'remediate', 'monitor', 'not_affected', 'accept_risk',
+                'request_more_evidence'
+            )),
+            author text NOT NULL CHECK (btrim(author) <> ''),
+            rationale text,
+            expiration_date date,
+            review_date date,
+            created_at timestamptz NOT NULL,
+            CHECK (
+                kind <> 'accept_risk'
+                OR (NULLIF(btrim(rationale), '') IS NOT NULL
+                    AND (expiration_date IS NOT NULL OR review_date IS NOT NULL))
+            )
+        );
+
+        CREATE INDEX dispositions_investigation_created_idx
+            ON dispositions (investigation_id, created_at DESC, id DESC);
+
+        CREATE FUNCTION validate_disposition_scope()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM investigation_revisions
+                WHERE id = NEW.investigation_revision_id
+                  AND investigation_id = NEW.investigation_id
+                  AND exposure_id = NEW.exposure_id
+                  AND asset_snapshot_id = NEW.asset_snapshot_id
+                  AND sealed
+            ) THEN
+                RAISE EXCEPTION 'Disposition is outside the reviewed Revision scope';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER dispositions_validate_scope
+        BEFORE INSERT ON dispositions
+        FOR EACH ROW EXECUTE FUNCTION validate_disposition_scope();
+
+        CREATE FUNCTION reject_disposition_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Dispositions are append-only';
+        END;
+        $$;
+
+        CREATE TRIGGER dispositions_are_append_only
+        BEFORE UPDATE OR DELETE ON dispositions
+        FOR EACH ROW EXECUTE FUNCTION reject_disposition_mutation();
+        """,
+    ),
 )
 
 
