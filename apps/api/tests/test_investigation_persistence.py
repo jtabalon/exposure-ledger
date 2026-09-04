@@ -53,7 +53,9 @@ from test_exposures_http import (
 NOW = datetime(2026, 9, 4, 14, 0, tzinfo=UTC)
 
 
-def test_bounded_database_connections_reject_unenforceable_deadlines() -> None:
+def test_bounded_database_connections_reject_unenforceable_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(TimeoutError, match="Insufficient wall-time"):
         connect_with_deadline(
             "postgresql://localhost/exposure_ledger",
@@ -62,6 +64,35 @@ def test_bounded_database_connections_reject_unenforceable_deadlines() -> None:
     with pytest.raises(ValueError, match="one explicit PostgreSQL host"):
         connect_with_deadline(
             "postgresql://host-a:5432,host-b:5432/exposure_ledger",
+            monotonic() + 10,
+        )
+    monkeypatch.setenv("PGHOST", "host-a,host-b")
+    with pytest.raises(ValueError, match="explicit PostgreSQL host"):
+        connect_with_deadline(
+            "postgresql:///exposure_ledger",
+            monotonic() + 10,
+        )
+    monkeypatch.delenv("PGHOST")
+    monkeypatch.setenv("PGSERVICE", "production")
+    with pytest.raises(ValueError, match="PGSERVICE"):
+        connect_with_deadline(
+            "postgresql://127.0.0.1/exposure_ledger",
+            monotonic() + 10,
+        )
+    monkeypatch.delenv("PGSERVICE")
+    with pytest.raises(ValueError, match="explicit PostgreSQL address"):
+        connect_with_deadline(
+            "postgresql://database.internal/exposure_ledger",
+            monotonic() + 10,
+        )
+
+    def connection_timeout(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise psycopg.errors.ConnectionTimeout("connection timed out")
+
+    monkeypatch.setattr(psycopg, "connect", connection_timeout)
+    with pytest.raises(TimeoutError, match="wall-time budget"):
+        connect_with_deadline(
+            "postgresql://127.0.0.1/exposure_ledger",
             monotonic() + 10,
         )
 
@@ -316,6 +347,38 @@ def test_revision_history_appends_and_reloads_complete_immutable_revisions(
             """,
             (uuid4(), first.id),
         )
+
+
+def test_revision_append_is_fenced_by_the_current_assessment_claim(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    current_claim = uuid4()
+    stale_claim = uuid4()
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            """
+            UPDATE assessment_runs
+            SET status = 'running', completed_at = NULL,
+                claimed_at = %s, claim_id = %s
+            WHERE id = %s
+            """,
+            (NOW, current_claim, exposure.assessment_run_id),
+        )
+
+    with pytest.raises(RuntimeError, match="claim was lost"):
+        InvestigationRepository(
+            database_url,
+            assessment_claim_id=stale_claim,
+        ).append(revision)
+
+    assert InvestigationRepository(database_url).list_for_exposure(exposure.id) == []
+    assert (
+        InvestigationRepository(
+            database_url,
+            assessment_claim_id=current_claim,
+        ).append(revision)
+        == revision
+    )
 
 
 def test_revision_rejects_evidence_outside_the_exposure_scope(database_url: str) -> None:

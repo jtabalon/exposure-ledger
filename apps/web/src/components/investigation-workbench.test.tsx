@@ -62,6 +62,8 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain("Material conflict")
     expect(html).toContain("No Source was selected as the winner")
     expect(html).toContain("More Evidence Required")
+    expect(html).toContain("needs more evidence")
+    expect(html).not.toContain("requires action")
     expect(html).toContain("Supporting")
     expect(html).toContain("Contradicting")
     expect(html).toContain("Contextual")
@@ -69,6 +71,23 @@ describe("InvestigationWorkbench", () => {
     expect(html).toContain("2.4.3")
     expect(html).toContain("Synthetic public vulnerability record")
     expect(html).toContain("2.4.2")
+  })
+
+  it("does not prescribe action when no remediation is indicated", () => {
+    const investigation = {
+      ...demoInvestigation,
+      recommendation: {
+        ...demoInvestigation.recommendation,
+        label: "No Remediation Indicated",
+      },
+    }
+
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain("has no indicated remediation")
+    expect(html).not.toContain("requires action")
   })
 
   it("presents hybrid component ranks and the complete Embedding Space identity", () => {

@@ -143,6 +143,10 @@ runs the pinned hybrid retrieval query, requests schema-constrained local genera
 Claim provenance, Recommendation evidence sufficiency, and output cyber policy, and atomically
 seals an immutable Revision. Evidence captures carry their actual Source adapter version; each
 Revision must pin the exact Source-to-adapter-version mapping before persistence accepts it.
+To keep the wall-time limit absolute during PostgreSQL connection establishment, bounded
+Investigation access accepts `localhost`, one numeric host/hostaddr, or an explicit Unix socket;
+libpq service definitions, multi-host URLs, and DNS hostnames are rejected instead of multiplying
+the per-address connection timeout.
 
 After evidence capture, the worker records a retrieved-content Policy Decision, then records passage
 representations in PostgreSQL under an immutable Embedding Space. Its identity covers the local

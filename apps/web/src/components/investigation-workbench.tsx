@@ -62,6 +62,19 @@ const relationshipStyles: Record<EvidenceRelationship, string> = {
   contextual: "border-amber-700/20 bg-amber-700/7 text-amber-800",
 }
 
+function recommendationOutcome(label: string) {
+  switch (label) {
+    case "More Evidence Required":
+      return " needs more evidence"
+    case "No Remediation Indicated":
+      return " has no indicated remediation"
+    case "Monitor":
+      return " should be monitored"
+    default:
+      return " requires action"
+  }
+}
+
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <div className="mb-3 flex items-center gap-2 text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
@@ -250,7 +263,9 @@ export function InvestigationWorkbench({
                 </div>
                 <h1 className="text-balance text-2xl leading-tight font-semibold tracking-[-0.025em] sm:text-3xl">
                   {investigation.exposure.packageName} {investigation.exposure.installedVersion}
-                  <span className="font-normal text-muted-foreground"> requires action</span>
+                  <span className="font-normal text-muted-foreground">
+                    {recommendationOutcome(investigation.recommendation.label)}
+                  </span>
                 </h1>
                 <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1.5">

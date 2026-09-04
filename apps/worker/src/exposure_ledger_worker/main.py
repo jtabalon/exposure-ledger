@@ -202,7 +202,10 @@ def _run_investigations_or_fail(
     embedding_space: EmbeddingSpace,
     generation_provider: GenerationProvider,
 ) -> bool:
-    investigation_repository = InvestigationRepository(database_url)
+    investigation_repository = InvestigationRepository(
+        database_url,
+        assessment_claim_id=claim_id,
+    )
     readiness = generation_provider.check_readiness()
     investigation_repository.record_generation_readiness(readiness)
     if readiness.model is None:

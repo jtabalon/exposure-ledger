@@ -63,11 +63,21 @@ class InvestigationRevisionRecord:
     revision: InvestigationRevision
 
 
+class AssessmentClaimLost(RuntimeError):
+    """The Assessment worker no longer owns the claim required to append a Revision."""
+
+
 class InvestigationRepository:
     """Append and load complete immutable Revision aggregates transactionally."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        assessment_claim_id: UUID | None = None,
+    ) -> None:
         self._database_url = database_url
+        self._assessment_claim_id = assessment_claim_id
 
     def check_ready(self) -> None:
         try:
@@ -305,6 +315,21 @@ class InvestigationRepository:
             psycopg.connect(self._database_url, row_factory=dict_row) as connection,
             connection.transaction(),
         ):
+            if self._assessment_claim_id is not None:
+                current_claim_row = connection.execute(
+                    """
+                    SELECT 1
+                    FROM assessment_runs
+                    WHERE id = %s AND status = 'running' AND claim_id = %s
+                    FOR UPDATE
+                    """,
+                    (revision.assessment_run_id, self._assessment_claim_id),
+                ).fetchone()
+                if current_claim_row is None:
+                    raise AssessmentClaimLost(
+                        "Assessment claim was lost before the Investigation Revision could be "
+                        "persisted"
+                    )
             self._validate_scope(connection, revision)
             embedding_space_id = self._store_embedding_space(
                 connection, revision.configuration.embedding_space
