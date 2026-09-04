@@ -30,11 +30,13 @@ from exposure_ledger.cyber_policy import (
     PolicyResult,
 )
 from exposure_ledger.evidence import (
+    CapturedJsonRejected,
     CapturedSourcePayload,
     EvidencePassage,
     EvidenceRecord,
     Source,
     SourceAdapter,
+    load_captured_json,
 )
 from exposure_ledger.exposures import (
     AssessmentResult,
@@ -74,6 +76,7 @@ __all__ = [
     "AssetSnapshotRejected",
     "AuthorizationStatus",
     "CaptureAssetSnapshot",
+    "CapturedJsonRejected",
     "CapturedSourcePayload",
     "CyberPolicy",
     "EnvironmentProfile",
@@ -107,5 +110,6 @@ __all__ = [
     "Source",
     "SourceAdapter",
     "validate_asset_snapshot_request",
+    "load_captured_json",
     "VulnerabilityRecord",
 ]

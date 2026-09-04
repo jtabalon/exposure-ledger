@@ -15,6 +15,7 @@ from urllib.parse import quote, urlsplit
 import httpcore
 import httpx
 from exposure_ledger import (
+    CapturedJsonRejected,
     CapturedSourcePayload,
     EvidenceRecord,
     ExposureEvidence,
@@ -22,6 +23,7 @@ from exposure_ledger import (
     OsvPackageQuery,
     OsvQueryBatchSourceAdapter,
     OsvSourceUnavailable,
+    load_captured_json,
 )
 
 _OSV_ORIGIN = "https://api.osv.dev"
@@ -227,21 +229,12 @@ def _request_json(
                 raise OsvSourceUnavailable("The public OSV response exceeds the size limit.")
     try:
         captured_content = content.decode("utf-8")
-        payload = json.loads(captured_content, object_pairs_hook=_unique_json_object)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        payload = load_captured_json(captured_content)
+    except (UnicodeDecodeError, CapturedJsonRejected) as error:
         raise OsvSourceUnavailable("The public OSV API returned invalid JSON.") from error
     if not isinstance(payload, dict):
         raise OsvSourceUnavailable("The public OSV API returned an invalid JSON object.")
     return payload, captured_content
-
-
-def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise OsvSourceUnavailable(f"OSV returned JSON with a duplicate {key!r} member.")
-        result[key] = value
-    return result
 
 
 def _remaining_time(deadline: float, clock: Callable[[], float]) -> float:

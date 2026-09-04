@@ -16,11 +16,13 @@ from packaging.version import InvalidVersion, Version
 
 from exposure_ledger.asset_snapshots import AssetSnapshot, PackageInstance
 from exposure_ledger.evidence import (
+    CapturedJsonRejected,
     CapturedSourcePayload,
     EvidencePassage,
     EvidenceRecord,
     Source,
     SourceAdapter,
+    load_captured_json,
 )
 
 
@@ -611,22 +613,15 @@ def _validated_capture(
     if capture.captured_at.tzinfo is None or capture.captured_at.utcoffset() is None:
         raise OsvResponseRejected("Evidence capture time must include a timezone")
     try:
-        parsed_content = json.loads(capture.content, object_pairs_hook=_unique_json_object)
-    except json.JSONDecodeError as error:
-        raise OsvResponseRejected("Captured OSV content must be valid JSON") from error
+        parsed_content = load_captured_json(capture.content)
+    except CapturedJsonRejected as error:
+        raise OsvResponseRejected(
+            str(error).replace("Captured content", "Captured OSV content")
+        ) from error
     if parsed_content != payload:
         raise OsvResponseRejected("Captured OSV content does not match its parsed payload")
     content_digest = f"sha256:{hashlib.sha256(capture.content.encode()).hexdigest()}"
     return capture.content, content_digest, capture.captured_at.astimezone(UTC)
-
-
-def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise OsvResponseRejected(f"Captured OSV content repeats the {key!r} member")
-        result[key] = value
-    return result
 
 
 def _evidence_identity(source: Source, payload_identity: str, content_digest: str) -> str:
