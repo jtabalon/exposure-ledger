@@ -1,0 +1,3 @@
+# Retain only evidence-bearing repository content
+
+After an Asset Snapshot is processed, Exposure Ledger deletes the downloaded repository archive and retains only supported dependency manifests, normalized dependency data, hashes, and source excerpts actually used as Evidence Records. Keeping entire archives would improve recovery if an upstream repository disappeared, but would substantially increase storage, data-handling, and malicious-content exposure; immutable commit identity and narrowly retained evidence provide the intended audit trail without turning the product into a source-code archive.

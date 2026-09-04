@@ -1,0 +1,15 @@
+{
+  "name": "exposure-ledger",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "pnpm --filter @exposure-ledger/web build",
+    "dev": "concurrently --kill-others-on-fail --names api,worker,web --prefix-colors cyan,magenta,green \"PYTHONPATH=apps/api/src:packages/storage/src uv run uvicorn exposure_ledger_api.main:app --reload --port 8000\" \"PYTHONPATH=apps/worker/src:packages/storage/src uv run python -m exposure_ledger_worker.main\" \"pnpm --filter @exposure-ledger/web dev\"",
+    "lint": "pnpm --filter @exposure-ledger/web lint",
+    "test": "pnpm --filter @exposure-ledger/web test",
+    "typecheck": "pnpm --filter @exposure-ledger/web typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

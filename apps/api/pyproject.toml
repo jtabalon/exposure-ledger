@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "exposure-ledger-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "alembic>=1.15",
+  "exposure-ledger-domain",
+  "exposure-ledger-storage",
+  "fastapi>=0.115",
+  "httpx>=0.28",
+  "psycopg[binary]>=3.2",
+  "pydantic-settings>=2.8",
+  "sqlalchemy>=2.0",
+  "uvicorn[standard]>=0.34",
+]
+
+[tool.uv.sources]
+exposure-ledger-domain = { workspace = true }
+exposure-ledger-storage = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/exposure_ledger_api"]

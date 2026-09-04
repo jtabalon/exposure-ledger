@@ -1,0 +1,3 @@
+# Separate deterministic processing from model interpretation
+
+Dependency parsing, advisory matching, source access, policy checks, and claim validation remain deterministic, while retrieval and model reasoning are reserved for interpreting relevant passages and repository context. The model may identify an Evidence Gap or contradiction and propose one follow-up from an enumerated tool set, but a deterministic controller validates its target, policy class, action level, and budget before execution. This provides inspectable agent discretion without allowing the model to invent tools, expand targets, or bypass reproducible mechanics.
