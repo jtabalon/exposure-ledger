@@ -17,6 +17,10 @@ from exposure_ledger_storage.local_embeddings import (
     EmbeddingProviderUnavailable,
     EmbeddingReadiness,
 )
+from exposure_ledger_storage.postgres_deadline import (
+    connect_with_deadline,
+    set_statement_deadline,
+)
 
 LEXICAL_RETRIEVAL_CONFIGURATION_VERSION = "postgres-lexical-v1"
 HYBRID_RETRIEVAL_CONFIGURATION_VERSION = "postgres-hybrid-rrf-v1"
@@ -430,17 +434,22 @@ class EvidenceRetriever:
             space=space,
         )
 
-    def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
+    def retrieve(
+        self, query: RetrievalQuery, *, deadline_monotonic: float | None = None
+    ) -> RetrievalResult:
         self._validate_query(query)
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
+            set_statement_deadline(connection, deadline_monotonic)
             if not self._configuration_is_current(
                 connection, query.retrieval_configuration_version
             ):
                 raise RetrievalConfigurationNotCurrent(
                     "The requested retrieval configuration is not current"
                 )
+            set_statement_deadline(connection, deadline_monotonic)
             self._require_exposure_scope(connection, query)
             if query.retrieval_configuration_version == LEXICAL_RETRIEVAL_CONFIGURATION_VERSION:
+                set_statement_deadline(connection, deadline_monotonic)
                 passages = self._retrieve_full_text(connection, query)
                 return self._result(query, passages, embedding_space=None)
 
@@ -448,7 +457,8 @@ class EvidenceRetriever:
             raise EmbeddingSpaceNotCurrent(
                 "Hybrid retrieval requires one explicit Embedding Space identity."
             )
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
+            set_statement_deadline(connection, deadline_monotonic)
             stored_space = self._stored_space_by_identity(
                 connection, query.embedding_space_identity
             )
@@ -457,6 +467,7 @@ class EvidenceRetriever:
                     "The requested Embedding Space is not stored by this installation."
                 )
             stored_space_id, space = stored_space
+            set_statement_deadline(connection, deadline_monotonic)
             query_vector_row = connection.execute(
                 """
                 SELECT query_text, representation::text AS representation
@@ -479,7 +490,9 @@ class EvidenceRetriever:
             vector = self._validate_vector(
                 self._parse_vector(str(query_vector_row["representation"])), space
             )
+            set_statement_deadline(connection, deadline_monotonic)
             self._require_complete_index(connection, query, stored_space_id)
+            set_statement_deadline(connection, deadline_monotonic)
             passages = self._retrieve_hybrid(connection, query, stored_space_id, vector)
         return self._result(query, passages, embedding_space=space)
 

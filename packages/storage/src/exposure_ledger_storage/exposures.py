@@ -20,10 +20,13 @@ from exposure_ledger import (
     VulnerabilityRecord,
 )
 from exposure_ledger import EvidenceRecord as DomainEvidenceRecord
-from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from exposure_ledger_storage.asset_snapshots import PackageInstanceRecord
+from exposure_ledger_storage.postgres_deadline import (
+    connect_with_deadline,
+    set_statement_deadline,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,7 @@ class EvidenceRecordRecord:
     id: UUID
     identity: str
     source: SourceRecord
+    source_adapter_version: str
     captured_at: datetime
     content_digest: str
     attribution: str
@@ -268,8 +272,11 @@ class ExposureRepository:
             raise ValueError("Assessment Run Exposure discovery belongs to another Asset Snapshot")
         return True
 
-    def list_for_assessment(self, assessment_run_id: UUID) -> list[ExposureRecord]:
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+    def list_for_assessment(
+        self, assessment_run_id: UUID, *, deadline_monotonic: float | None = None
+    ) -> list[ExposureRecord]:
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
+            set_statement_deadline(connection, deadline_monotonic)
             rows = connection.execute(
                 """
                 SELECT exposures.id, assessment_run_exposures.assessment_run_id,
@@ -302,7 +309,10 @@ class ExposureRepository:
                 """,
                 (assessment_run_id,),
             ).fetchall()
-            return [self._from_row(connection, row) for row in rows]
+            return [
+                self._from_row(connection, row, deadline_monotonic=deadline_monotonic)
+                for row in rows
+            ]
 
     @staticmethod
     def _persist_immutable_evidence(
@@ -339,8 +349,8 @@ class ExposureRepository:
             """
             INSERT INTO evidence_records (
                 id, identity_key, source_id, captured_at, content_digest, attribution,
-                aliases, payload_identity, content
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                aliases, payload_identity, content, source_adapter_version
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (identity_key) DO NOTHING
             RETURNING id
             """,
@@ -354,13 +364,14 @@ class ExposureRepository:
                 list(evidence.aliases),
                 evidence.payload_identity,
                 evidence.content,
+                evidence.source_adapter_version,
             ),
         ).fetchone()
         if inserted is None:
             existing = connection.execute(
                 """
                 SELECT id, source_id, content_digest, attribution, aliases,
-                       payload_identity, content
+                       payload_identity, content, source_adapter_version
                 FROM evidence_records WHERE identity_key = %s
                 """,
                 (evidence.identity,),
@@ -373,6 +384,7 @@ class ExposureRepository:
                 list(evidence.aliases),
                 evidence.payload_identity,
                 evidence.content,
+                evidence.source_adapter_version,
             )
             actual = (UUID(str(existing[1])), *existing[2:])
             if actual != expected:
@@ -504,7 +516,13 @@ class ExposureRepository:
         return UUID(str(row[0]))
 
     @staticmethod
-    def _from_row(connection: psycopg.Connection[Any], row: dict[str, Any]) -> ExposureRecord:
+    def _from_row(
+        connection: psycopg.Connection[Any],
+        row: dict[str, Any],
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> ExposureRecord:
+        set_statement_deadline(connection, deadline_monotonic)
         aliases = tuple(
             str(item["identifier"])
             for item in connection.execute(
@@ -516,6 +534,7 @@ class ExposureRepository:
                 (row["vulnerability_record_id"],),
             ).fetchall()
         )
+        set_statement_deadline(connection, deadline_monotonic)
         paths = tuple(
             tuple(str(part) for part in item["path"])
             for item in connection.execute(
@@ -531,6 +550,7 @@ class ExposureRepository:
             connection,
             assessment_run_id=UUID(str(row["assessment_run_id"])),
             exposure_id=UUID(str(row["id"])),
+            deadline_monotonic=deadline_monotonic,
         )
         return ExposureRecord(
             id=UUID(str(row["id"])),
@@ -582,13 +602,16 @@ class ExposureRepository:
         *,
         assessment_run_id: UUID,
         exposure_id: UUID,
+        deadline_monotonic: float | None = None,
     ) -> tuple[EvidenceRecordRecord, ...]:
+        set_statement_deadline(connection, deadline_monotonic)
         rows = connection.execute(
             """
             SELECT evidence_records.id, evidence_records.identity_key,
                    evidence_records.captured_at, evidence_records.content_digest,
                    evidence_records.attribution, evidence_records.aliases,
                    evidence_records.payload_identity, evidence_records.content,
+                   evidence_records.source_adapter_version,
                    sources.identity_key AS source_identity, sources.authority,
                    sources.location, assessment_run_exposure_evidence.relationship
             FROM assessment_run_exposure_evidence
@@ -603,6 +626,7 @@ class ExposureRepository:
         ).fetchall()
         records: list[EvidenceRecordRecord] = []
         for evidence in rows:
+            set_statement_deadline(connection, deadline_monotonic)
             passages = connection.execute(
                 """
                 SELECT evidence_passages.id, evidence_passages.identity_key,
@@ -635,6 +659,7 @@ class ExposureRepository:
                         authority=str(evidence["authority"]),
                         location=str(evidence["location"]),
                     ),
+                    source_adapter_version=str(evidence["source_adapter_version"]),
                     captured_at=evidence["captured_at"],
                     content_digest=str(evidence["content_digest"]),
                     attribution=str(evidence["attribution"]),

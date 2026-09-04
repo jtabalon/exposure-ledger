@@ -24,6 +24,7 @@ from exposure_ledger import (
     ExposureRanking,
     ExposureSeverity,
     OperatingSystem,
+    PolicyDecision,
     PolicyResult,
     SourceObservationState,
     validate_asset_snapshot_request,
@@ -48,6 +49,8 @@ from exposure_ledger_storage import (
     ExposureRecord,
     ExposureRepository,
     ExposureRetrievalScopeNotFound,
+    InvestigationRepository,
+    InvestigationRevisionRecord,
     PackageInstanceRecord,
     PolicyDecisionRecord,
     RetrievalConfigurationNotCurrent,
@@ -106,6 +109,20 @@ class EmbeddingSpaceResponse(ApiModel):
         )
 
 
+class GenerationModelResponse(ApiModel):
+    provider: str
+    model_artifact: str
+    artifact_digest: str
+
+
+class GenerationReadinessResponse(ApiModel):
+    status: Literal["ready", "unavailable"]
+    code: str | None
+    message: str
+    setup: str | None
+    model: GenerationModelResponse | None
+
+
 class EmbeddingReadinessResponse(ApiModel):
     status: Literal["ready", "unavailable"]
     code: str | None
@@ -134,6 +151,7 @@ class HealthResponse(BaseModel):
     version: str
     inference_mode: Literal["local"]
     embeddings: EmbeddingReadinessResponse
+    generation: GenerationReadinessResponse
 
 
 class AssessmentPolicyContext(ApiModel):
@@ -593,6 +611,243 @@ class RetrievalEvaluationResponse(ApiModel):
         )
 
 
+class ClaimCitationResponse(ApiModel):
+    evidence_record_id: UUID
+    evidence_record_identity: str
+    passage_identities: list[str]
+    relationship: str
+
+
+class InvestigationClaimResponse(ApiModel):
+    identity: str
+    kind: str
+    text: str
+    material: bool
+    limitation: str | None
+    supported: bool
+    citations: list[ClaimCitationResponse]
+
+
+class RevisionEvidenceRecordResponse(ApiModel):
+    record_id: UUID
+    record_identity: str
+    content_digest: str
+    source_identity: str
+    source_adapter_version: str
+    passage_identities: list[str]
+
+
+class RevisionRetrievedPassageResponse(ApiModel):
+    evidence_record_id: UUID
+    evidence_record_identity: str
+    evidence_record_digest: str
+    passage_identity: str
+    passage: str
+    source_identity: str
+    source_authority: str
+    source_location: str
+    captured_at: datetime
+    full_text_rank: int | None
+    full_text_score: float | None
+    vector_rank: int | None
+    vector_score: float | None
+    fused_rank: int
+    fused_score: float
+
+
+class RevisionRetrievedEvidenceResponse(ApiModel):
+    query: str
+    passages: list[RevisionRetrievedPassageResponse]
+
+
+class RevisionEvidenceStateResponse(ApiModel):
+    available: list[RevisionEvidenceRecordResponse]
+    retrieved: RevisionRetrievedEvidenceResponse
+    material_claims_supported: bool
+    authoritative_conflict: bool | None
+    validation_issues: list[str]
+
+
+class RevisionRecommendationResponse(ApiModel):
+    value: str
+    accepted: bool
+    reason: str
+    summary: str
+    reasons: list[str]
+    limitations: list[str]
+
+
+class RevisionPolicyDecisionResponse(ApiModel):
+    standard_version: str
+    assistance_class: AssistanceClass
+    action_level: ActionLevel
+    target_scope: str | None
+    authorization_scope: str | None
+    result: PolicyResult
+    rule_version: str
+    reason: str
+    enforcement_point: Literal["structured_output"] = "structured_output"
+
+    @classmethod
+    def from_domain(cls, decision: PolicyDecision) -> "RevisionPolicyDecisionResponse":
+        return cls(
+            standard_version=decision.standard_version,
+            assistance_class=decision.assistance_class,
+            action_level=decision.action_level,
+            target_scope=decision.target_scope,
+            authorization_scope=decision.authorization_scope,
+            result=decision.result,
+            rule_version=decision.rule_version,
+            reason=decision.reason,
+        )
+
+
+class InvestigationEventResponse(ApiModel):
+    stage: str
+    mode: str
+    detail: str
+    occurred_at: datetime
+
+
+class InvestigationMeasurementsResponse(ApiModel):
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: int
+    generation_model_calls: int
+    tool_calls: int
+    graph_transitions: int
+
+
+class InvestigationConfigurationResponse(ApiModel):
+    application_release: str
+    graph_version: str
+    prompt_version: str
+    policy_version: str
+    parser_version: str
+    retrieval_configuration_version: str
+    source_policy_version: str
+    source_adapter_versions: list[str]
+    generation_model: GenerationModelResponse
+    embedding_space: EmbeddingSpaceResponse
+
+
+class InvestigationRevisionResponse(ApiModel):
+    investigation_id: UUID
+    revision_number: int
+    id: UUID
+    assessment_run_id: UUID
+    exposure_id: UUID
+    asset_snapshot_id: UUID
+    status: str
+    stopping_condition: str
+    evidence_state: RevisionEvidenceStateResponse
+    claims: list[InvestigationClaimResponse]
+    recommendation: RevisionRecommendationResponse
+    output_policy_decision: RevisionPolicyDecisionResponse
+    events: list[InvestigationEventResponse]
+    measurements: InvestigationMeasurementsResponse
+    configuration: InvestigationConfigurationResponse
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, record: InvestigationRevisionRecord) -> "InvestigationRevisionResponse":
+        revision = record.revision
+        return cls(
+            investigation_id=record.investigation_id,
+            revision_number=record.revision_number,
+            id=revision.id,
+            assessment_run_id=revision.assessment_run_id,
+            exposure_id=revision.exposure_id,
+            asset_snapshot_id=revision.asset_snapshot_id,
+            status=revision.status,
+            stopping_condition=revision.stopping_condition,
+            evidence_state=RevisionEvidenceStateResponse(
+                available=[
+                    RevisionEvidenceRecordResponse(
+                        record_id=item.record_id,
+                        record_identity=item.record_identity,
+                        content_digest=item.content_digest,
+                        source_identity=item.source_identity,
+                        source_adapter_version=item.source_adapter_version,
+                        passage_identities=list(item.passage_identities),
+                    )
+                    for item in revision.evidence_state.available
+                ],
+                retrieved=RevisionRetrievedEvidenceResponse(
+                    query=revision.evidence_state.retrieved.query,
+                    passages=[
+                        RevisionRetrievedPassageResponse.model_validate(item, from_attributes=True)
+                        for item in revision.evidence_state.retrieved.passages
+                    ],
+                ),
+                material_claims_supported=(revision.evidence_state.material_claims_supported),
+                authoritative_conflict=revision.evidence_state.authoritative_conflict,
+                validation_issues=list(revision.evidence_state.validation_issues),
+            ),
+            claims=[
+                InvestigationClaimResponse(
+                    identity=claim.identity,
+                    kind=claim.kind,
+                    text=claim.text,
+                    material=claim.material,
+                    limitation=claim.limitation,
+                    supported=claim.supported,
+                    citations=[
+                        ClaimCitationResponse(
+                            evidence_record_id=citation.evidence_record_id,
+                            evidence_record_identity=citation.evidence_record_identity,
+                            passage_identities=list(citation.passage_identities),
+                            relationship=citation.relationship,
+                        )
+                        for citation in claim.citations
+                    ],
+                )
+                for claim in revision.claims
+            ],
+            recommendation=RevisionRecommendationResponse(
+                value=revision.recommendation.recommendation,
+                accepted=revision.recommendation.accepted,
+                reason=revision.recommendation.reason,
+                summary=revision.recommendation.summary,
+                reasons=list(revision.recommendation.reasons),
+                limitations=list(revision.recommendation.limitations),
+            ),
+            output_policy_decision=RevisionPolicyDecisionResponse.from_domain(
+                revision.output_policy_decision
+            ),
+            events=[
+                InvestigationEventResponse.model_validate(item, from_attributes=True)
+                for item in revision.events
+            ],
+            measurements=InvestigationMeasurementsResponse.model_validate(
+                revision.measurements, from_attributes=True
+            ),
+            configuration=InvestigationConfigurationResponse(
+                application_release=revision.configuration.application_release,
+                graph_version=revision.configuration.graph_version,
+                prompt_version=revision.configuration.prompt_version,
+                policy_version=revision.configuration.policy_version,
+                parser_version=revision.configuration.parser_version,
+                retrieval_configuration_version=(
+                    revision.configuration.retrieval_configuration_version
+                ),
+                source_policy_version=revision.configuration.source_policy_version,
+                source_adapter_versions=list(revision.configuration.source_adapter_versions),
+                generation_model=GenerationModelResponse.model_validate(
+                    revision.configuration.generation_model, from_attributes=True
+                ),
+                embedding_space=EmbeddingSpaceResponse.from_domain(
+                    revision.configuration.embedding_space
+                ),
+            ),
+            created_at=revision.created_at,
+        )
+
+
+class InvestigationRevisionListResponse(ApiModel):
+    items: list[InvestigationRevisionResponse]
+
+
 def _not_found(assessment_run_id: UUID) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
@@ -633,6 +888,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     repository = AssessmentRunRepository(configured_settings.database_url)
     snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
     exposure_repository = ExposureRepository(configured_settings.database_url)
+    investigation_repository = InvestigationRepository(configured_settings.database_url)
     evidence_retriever = EvidenceRetriever(configured_settings.database_url)
 
     @asynccontextmanager
@@ -640,6 +896,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         repository.check_ready()
         snapshot_repository.check_ready()
         exposure_repository.check_ready()
+        investigation_repository.check_ready()
         evidence_retriever.check_ready()
         yield
 
@@ -718,12 +975,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/health", response_model=HealthResponse, tags=["operations"])
     def health() -> HealthResponse:
         embedding_readiness = evidence_retriever.embedding_readiness()
+        generation_readiness = investigation_repository.generation_readiness()
         return HealthResponse(
-            status="ok" if embedding_readiness.status == "ready" else "degraded",
+            status=(
+                "ok"
+                if embedding_readiness.status == generation_readiness.status == "ready"
+                else "degraded"
+            ),
             service="exposure-ledger-api",
             version=APP_VERSION,
             inference_mode="local",
             embeddings=EmbeddingReadinessResponse.from_record(embedding_readiness),
+            generation=GenerationReadinessResponse(
+                status=generation_readiness.status,
+                code=generation_readiness.code,
+                message=generation_readiness.message,
+                setup=generation_readiness.setup,
+                model=(
+                    GenerationModelResponse.model_validate(
+                        generation_readiness.model, from_attributes=True
+                    )
+                    if generation_readiness.model is not None
+                    else None
+                ),
+            ),
         )
 
     @application.get(
@@ -912,6 +1187,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             items=[
                 ExposureResponse.from_record(item)
                 for item in exposure_repository.list_for_assessment(assessment_run_id)
+            ]
+        )
+
+    @application.get(
+        "/api/v1/assessment-runs/{assessment_run_id}/investigation-revisions",
+        response_model=InvestigationRevisionListResponse,
+        response_model_by_alias=True,
+        tags=["investigations"],
+    )
+    def list_assessment_investigation_revisions(
+        assessment_run_id: UUID,
+    ) -> InvestigationRevisionListResponse:
+        if repository.get(assessment_run_id) is None:
+            raise _not_found(assessment_run_id)
+        return InvestigationRevisionListResponse(
+            items=[
+                InvestigationRevisionResponse.from_record(item)
+                for item in investigation_repository.list_for_assessment(assessment_run_id)
             ]
         )
 

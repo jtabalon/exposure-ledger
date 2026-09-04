@@ -1,4 +1,4 @@
-.PHONY: install models infra-up infra-down migrate api worker web dev test check
+.PHONY: install models infra-up infra-down migrate api worker web dev test check check-real-model
 
 APP_PYTHONPATH := apps/api/src:apps/worker/src:packages/domain/src:packages/storage/src
 
@@ -43,3 +43,7 @@ check:
 	pnpm --filter @exposure-ledger/web lint
 	pnpm --filter @exposure-ledger/web typecheck
 	pnpm --filter @exposure-ledger/web build
+
+check-real-model:
+	EXPOSURE_LEDGER_RUN_REAL_MODEL_CHECK=1 PYTHONPATH="$(APP_PYTHONPATH)" \
+		uv run pytest -m real_model apps/worker/tests/test_real_generation_model.py

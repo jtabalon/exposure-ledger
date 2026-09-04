@@ -16,8 +16,7 @@ export type DemoEvidenceRecord = {
   source: string
   authority: string
   capturedAt: string
-  relationship: EvidenceRelationship
-  claimIds: string[]
+  relationships: { claimId: string; relationship: EvidenceRelationship }[]
   passage: string
   fullTextRank: number | null
   fullTextScore: number | null
@@ -36,6 +35,8 @@ export type InvestigationStage = {
 
 export type DemoInvestigation = {
   meta: {
+    mode: "live" | "precomputed"
+    status: "complete" | "incomplete"
     repository: string
     commit: string
     projectRoot: string
@@ -51,7 +52,7 @@ export type DemoInvestigation = {
     installedVersion: string
     affectedRange: string
     fixedVersion: string
-    authoritativeConflict: boolean
+    authoritativeConflict: boolean | null
     advisoryGuidance: {
       source: string
       authority: string
@@ -98,6 +99,8 @@ export type DemoInvestigation = {
 
 export const demoInvestigation: DemoInvestigation = {
   meta: {
+    mode: "precomputed",
+    status: "incomplete",
     repository: "northstar-labs/harbor-api",
     commit: "4f92c7d",
     projectRoot: "services/api",
@@ -211,8 +214,7 @@ export const demoInvestigation: DemoInvestigation = {
       source: "uv.lock at 4f92c7d",
       authority: "Asset Snapshot",
       capturedAt: "2026-08-28 16:40 UTC",
-      relationship: "supports",
-      claimIds: ["claim-version"],
+      relationships: [{ claimId: "claim-version", relationship: "supports" }],
       passage: 'name = "cipherleaf" · version = "2.4.1" · via auth-gateway',
       fullTextRank: 1,
       fullTextScore: 0.941,
@@ -227,8 +229,10 @@ export const demoInvestigation: DemoInvestigation = {
       source: "Synthetic maintainer advisory",
       authority: "Maintainer · Tier 1",
       capturedAt: "2026-08-28 16:41 UTC",
-      relationship: "contradicts",
-      claimIds: ["claim-version", "claim-fix"],
+      relationships: [
+        { claimId: "claim-version", relationship: "contradicts" },
+        { claimId: "claim-fix", relationship: "contradicts" },
+      ],
       passage:
         "Releases from 2.1.0 through 2.4.2 are affected. Consumers should upgrade to cipherleaf 2.4.3 or later.",
       fullTextRank: 2,
@@ -244,8 +248,10 @@ export const demoInvestigation: DemoInvestigation = {
       source: "Synthetic public vulnerability record",
       authority: "Public database · Tier 1",
       capturedAt: "2026-08-28 16:41 UTC",
-      relationship: "contradicts",
-      claimIds: ["claim-version", "claim-fix"],
+      relationships: [
+        { claimId: "claim-version", relationship: "contradicts" },
+        { claimId: "claim-fix", relationship: "contradicts" },
+      ],
       passage:
         "The public record lists releases before 2.4.2 as affected and names 2.4.2 as fixed.",
       fullTextRank: 3,
@@ -261,8 +267,7 @@ export const demoInvestigation: DemoInvestigation = {
       source: "Synthetic KEV record",
       authority: "Government · Tier 1",
       capturedAt: "2026-08-28 16:41 UTC",
-      relationship: "supports",
-      claimIds: ["claim-priority"],
+      relationships: [{ claimId: "claim-priority", relationship: "supports" }],
       passage:
         "This synthetic record exists only to demonstrate how known-exploitation evidence changes investigation priority.",
       fullTextRank: 4,
@@ -278,8 +283,7 @@ export const demoInvestigation: DemoInvestigation = {
       source: "services/api/auth/session.py",
       authority: "Repository context",
       capturedAt: "2026-08-28 16:40 UTC",
-      relationship: "contextual",
-      claimIds: ["claim-usage"],
+      relationships: [{ claimId: "claim-usage", relationship: "contextual" }],
       passage: "from cipherleaf.tokens import verify_session",
       fullTextRank: null,
       fullTextScore: null,

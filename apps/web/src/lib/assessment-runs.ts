@@ -43,6 +43,20 @@ export type AssessmentRunErrorCode =
   | "invalid_first_party_advisory"
   | "first_party_advisory_policy_blocked"
   | "first_party_advisory_unavailable"
+  | "embedding_content_policy_blocked"
+  | "embedding_index_failed"
+  | "embedding_model_not_installed"
+  | "embedding_provider_unavailable"
+  | "embedding_runtime_unavailable"
+  | "generation_artifact_changed"
+  | "generation_cloud_model_rejected"
+  | "generation_invalid_structured_output"
+  | "generation_model_not_current"
+  | "generation_model_not_installed"
+  | "generation_prompt_not_current"
+  | "generation_provider_invalid_response"
+  | "generation_provider_unavailable"
+  | "generation_runtime_unavailable"
   | "osv_lookup_policy_blocked"
   | "osv_unavailable"
   | "repository_fetch_policy_blocked"
@@ -61,7 +75,7 @@ export type PolicyDecision = {
   ruleVersion: string
   reason: string
   createdAt: string
-  enforcementPoint: "request" | "tool_call"
+  enforcementPoint: "request" | "tool_call" | "retrieved_content" | "structured_output"
 }
 
 export type AssessmentRun = {
@@ -92,7 +106,12 @@ export type PolicyDecisionCollection = {
 
 export async function loadCollection<T>(
   resource: string,
-  contractName: "Assessment" | "Asset Snapshot" | "Exposure" | "Policy",
+  contractName:
+    | "Assessment"
+    | "Asset Snapshot"
+    | "Exposure"
+    | "Investigation Revision"
+    | "Policy",
 ): Promise<{ items: T[]; error: string | null }> {
   try {
     const response = await fetch(`${apiBaseUrl()}/api/v1/${resource}`, {

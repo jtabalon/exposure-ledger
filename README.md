@@ -62,12 +62,14 @@ Local model downloads remain explicit and are not needed for the synthetic Asses
 make models
 ```
 
-`GET /health` reports the worker's latest persisted local-embedding readiness observation. The
-worker refreshes it every ten seconds and the API rejects observations older than thirty seconds. If
-Ollama is stopped or the configured artifact is missing, health is `degraded` and includes the
-exact local setup command; the application never calls Ollama's pull endpoint and never substitutes
-a hosted provider. `OLLAMA_BASE_URL` must be an HTTP loopback URL. Cloud-tagged artifacts and model
-inventory entries that resolve to a remote model are rejected.
+`GET /health` reports the worker's latest persisted local embedding and generation readiness
+observations. The worker refreshes them every ten seconds and the API rejects observations older
+than thirty seconds. If Ollama is stopped or either configured artifact is missing, health is
+`degraded` and includes the exact local setup command; the application never calls Ollama's pull
+endpoint and never substitutes a hosted provider. `OLLAMA_BASE_URL` must be an HTTP loopback URL.
+Cloud-tagged artifacts and model inventory entries that resolve to a remote model are rejected.
+The production worker records the failed readiness observation and exits at startup when the pinned
+generation artifact is unavailable, so the API can report the exact missing setup step.
 
 Create and inspect the tracer Assessment Run through the versioned API:
 
@@ -136,6 +138,16 @@ with unknown dependency provenance contributing no directness or proximity point
 visible in the response. Stable vulnerability aliases and package identity are used as tie-breakers.
 No generation model participates in matching, identity, ranking, or selection.
 
+The bounded Investigation runner then loads each selected Exposure, acquires its immutable evidence,
+runs the pinned hybrid retrieval query, requests schema-constrained local generation, validates
+Claim provenance, Recommendation evidence sufficiency, and output cyber policy, and atomically
+seals an immutable Revision. Evidence captures carry their actual Source adapter version; each
+Revision must pin the exact Source-to-adapter-version mapping before persistence accepts it.
+To keep the wall-time limit absolute during PostgreSQL connection establishment, bounded
+Investigation access accepts `localhost`, one numeric host/hostaddr, or an explicit Unix socket;
+libpq service definitions, multi-host URLs, and DNS hostnames are rejected instead of multiplying
+the per-address connection timeout.
+
 After evidence capture, the worker records a retrieved-content Policy Decision, then records passage
 representations in PostgreSQL under an immutable Embedding Space. Its identity covers the local
 provider, model artifact and immutable digest, dimensions, retrieval instruction, normalizer, and
@@ -181,7 +193,11 @@ make check
 `make test` starts PostgreSQL and creates isolated databases for API integration tests. Deterministic
 known-answer providers verify fusion, isolation, outage behavior, and recall reporting. A real-model
 evaluation remains a separate release gate because CI does not download or assume access to the
-pinned local artifact.
+pinned local artifact. After explicitly installing the models with `make models`, run that gate with:
+
+```bash
+make check-real-model
+```
 
 ## Core documentation
 

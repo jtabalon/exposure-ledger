@@ -36,7 +36,12 @@ import { ExposureQueuePanel } from "@/components/exposure-queue-panel"
 import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
 import type { AssetSnapshot } from "@/lib/asset-snapshots"
 import type { Exposure } from "@/lib/exposures"
-import { evidenceForClaim, evidenceRelationshipLabels } from "@/lib/evidence"
+import {
+  claimsForEvidence,
+  evidenceForClaim,
+  evidenceRelationshipLabels,
+  relationshipsForClaim,
+} from "@/lib/evidence"
 import type {
   DemoInvestigation,
   EvidenceRelationship,
@@ -55,6 +60,19 @@ const relationshipStyles: Record<EvidenceRelationship, string> = {
   supports: "border-emerald-700/20 bg-emerald-700/7 text-emerald-800",
   contradicts: "border-red-700/20 bg-red-700/7 text-red-800",
   contextual: "border-amber-700/20 bg-amber-700/7 text-amber-800",
+}
+
+function recommendationOutcome(label: string) {
+  switch (label) {
+    case "More Evidence Required":
+      return " needs more evidence"
+    case "No Remediation Indicated":
+      return " has no indicated remediation"
+    case "Monitor":
+      return " should be monitored"
+    default:
+      return " requires action"
+  }
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -95,9 +113,17 @@ export function InvestigationWorkbench({
   policyDecisions: PolicyDecision[]
   policyDecisionsError: string | null
 }) {
-  const [selectedClaimId, setSelectedClaimId] = useState(investigation.claims[0].id)
+  const [selectedClaimId, setSelectedClaimId] = useState<string | null>(
+    investigation.claims[0]?.id ?? null,
+  )
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null)
-  const selectedClaim = investigation.claims.find(({ id }) => id === selectedClaimId)!
+  const selectedClaim = investigation.claims.find(({ id }) => id === selectedClaimId)
+  const selectedEvidence = investigation.evidence.find(({ id }) => id === selectedEvidenceId)
+  const claimsLinkedToSelectedEvidence = new Set(
+    selectedEvidence
+      ? claimsForEvidence(investigation.claims, selectedEvidence).map(({ id }) => id)
+      : [],
+  )
   const navigation = [
     { label: "Assessment Runs", icon: Activity, count: String(assessmentRuns.length), active: true },
     { label: "Asset Snapshots", icon: Database, count: String(assetSnapshots.length) },
@@ -107,9 +133,11 @@ export function InvestigationWorkbench({
   ]
   const relatedEvidence = useMemo(
     () =>
-      evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
-        (left, right) => left.fusedRank - right.fusedRank,
-      ),
+      selectedClaimId
+        ? evidenceForClaim(investigation.evidence, selectedClaimId).toSorted(
+            (left, right) => left.fusedRank - right.fusedRank,
+          )
+        : investigation.evidence.toSorted((left, right) => left.fusedRank - right.fusedRank),
     [investigation.evidence, selectedClaimId],
   )
 
@@ -121,7 +149,7 @@ export function InvestigationWorkbench({
   function selectEvidence(evidenceId: string, claimIds: string[]) {
     setSelectedEvidenceId(evidenceId)
     const firstClaimId = claimIds[0]
-    if (firstClaimId && !claimIds.includes(selectedClaimId)) {
+    if (firstClaimId && (!selectedClaimId || !claimIds.includes(selectedClaimId))) {
       setSelectedClaimId(firstClaimId)
     }
   }
@@ -197,7 +225,9 @@ export function InvestigationWorkbench({
               variant="outline"
               className="shrink-0 border-amber-600/30 bg-amber-600/8 text-[10px] font-semibold tracking-[0.1em] text-amber-800 uppercase"
             >
-              Synthetic precomputed demo
+              {investigation.meta.mode === "live"
+                ? "Live local revision"
+                : "Synthetic precomputed demo"}
             </Badge>
           </div>
         </div>
@@ -225,11 +255,17 @@ export function InvestigationWorkbench({
                   <Badge variant="outline" className="bg-card font-mono">
                     {investigation.exposure.vulnerability}
                   </Badge>
-                  <span className="text-xs text-muted-foreground">Ready for review</span>
+                  <span className="text-xs text-muted-foreground">
+                    {investigation.meta.status === "complete"
+                      ? "Ready for review"
+                      : "Incomplete · review evidence gaps"}
+                  </span>
                 </div>
                 <h1 className="text-balance text-2xl leading-tight font-semibold tracking-[-0.025em] sm:text-3xl">
                   {investigation.exposure.packageName} {investigation.exposure.installedVersion}
-                  <span className="font-normal text-muted-foreground"> requires action</span>
+                  <span className="font-normal text-muted-foreground">
+                    {recommendationOutcome(investigation.recommendation.label)}
+                  </span>
                 </h1>
                 <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
                   <span className="flex items-center gap-1.5">
@@ -298,7 +334,9 @@ export function InvestigationWorkbench({
                     <span className="font-mono text-xs">
                       {investigation.exposure.authoritativeConflict
                         ? "Conflicting guidance — compare Sources"
-                        : investigation.exposure.affectedRange}
+                        : investigation.exposure.authoritativeConflict === null
+                          ? "Not checked — evidence acquisition stopped"
+                          : investigation.exposure.affectedRange}
                     </span>
                   }
                 />
@@ -308,7 +346,9 @@ export function InvestigationWorkbench({
                     <span className="font-mono">
                       {investigation.exposure.authoritativeConflict
                         ? "Unresolved"
-                        : investigation.exposure.fixedVersion}
+                        : investigation.exposure.authoritativeConflict === null
+                          ? "Not checked"
+                          : investigation.exposure.fixedVersion}
                     </span>
                   }
                 />
@@ -322,7 +362,14 @@ export function InvestigationWorkbench({
               </dl>
             </div>
 
-            {investigation.exposure.authoritativeConflict ? (
+            {investigation.exposure.authoritativeConflict === null ? (
+              <div
+                role="status"
+                className="mt-4 border-l-2 border-amber-600 bg-amber-500/8 p-3 text-xs leading-5"
+              >
+                Evidence acquisition stopped before authoritative conflict could be checked.
+              </div>
+            ) : investigation.exposure.authoritativeConflict ? (
               <div
                 role="status"
                 className="mt-4 border-l-2 border-red-700 bg-red-700/7 p-3 text-xs leading-5 text-red-950"
@@ -435,8 +482,18 @@ export function InvestigationWorkbench({
             </div>
 
             <div className="space-y-2" aria-label="Investigation claims">
+              {investigation.claims.length === 0 ? (
+                <div role="status" className="border-l-2 border-amber-600 bg-amber-600/8 p-4">
+                  <p className="text-sm font-semibold">No validated Claims were retained.</p>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    This incomplete Revision preserves the stopping condition and evidence state
+                    without inventing a conclusion.
+                  </p>
+                </div>
+              ) : null}
               {investigation.claims.map((claim) => {
                 const selected = claim.id === selectedClaimId
+                const linkedToSelectedEvidence = claimsLinkedToSelectedEvidence.has(claim.id)
                 const evidenceCount = evidenceForClaim(investigation.evidence, claim.id).length
                 return (
                   <button
@@ -448,6 +505,8 @@ export function InvestigationWorkbench({
                       "group w-full rounded-md border p-4 text-left transition-[background-color,border-color,transform] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
                       selected
                         ? "border-primary/40 bg-accent/55"
+                        : linkedToSelectedEvidence
+                          ? "border-primary/30 bg-primary/5 ring-2 ring-primary/10"
                         : "bg-card hover:-translate-y-px hover:border-primary/20 hover:bg-muted/30",
                     )}
                   >
@@ -501,7 +560,9 @@ export function InvestigationWorkbench({
                   Evidence trace
                 </SectionLabel>
                 <h2 id="evidence-heading" className="text-lg font-semibold tracking-tight">
-                  Evidence used by {selectedClaim.label}
+                  {selectedClaim
+                    ? `Evidence used by ${selectedClaim.label}`
+                    : "Evidence available to this Revision"}
                 </h2>
               </div>
               <Badge variant="secondary" className="font-mono text-[10px]">
@@ -560,6 +621,9 @@ export function InvestigationWorkbench({
             <div className="space-y-3">
               {relatedEvidence.map((record) => {
                 const selected = record.id === selectedEvidenceId
+                const selectedRelationships = selectedClaimId
+                  ? relationshipsForClaim(record, selectedClaimId)
+                  : []
                 return (
                   <article
                     key={record.id}
@@ -570,7 +634,14 @@ export function InvestigationWorkbench({
                   >
                     <button
                       type="button"
-                      onClick={() => selectEvidence(record.id, record.claimIds)}
+                      onClick={() =>
+                        selectEvidence(
+                          record.id,
+                          Array.from(
+                            new Set(record.relationships.map(({ claimId }) => claimId)),
+                          ),
+                        )
+                      }
                       aria-pressed={selected}
                       className="w-full text-left focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                     >
@@ -583,16 +654,21 @@ export function InvestigationWorkbench({
                             <span className="font-mono">{record.capturedAt}</span>
                           </div>
                         </div>
-                        <Badge
-                          variant="outline"
-                          aria-label={`Evidence relationship: ${evidenceRelationshipLabels[record.relationship]}`}
-                          className={cn(
-                            "shrink-0 text-[9px] tracking-[0.08em] uppercase",
-                            relationshipStyles[record.relationship],
-                          )}
-                        >
-                          {evidenceRelationshipLabels[record.relationship]}
-                        </Badge>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                          {selectedRelationships.map((relationship, index) => (
+                            <Badge
+                              key={`${relationship}-${index}`}
+                              variant="outline"
+                              aria-label={`Evidence relationship: ${evidenceRelationshipLabels[relationship]}`}
+                              className={cn(
+                                "text-[9px] tracking-[0.08em] uppercase",
+                                relationshipStyles[relationship],
+                              )}
+                            >
+                              {evidenceRelationshipLabels[relationship]}
+                            </Badge>
+                          ))}
+                        </div>
                       </div>
 
                       <blockquote className="my-4 border-l-2 border-primary/25 pl-4 text-sm leading-6 text-[var(--ink-soft)]">
@@ -639,23 +715,26 @@ export function InvestigationWorkbench({
 
                     <div className="mt-3 flex items-center gap-1.5 border-t pt-3 text-[10px] text-muted-foreground">
                       <span>Used by</span>
-                      {record.claimIds.map((claimId) => {
-                        const claim = investigation.claims.find(({ id }) => id === claimId)!
-                        return (
-                          <button
-                            key={claimId}
-                            type="button"
-                            onClick={() => selectClaim(claimId)}
-                            className={cn(
-                              "rounded-sm border px-1.5 py-0.5 font-mono font-semibold transition-colors hover:border-primary/40 hover:text-primary",
-                              claimId === selectedClaimId &&
-                                "border-primary/35 bg-primary/8 text-primary",
-                            )}
-                          >
-                            {claim.label}
-                          </button>
-                        )
-                      })}
+                      {Array.from(new Set(record.relationships.map(({ claimId }) => claimId))).map(
+                        (claimId) => {
+                          const claim = investigation.claims.find(({ id }) => id === claimId)
+                          if (!claim) return null
+                          return (
+                            <button
+                              key={claimId}
+                              type="button"
+                              onClick={() => selectClaim(claimId)}
+                              className={cn(
+                                "rounded-sm border px-1.5 py-0.5 font-mono font-semibold transition-colors hover:border-primary/40 hover:text-primary",
+                                claimId === selectedClaimId &&
+                                  "border-primary/35 bg-primary/8 text-primary",
+                              )}
+                            >
+                              {claim.label}
+                            </button>
+                          )
+                        },
+                      )}
                     </div>
                   </article>
                 )
@@ -670,7 +749,11 @@ export function InvestigationWorkbench({
         </div>
 
         <footer className="mx-auto flex max-w-[1600px] flex-col gap-2 border-x border-b bg-card px-5 py-4 text-[10px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-6">
-          <span>This screen contains synthetic data for interface evaluation.</span>
+          <span>
+            {investigation.meta.mode === "live"
+              ? "This Revision was generated by the local Investigation runner."
+              : "This screen contains synthetic data for interface evaluation."}
+          </span>
           <span className="font-mono">
             graph v0.1 · policy v0.1 · prompt demo-001 · retrieval{" "}
             {investigation.retrieval.configurationVersion}

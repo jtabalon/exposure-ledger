@@ -9,7 +9,7 @@ class InvestigationRunner(Protocol):
 
 `RunInvestigation` identifies an existing Exposure, the evidence and execution budgets, and pinned configuration versions. The returned immutable revision contains the stopping condition, Claims, Evidence relationships, Recommendation, Policy Decisions, events, and operational measurements.
 
-This is the selected external seam because it gives API and worker callers one correct operation while hiding graph stages, retry mechanics, source adapters, model payloads, checkpointing, and validation.
+This is the selected external seam because it gives API and worker callers one correct operation while hiding graph stages, retry mechanics, source adapters, model payloads, and validation.
 
 ## Alternatives considered
 

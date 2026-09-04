@@ -145,6 +145,8 @@ class OsvBatchResponse:
 class OsvSourceAdapter:
     """Capture one OSV vulnerability payload under shared provenance rules."""
 
+    version = "osv-v1"
+
     def capture(
         self,
         payload: Mapping[str, Any],
@@ -175,7 +177,9 @@ class OsvSourceAdapter:
             authority="Open Source Vulnerabilities",
             location=f"https://api.osv.dev/v1/vulns/{quote(identifier, safe='')}",
         )
-        evidence_identity = _evidence_identity(source, identifier, content_digest)
+        evidence_identity = _evidence_identity(
+            source, identifier, content_digest, adapter_version=self.version
+        )
         affected = payload.get("affected", [])
         if not isinstance(affected, Sequence) or isinstance(affected, (str, bytes)):
             raise OsvResponseRejected("OSV affected packages must be an array")
@@ -196,6 +200,7 @@ class OsvSourceAdapter:
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
+            source_adapter_version=self.version,
             captured_at=captured_at,
             content_digest=content_digest,
             attribution="Open Source Vulnerabilities (OSV)",
@@ -208,6 +213,8 @@ class OsvSourceAdapter:
 
 class OsvQueryBatchSourceAdapter:
     """Capture one OSV query-batch page and its package-aligned result passages."""
+
+    version = "osv-v1"
 
     def __init__(self, *, payload_identity: str) -> None:
         self._payload_identity = payload_identity
@@ -230,11 +237,14 @@ class OsvQueryBatchSourceAdapter:
             authority="Open Source Vulnerabilities",
             location="https://api.osv.dev/v1/querybatch",
         )
-        evidence_identity = _evidence_identity(source, self._payload_identity, content_digest)
+        evidence_identity = _evidence_identity(
+            source, self._payload_identity, content_digest, adapter_version=self.version
+        )
         aliases = tuple(sorted(_batch_vulnerability_identifiers(results)))
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
+            source_adapter_version=self.version,
             captured_at=captured_at,
             content_digest=content_digest,
             attribution="Open Source Vulnerabilities (OSV)",
@@ -658,9 +668,15 @@ def _validated_capture(
     return capture.content, content_digest, capture.captured_at.astimezone(UTC)
 
 
-def _evidence_identity(source: Source, payload_identity: str, content_digest: str) -> str:
+def _evidence_identity(
+    source: Source,
+    payload_identity: str,
+    content_digest: str,
+    *,
+    adapter_version: str,
+) -> str:
     identity_material = "\n".join(
-        (source.identity, source.location, payload_identity, content_digest)
+        (source.identity, source.location, adapter_version, payload_identity, content_digest)
     )
     return f"sha256:{hashlib.sha256(identity_material.encode()).hexdigest()}"
 

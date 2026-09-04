@@ -791,6 +791,243 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         FOR EACH ROW EXECUTE FUNCTION reject_embedding_mutation();
         """,
     ),
+    (
+        15,
+        """
+        ALTER TABLE policy_decisions
+            DROP CONSTRAINT policy_decisions_enforcement_point_check,
+            ADD CONSTRAINT policy_decisions_enforcement_point_check
+                CHECK (enforcement_point IN (
+                    'request', 'tool_call', 'retrieved_content', 'structured_output'
+                ));
+
+        ALTER TABLE evidence_records ADD COLUMN source_adapter_version text;
+        UPDATE evidence_records
+        SET source_adapter_version = CASE sources.identity_key
+            WHEN 'osv' THEN 'osv-v1'
+            WHEN 'cisa-kev' THEN 'cisa-kev-v1'
+            WHEN 'first-epss' THEN 'first-epss-v1'
+            WHEN 'github_repository_security_advisory'
+                THEN 'github-repository-advisory-v1'
+            ELSE 'legacy-source-adapter-v1'
+        END
+        FROM sources
+        WHERE sources.id = evidence_records.source_id;
+        ALTER TABLE evidence_records ALTER COLUMN source_adapter_version SET NOT NULL;
+
+        CREATE TABLE investigations (
+            id uuid PRIMARY KEY,
+            exposure_id uuid NOT NULL UNIQUE REFERENCES exposures(id) ON DELETE RESTRICT,
+            created_at timestamptz NOT NULL
+        );
+
+        CREATE TABLE generation_provider_observations (
+            singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+            observed_at timestamptz NOT NULL DEFAULT now(),
+            status text NOT NULL CHECK (status IN ('ready', 'unavailable')),
+            code text,
+            message text NOT NULL,
+            setup text,
+            provider text,
+            model_artifact text,
+            artifact_digest text CHECK (
+                artifact_digest IS NULL OR artifact_digest LIKE 'sha256:%'
+            ),
+            CHECK (
+                (status = 'ready' AND code IS NULL AND setup IS NULL
+                    AND provider IS NOT NULL AND model_artifact IS NOT NULL
+                    AND artifact_digest IS NOT NULL)
+                OR
+                (status = 'unavailable' AND code IS NOT NULL
+                    AND provider IS NULL AND model_artifact IS NULL
+                    AND artifact_digest IS NULL)
+            )
+        );
+
+        CREATE TABLE investigation_revisions (
+            id uuid PRIMARY KEY,
+            investigation_id uuid NOT NULL REFERENCES investigations(id) ON DELETE RESTRICT,
+            revision_number integer NOT NULL CHECK (revision_number > 0),
+            assessment_run_id uuid NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
+            asset_snapshot_id uuid NOT NULL REFERENCES asset_snapshots(id) ON DELETE RESTRICT,
+            status text NOT NULL CHECK (status IN ('complete', 'incomplete')),
+            stopping_condition text NOT NULL CHECK (stopping_condition IN (
+                'completed', 'wall_time_budget_exhausted',
+                'graph_transition_budget_exhausted', 'tool_call_budget_exhausted',
+                'generation_model_call_budget_exhausted',
+                'generation_provider_unavailable', 'generation_runtime_unavailable',
+                'generation_model_not_installed', 'generation_model_not_current',
+                'generation_cloud_model_rejected', 'generation_provider_invalid_response',
+                'generation_prompt_not_current', 'generation_artifact_changed',
+                'generation_invalid_structured_output', 'structured_output_policy_blocked'
+            )),
+            CHECK ((status = 'complete') = (stopping_condition = 'completed')),
+            material_claims_supported boolean NOT NULL,
+            authoritative_conflict boolean,
+            validation_issues text[] NOT NULL,
+            retrieval_query text NOT NULL,
+            retrieved_passages jsonb NOT NULL,
+            recommendation text NOT NULL CHECK (recommendation IN (
+                'urgent_remediation', 'planned_remediation', 'monitor',
+                'no_remediation_indicated', 'more_evidence_required'
+            )),
+            recommendation_accepted boolean NOT NULL,
+            recommendation_reason text NOT NULL,
+            recommendation_summary text NOT NULL,
+            recommendation_reasons text[] NOT NULL,
+            recommendation_limitations text[] NOT NULL,
+            output_policy_decision_id uuid NOT NULL UNIQUE
+                REFERENCES policy_decisions(id) ON DELETE RESTRICT,
+            events jsonb NOT NULL,
+            measurements jsonb NOT NULL,
+            application_release text NOT NULL,
+            graph_version text NOT NULL,
+            prompt_version text NOT NULL,
+            policy_version text NOT NULL,
+            parser_version text NOT NULL,
+            retrieval_configuration_version text NOT NULL,
+            source_policy_version text NOT NULL,
+            source_adapter_versions text[] NOT NULL,
+            generation_provider text NOT NULL,
+            generation_model_artifact text NOT NULL,
+            generation_artifact_digest text NOT NULL
+                CHECK (generation_artifact_digest LIKE 'sha256:%'),
+            embedding_space_identity text NOT NULL
+                REFERENCES embedding_spaces(identity_key) ON DELETE RESTRICT,
+            sealed boolean NOT NULL DEFAULT false,
+            created_at timestamptz NOT NULL,
+            UNIQUE (investigation_id, revision_number)
+        );
+
+        CREATE INDEX investigation_revisions_assessment_idx
+            ON investigation_revisions (assessment_run_id, created_at DESC, id DESC);
+
+        CREATE TABLE investigation_revision_evidence (
+            revision_id uuid NOT NULL
+                REFERENCES investigation_revisions(id) ON DELETE RESTRICT,
+            evidence_record_id uuid NOT NULL REFERENCES evidence_records(id) ON DELETE RESTRICT,
+            content_digest text NOT NULL CHECK (content_digest LIKE 'sha256:%'),
+            available_passage_identities text[] NOT NULL,
+            retrieved_passage_identities text[] NOT NULL,
+            PRIMARY KEY (revision_id, evidence_record_id)
+        );
+
+        CREATE TABLE claims (
+            id uuid PRIMARY KEY,
+            revision_id uuid NOT NULL
+                REFERENCES investigation_revisions(id) ON DELETE RESTRICT,
+            identity_key text NOT NULL,
+            ordinal integer NOT NULL CHECK (ordinal > 0),
+            kind text NOT NULL CHECK (kind IN ('fact', 'inference')),
+            claim_text text NOT NULL,
+            material boolean NOT NULL,
+            limitation text,
+            supported boolean NOT NULL,
+            UNIQUE (revision_id, identity_key),
+            UNIQUE (revision_id, ordinal)
+        );
+
+        CREATE TABLE claim_evidence_relationships (
+            claim_id uuid NOT NULL REFERENCES claims(id) ON DELETE RESTRICT,
+            evidence_record_id uuid NOT NULL REFERENCES evidence_records(id) ON DELETE RESTRICT,
+            relationship text NOT NULL
+                CHECK (relationship IN ('supports', 'contradicts', 'contextual')),
+            passage_identities text[] NOT NULL,
+            PRIMARY KEY (claim_id, evidence_record_id, relationship)
+        );
+
+        CREATE FUNCTION reject_investigation_history_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Investigation history is immutable';
+        END;
+        $$;
+
+        CREATE TRIGGER investigations_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON investigations
+        FOR EACH ROW EXECUTE FUNCTION reject_investigation_history_mutation();
+
+        CREATE FUNCTION allow_only_investigation_revision_seal()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NOT OLD.sealed AND NEW.sealed
+               AND (to_jsonb(NEW) - 'sealed') = (to_jsonb(OLD) - 'sealed') THEN
+                RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'Investigation history is immutable';
+        END;
+        $$;
+
+        CREATE FUNCTION protect_investigation_revision_children()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            revision_is_sealed boolean;
+        BEGIN
+            IF TG_OP <> 'INSERT' THEN
+                RAISE EXCEPTION 'Investigation history is immutable';
+            END IF;
+            IF TG_TABLE_NAME = 'claim_evidence_relationships' THEN
+                SELECT investigation_revisions.sealed INTO revision_is_sealed
+                FROM claims
+                JOIN investigation_revisions
+                  ON investigation_revisions.id = claims.revision_id
+                WHERE claims.id = NEW.claim_id;
+            ELSE
+                SELECT sealed INTO revision_is_sealed
+                FROM investigation_revisions WHERE id = NEW.revision_id;
+            END IF;
+            IF revision_is_sealed OR revision_is_sealed IS NULL THEN
+                RAISE EXCEPTION 'Investigation history is immutable';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE FUNCTION require_investigation_revision_sealed()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            revision_is_sealed boolean;
+        BEGIN
+            SELECT sealed INTO revision_is_sealed
+            FROM investigation_revisions WHERE id = NEW.id;
+            IF NOT revision_is_sealed THEN
+                RAISE EXCEPTION 'Investigation Revision must be sealed atomically';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+
+        CREATE TRIGGER investigation_revisions_allow_only_seal
+        BEFORE UPDATE OR DELETE ON investigation_revisions
+        FOR EACH ROW EXECUTE FUNCTION allow_only_investigation_revision_seal();
+
+        CREATE CONSTRAINT TRIGGER investigation_revisions_require_seal
+        AFTER INSERT ON investigation_revisions
+        DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION require_investigation_revision_sealed();
+
+        CREATE TRIGGER investigation_revision_evidence_cannot_be_changed
+        BEFORE INSERT OR UPDATE OR DELETE ON investigation_revision_evidence
+        FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
+
+        CREATE TRIGGER claims_cannot_be_changed
+        BEFORE INSERT OR UPDATE OR DELETE ON claims
+        FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
+
+        CREATE TRIGGER claim_evidence_relationships_cannot_be_changed
+        BEFORE INSERT OR UPDATE OR DELETE ON claim_evidence_relationships
+        FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
+        """,
+    ),
 )
 
 

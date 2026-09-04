@@ -5,6 +5,21 @@ from exposure_ledger.recommendations import (
 )
 
 
+def test_every_allowed_recommendation_is_accepted_when_evidence_is_sufficient() -> None:
+    for recommendation in Recommendation:
+        decision = RecommendationPolicy.validate(
+            proposed=recommendation,
+            evidence=EvidenceState(
+                material_claims_supported=True,
+                authoritative_conflict=False,
+            ),
+        )
+
+        assert decision.recommendation is recommendation
+        assert decision.accepted is True
+        assert decision.reason == "evidence_requirements_satisfied"
+
+
 def test_authoritative_conflict_forces_more_evidence() -> None:
     decision = RecommendationPolicy.validate(
         proposed=Recommendation.URGENT_REMEDIATION,

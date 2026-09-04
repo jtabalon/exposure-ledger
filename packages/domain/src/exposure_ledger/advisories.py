@@ -331,6 +331,8 @@ class FirstPartyAdvisoryCollector:
 class GitHubRepositoryAdvisoryAdapter:
     """Capture one approved GitHub repository security advisory."""
 
+    version = "github-repository-advisory-v1"
+
     def __init__(self, target: GitHubAdvisoryTarget) -> None:
         self._target = target
 
@@ -395,7 +397,12 @@ class GitHubRepositoryAdvisoryAdapter:
             authority="Repository maintainer",
             location=self._target.api_url,
         )
-        evidence_identity = _evidence_identity(source, self._target.advisory_id, content_digest)
+        evidence_identity = _evidence_identity(
+            source,
+            self._target.advisory_id,
+            content_digest,
+            adapter_version=self.version,
+        )
         publication = {
             key: payload.get(key)
             for key in (
@@ -429,6 +436,7 @@ class GitHubRepositoryAdvisoryAdapter:
         return EvidenceRecord(
             identity=evidence_identity,
             source=source,
+            source_adapter_version=self.version,
             captured_at=captured_at,
             content_digest=content_digest,
             attribution=(
@@ -818,8 +826,16 @@ def _canonical_json(value: object) -> str:
         ) from error
 
 
-def _evidence_identity(source: Source, payload_identity: str, content_digest: str) -> str:
-    material = "\n".join((source.identity, source.location, payload_identity, content_digest))
+def _evidence_identity(
+    source: Source,
+    payload_identity: str,
+    content_digest: str,
+    *,
+    adapter_version: str,
+) -> str:
+    material = "\n".join(
+        (source.identity, source.location, adapter_version, payload_identity, content_digest)
+    )
     return f"sha256:{hashlib.sha256(material.encode()).hexdigest()}"
 
 
