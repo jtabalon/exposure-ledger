@@ -331,6 +331,12 @@ requires-dist = [
 name = "exposure-ledger-domain"
 version = "0.1.0"
 source = { editable = "packages/domain" }
+dependencies = [
+    { name = "packaging" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "packaging", specifier = ">=25" }]
 
 [[package]]
 name = "exposure-ledger-storage"
@@ -356,6 +362,7 @@ source = { editable = "apps/worker" }
 dependencies = [
     { name = "exposure-ledger-domain" },
     { name = "exposure-ledger-storage" },
+    { name = "httpcore" },
     { name = "httpx" },
     { name = "langgraph" },
     { name = "psycopg", extra = ["binary"] },
@@ -367,6 +374,7 @@ dependencies = [
 requires-dist = [
     { name = "exposure-ledger-domain", editable = "packages/domain" },
     { name = "exposure-ledger-storage", editable = "packages/storage" },
+    { name = "httpcore", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "langgraph", specifier = ">=0.4" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },

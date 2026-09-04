@@ -1,6 +1,5 @@
-import os
-from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
@@ -10,37 +9,42 @@ from exposure_ledger_api.settings import Settings
 from exposure_ledger_storage import AssessmentRunRepository, apply_migrations
 from exposure_ledger_worker.main import process_next_assessment
 from fastapi.testclient import TestClient
-from psycopg import sql
 
 
-@pytest.fixture
-def database_url() -> Iterator[str]:
-    database_name = f"exposure_ledger_test_{uuid4().hex}"
-    admin_url = os.environ.get(
-        "EXPOSURE_LEDGER_TEST_ADMIN_URL",
-        "postgresql://exposure_ledger:local-development-only@localhost:5432/postgres",
+def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE asset_capture_requests")
+    connection.execute("DROP INDEX policy_decisions_one_request_per_run_idx")
+    connection.execute("ALTER TABLE policy_decisions DROP COLUMN enforcement_point")
+    connection.execute(
+        "ALTER TABLE policy_decisions ADD CONSTRAINT "
+        "policy_decisions_assessment_run_id_key UNIQUE (assessment_run_id)"
     )
-
-    try:
-        with psycopg.connect(admin_url, autocommit=True) as connection:
-            connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name)))
-    except psycopg.OperationalError as error:
-        pytest.fail(
-            "PostgreSQL is required for API integration tests. Start it with `make infra-up`. "
-            f"Connection failed: {error}"
-        )
-
-    try:
-        test_database_url = (
-            f"postgresql://exposure_ledger:local-development-only@localhost:5432/{database_name}"
-        )
-        apply_migrations(test_database_url)
-        yield test_database_url
-    finally:
-        with psycopg.connect(admin_url, autocommit=True) as connection:
-            connection.execute(
-                sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database_name))
-            )
+    connection.execute(
+        "ALTER TABLE assessment_runs DROP CONSTRAINT assessment_runs_asset_snapshot_check"
+    )
+    connection.execute(
+        "ALTER TABLE assessment_runs ADD CONSTRAINT assessment_runs_asset_snapshot_check "
+        "CHECK ((mode = 'synthetic' AND synthetic AND asset_snapshot_id IS NULL) OR "
+        "(mode = 'repository' AND NOT synthetic AND asset_snapshot_id IS NOT NULL))"
+    )
+    connection.execute(
+        "DROP TRIGGER sealed_asset_snapshot_packages_reject_inserts ON package_instances"
+    )
+    connection.execute(
+        "DROP TRIGGER sealed_asset_snapshot_paths_reject_inserts ON dependency_paths"
+    )
+    connection.execute("DROP TRIGGER asset_snapshots_allow_only_seal ON asset_snapshots")
+    connection.execute("DROP TRIGGER asset_snapshots_cannot_be_deleted ON asset_snapshots")
+    connection.execute("DROP FUNCTION protect_asset_snapshot_package_membership")
+    connection.execute("DROP FUNCTION protect_asset_snapshot_path_membership")
+    connection.execute("DROP FUNCTION allow_only_asset_snapshot_seal")
+    connection.execute(
+        "CREATE TRIGGER asset_snapshots_are_immutable "
+        "BEFORE UPDATE OR DELETE ON asset_snapshots "
+        "FOR EACH ROW EXECUTE FUNCTION reject_asset_snapshot_mutation()"
+    )
+    connection.execute("ALTER TABLE asset_snapshots DROP COLUMN sealed")
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 6")
 
 
 def test_synthetic_assessment_survives_restart_and_replays_progress(
@@ -72,6 +76,7 @@ def test_synthetic_assessment_survives_restart_and_replays_progress(
             "ruleVersion": "assessment-request-v1",
             "reason": "C1 assistance at A1 is permitted for the confirmed target scope.",
             "createdAt": created["policyDecision"]["createdAt"],
+            "enforcementPoint": "request",
         }
 
     assert process_next_assessment(database_url=database_url) is True
@@ -281,9 +286,24 @@ def test_client_cannot_assert_its_own_authorization(database_url: str) -> None:
 def test_migration_fails_legacy_ungated_work_closed(database_url: str) -> None:
     legacy_id = uuid4()
     with psycopg.connect(database_url) as connection, connection.transaction():
+        _downgrade_to_migration_five(connection)
+        connection.execute(
+            "ALTER TABLE assessment_runs DROP CONSTRAINT assessment_runs_asset_snapshot_check"
+        )
+        connection.execute("ALTER TABLE assessment_runs DROP COLUMN asset_snapshot_id")
+        connection.execute("DROP TABLE dependency_paths")
+        connection.execute("DROP TABLE package_instances")
+        connection.execute("DROP TABLE asset_snapshots")
+        connection.execute("DROP TABLE environment_profiles")
+        connection.execute("DROP FUNCTION reject_asset_snapshot_mutation")
         connection.execute("DROP TABLE policy_decisions")
         connection.execute("DROP FUNCTION reject_policy_decision_mutation")
-        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 4")
+        connection.execute("ALTER TABLE assessment_runs DROP CONSTRAINT assessment_runs_mode_check")
+        connection.execute(
+            "ALTER TABLE assessment_runs ADD CONSTRAINT assessment_runs_mode_check "
+            "CHECK (mode IN ('synthetic'))"
+        )
+        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version IN (4, 5)")
         connection.execute(
             """
             INSERT INTO assessment_runs (
@@ -307,3 +327,50 @@ def test_migration_fails_legacy_ungated_work_closed(database_url: str) -> None:
         assert response.json()["policyDecision"]["actionLevel"] == "A4"
 
     assert process_next_assessment(database_url=database_url) is False
+
+
+def test_migration_six_seals_existing_version_five_snapshots(database_url: str) -> None:
+    environment_id = uuid4()
+    snapshot_id = uuid4()
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        _downgrade_to_migration_five(connection)
+        connection.execute(
+            """
+            INSERT INTO environment_profiles (
+                id, python_version, operating_system, architecture, selected_extras
+            ) VALUES (%s, '3.12.2', 'linux', 'x86_64', '{}')
+            """,
+            (environment_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO asset_snapshots (
+                id, repository, commit_sha, project_root, lockfile_path,
+                lockfile_digest, lockfile_content, environment_profile_id,
+                parser_version, captured_at
+            ) VALUES (
+                %s, 'https://github.com/example/project',
+                '0123456789abcdef0123456789abcdef01234567', '.', 'uv.lock',
+                'sha256:existing', 'version = 1', %s, 'uv-lock-v1', %s
+            )
+            """,
+            (snapshot_id, environment_id, datetime.now(UTC)),
+        )
+
+    apply_migrations(database_url)
+
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            "SELECT sealed FROM asset_snapshots WHERE id = %s", (snapshot_id,)
+        ).fetchone()
+        versions = connection.execute(
+            "SELECT version FROM exposure_ledger_schema_migrations ORDER BY version"
+        ).fetchall()
+        enforcement_point = connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'policy_decisions' AND column_name = 'enforcement_point'"
+        ).fetchone()
+
+    assert row == (True,)
+    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6]
+    assert enforcement_point == ("enforcement_point",)

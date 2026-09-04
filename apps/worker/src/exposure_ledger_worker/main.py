@@ -7,14 +7,30 @@ from contextlib import contextmanager
 from threading import Event, Thread
 from uuid import UUID
 
+from exposure_ledger import (
+    ArchiveLimits,
+    AssessmentOperation,
+    AssessmentRequest,
+    AssetSnapshotCapture,
+    AssetSnapshotRejected,
+    AuthorizationStatus,
+    CyberPolicy,
+    PolicyResult,
+    RepositoryArchiveSource,
+    RepositoryArchiveUnavailable,
+)
 from exposure_ledger_storage import (
     DEFAULT_DATABASE_URL,
+    AssessmentMode,
     AssessmentRunRepository,
     AssessmentScenario,
+    AssetSnapshotRepository,
     normalize_database_url,
 )
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from exposure_ledger_worker.repository_archives import GitHubArchiveSource
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +82,12 @@ def maintain_claim(
         thread.join()
 
 
-def process_next_assessment(*, database_url: str, stale_after_seconds: float = 30) -> bool:
+def process_next_assessment(
+    *,
+    database_url: str,
+    stale_after_seconds: float = 30,
+    archive_source: RepositoryArchiveSource | None = None,
+) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
     repository = AssessmentRunRepository(database_url)
     assessment_run = repository.claim_next(stale_after_seconds=stale_after_seconds)
@@ -82,9 +103,10 @@ def process_next_assessment(*, database_url: str, stale_after_seconds: float = 3
             claim_id=assessment_run.claim_id,
             lease_seconds=stale_after_seconds,
         ):
-            if assessment_run.mode != "synthetic":
-                raise ValueError(f"Unsupported Assessment mode: {assessment_run.mode}")
-            if assessment_run.scenario == AssessmentScenario.WORKER_FAILURE:
+            if (
+                assessment_run.mode == AssessmentMode.SYNTHETIC
+                and assessment_run.scenario == AssessmentScenario.WORKER_FAILURE
+            ):
                 repository.fail(
                     assessment_run.id,
                     claim_id=assessment_run.claim_id,
@@ -92,10 +114,60 @@ def process_next_assessment(*, database_url: str, stale_after_seconds: float = 3
                     message="Synthetic worker failure requested for contract verification.",
                 )
                 return True
-            repository.complete_synthetic(
-                assessment_run.id,
-                claim_id=assessment_run.claim_id,
-            )
+            if assessment_run.mode == AssessmentMode.SYNTHETIC:
+                repository.complete_synthetic(
+                    assessment_run.id,
+                    claim_id=assessment_run.claim_id,
+                )
+            else:
+                capture_request = repository.get_capture_request(assessment_run.id)
+                if capture_request is None:
+                    raise RuntimeError("Repository Assessment Run has no capture request")
+                tool_decision = CyberPolicy.decide(
+                    AssessmentRequest(
+                        operation=AssessmentOperation.PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT,
+                        target_scope=(f"{capture_request.repository}@{capture_request.commit}"),
+                        authorization_scope="local operator",
+                        authorization_status=AuthorizationStatus.CONFIRMED,
+                    )
+                )
+                repository.record_tool_policy_decision(assessment_run.id, tool_decision)
+                if tool_decision.result is not PolicyResult.ALLOWED:
+                    repository.fail(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        code="repository_fetch_policy_blocked",
+                        message=tool_decision.reason,
+                    )
+                    return True
+                limits = ArchiveLimits()
+                source = archive_source or GitHubArchiveSource(
+                    max_bytes=limits.max_compressed_bytes
+                )
+                try:
+                    captured = AssetSnapshotCapture(source, limits=limits).capture(capture_request)
+                    snapshot = AssetSnapshotRepository(database_url).create(captured)
+                except AssetSnapshotRejected as error:
+                    repository.fail(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        code=error.code,
+                        message=str(error),
+                    )
+                    return True
+                except RepositoryArchiveUnavailable as error:
+                    repository.fail(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        code="repository_unavailable",
+                        message=str(error),
+                    )
+                    return True
+                repository.complete_repository(
+                    assessment_run.id,
+                    claim_id=assessment_run.claim_id,
+                    asset_snapshot_id=snapshot.id,
+                )
     except Exception:
         logger.exception("Assessment Run %s failed", assessment_run.id)
         repository.fail(

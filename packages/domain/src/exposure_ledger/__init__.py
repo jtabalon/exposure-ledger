@@ -1,5 +1,22 @@
 """Framework-independent domain policy for Exposure Ledger."""
 
+from exposure_ledger.asset_snapshots import (
+    ASSET_SNAPSHOT_PARSER_VERSION,
+    Architecture,
+    ArchiveLimits,
+    AssetSnapshot,
+    AssetSnapshotCapture,
+    AssetSnapshotRejected,
+    CaptureAssetSnapshot,
+    EnvironmentProfile,
+    OperatingSystem,
+    PackageInstance,
+    PackageSource,
+    RepositoryArchive,
+    RepositoryArchiveSource,
+    RepositoryArchiveUnavailable,
+    validate_asset_snapshot_request,
+)
 from exposure_ledger.cyber_policy import (
     ActionLevel,
     AssessmentOperation,
@@ -18,16 +35,31 @@ from exposure_ledger.recommendations import (
 )
 
 __all__ = [
+    "ASSET_SNAPSHOT_PARSER_VERSION",
     "ActionLevel",
+    "Architecture",
+    "ArchiveLimits",
     "AssistanceClass",
     "AssessmentOperation",
     "AssessmentRequest",
+    "AssetSnapshot",
+    "AssetSnapshotCapture",
+    "AssetSnapshotRejected",
     "AuthorizationStatus",
+    "CaptureAssetSnapshot",
     "CyberPolicy",
+    "EnvironmentProfile",
     "EvidenceState",
     "PolicyDecision",
     "PolicyResult",
+    "OperatingSystem",
+    "PackageInstance",
+    "PackageSource",
     "Recommendation",
     "RecommendationDecision",
     "RecommendationPolicy",
+    "RepositoryArchive",
+    "RepositoryArchiveSource",
+    "RepositoryArchiveUnavailable",
+    "validate_asset_snapshot_request",
 ]

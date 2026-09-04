@@ -4,19 +4,25 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
 from exposure_ledger import (
     ActionLevel,
+    Architecture,
     AssessmentOperation,
     AssessmentRequest,
+    AssetSnapshotRejected,
     AssistanceClass,
     AuthorizationStatus,
+    CaptureAssetSnapshot,
     CyberPolicy,
+    EnvironmentProfile,
+    OperatingSystem,
     PolicyResult,
+    validate_asset_snapshot_request,
 )
 from exposure_ledger_storage import (
     AssessmentEvent,
@@ -25,6 +31,9 @@ from exposure_ledger_storage import (
     AssessmentRunRepository,
     AssessmentScenario,
     AssessmentStatus,
+    AssetSnapshotRecord,
+    AssetSnapshotRepository,
+    PackageInstanceRecord,
     PolicyDecisionRecord,
 )
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
@@ -58,7 +67,7 @@ class AssessmentPolicyContext(ApiModel):
     operation_chain: list[str] = Field(default_factory=list)
 
 
-class CreateAssessmentRunRequest(ApiModel):
+class CreateSyntheticAssessmentRunRequest(ApiModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["synthetic"]
@@ -78,6 +87,7 @@ class PolicyDecisionResponse(ApiModel):
     rule_version: str
     reason: str
     created_at: datetime
+    enforcement_point: str
 
     @classmethod
     def from_record(cls, record: PolicyDecisionRecord) -> "PolicyDecisionResponse":
@@ -96,6 +106,7 @@ class AssessmentRunResponse(ApiModel):
     completed_at: datetime | None
     error_code: str | None
     error_message: str | None
+    asset_snapshot_id: UUID | None
     policy_decision: PolicyDecisionResponse
 
     @classmethod
@@ -118,6 +129,101 @@ class AssessmentRunListResponse(ApiModel):
 
 class PolicyDecisionListResponse(ApiModel):
     items: list[PolicyDecisionResponse]
+
+
+class EnvironmentProfileRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    python_version: str
+    operating_system: OperatingSystem
+    architecture: Architecture
+    selected_extras: list[str] = Field(default_factory=list)
+
+
+class CreateRepositoryAssessmentRunRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["repository"]
+    repository: str
+    commit: str
+    project_root: str
+    lockfile_path: str
+    environment_profile: EnvironmentProfileRequest
+    policy_context: AssessmentPolicyContext = Field(default_factory=AssessmentPolicyContext)
+
+
+CreateAssessmentRunRequest = Annotated[
+    CreateSyntheticAssessmentRunRequest | CreateRepositoryAssessmentRunRequest,
+    Field(discriminator="mode"),
+]
+
+
+class EnvironmentProfileResponse(ApiModel):
+    python_version: str
+    operating_system: OperatingSystem
+    architecture: Architecture
+    selected_extras: list[str]
+
+    @classmethod
+    def from_domain(cls, profile: EnvironmentProfile) -> "EnvironmentProfileResponse":
+        return cls(
+            python_version=profile.python_version,
+            operating_system=profile.operating_system,
+            architecture=profile.architecture,
+            selected_extras=list(profile.selected_extras),
+        )
+
+
+class PackageInstanceResponse(ApiModel):
+    name: str
+    version: str
+    direct: bool
+    source: dict[str, object]
+    dependency_paths: list[list[str]]
+
+    @classmethod
+    def from_record(cls, package: PackageInstanceRecord) -> "PackageInstanceResponse":
+        return cls(
+            name=package.name,
+            version=package.version,
+            direct=package.direct,
+            source=package.source,
+            dependency_paths=[list(path) for path in package.dependency_paths],
+        )
+
+
+class AssetSnapshotResponse(ApiModel):
+    id: UUID
+    repository: str
+    commit: str
+    project_root: str
+    lockfile_path: str
+    lockfile_digest: str
+    environment_profile: EnvironmentProfileResponse
+    packages: list[PackageInstanceResponse]
+    parser_version: str
+    captured_at: datetime
+
+    @classmethod
+    def from_record(cls, snapshot: AssetSnapshotRecord) -> "AssetSnapshotResponse":
+        return cls(
+            id=snapshot.id,
+            repository=snapshot.repository,
+            commit=snapshot.commit,
+            project_root=snapshot.project_root,
+            lockfile_path=snapshot.lockfile_path,
+            lockfile_digest=snapshot.lockfile_digest,
+            environment_profile=EnvironmentProfileResponse.from_domain(
+                snapshot.environment_profile
+            ),
+            packages=[PackageInstanceResponse.from_record(item) for item in snapshot.packages],
+            parser_version=snapshot.parser_version,
+            captured_at=snapshot.captured_at,
+        )
+
+
+class AssetSnapshotListResponse(ApiModel):
+    items: list[AssetSnapshotResponse]
 
 
 def _not_found(assessment_run_id: UUID) -> HTTPException:
@@ -155,13 +261,17 @@ def _encode_sse(event: AssessmentEvent) -> str:
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+) -> FastAPI:
     configured_settings = settings or Settings()
     repository = AssessmentRunRepository(configured_settings.database_url)
+    snapshot_repository = AssetSnapshotRepository(configured_settings.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         repository.check_ready()
+        snapshot_repository.check_ready()
         yield
 
     application = FastAPI(
@@ -180,6 +290,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             inference_mode="local",
         )
 
+    @application.get(
+        "/api/v1/asset-snapshots",
+        response_model=AssetSnapshotListResponse,
+        response_model_by_alias=True,
+        tags=["asset-snapshots"],
+    )
+    def list_asset_snapshots() -> AssetSnapshotListResponse:
+        return AssetSnapshotListResponse(
+            items=[AssetSnapshotResponse.from_record(item) for item in snapshot_repository.list()]
+        )
+
+    @application.get(
+        "/api/v1/asset-snapshots/{snapshot_id}",
+        response_model=AssetSnapshotResponse,
+        response_model_by_alias=True,
+        tags=["asset-snapshots"],
+    )
+    def get_asset_snapshot(snapshot_id: UUID) -> AssetSnapshotResponse:
+        snapshot = snapshot_repository.get(snapshot_id)
+        if snapshot is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "asset_snapshot_not_found",
+                    "message": f"Asset Snapshot {snapshot_id} was not found.",
+                },
+            )
+        return AssetSnapshotResponse.from_record(snapshot)
+
     @application.post(
         "/api/v1/assessment-runs",
         response_model=AssessmentRunResponse,
@@ -189,10 +328,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     def create_assessment_run(request: CreateAssessmentRunRequest) -> AssessmentRunResponse:
         context = request.policy_context
+        if isinstance(request, CreateRepositoryAssessmentRunRequest):
+            operation = AssessmentOperation.PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT
+            target_scope = f"{request.repository}@{request.commit}"
+        else:
+            operation = AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT
+            target_scope = "bundled synthetic fixture"
         decision = CyberPolicy.decide(
             AssessmentRequest(
-                operation=AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT,
-                target_scope="bundled synthetic fixture",
+                operation=operation,
+                target_scope=target_scope,
                 authorization_scope="local operator",
                 authorization_status=AuthorizationStatus.CONFIRMED,
                 operation_chain=tuple(context.operation_chain),
@@ -209,10 +354,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "policyDecision": response.model_dump(mode="json", by_alias=True),
                 },
             )
-        assessment_run = repository.create_synthetic(
-            scenario=request.scenario,
-            policy_decision=decision,
-        )
+        if isinstance(request, CreateRepositoryAssessmentRunRequest):
+            try:
+                profile = EnvironmentProfile(
+                    python_version=request.environment_profile.python_version,
+                    operating_system=request.environment_profile.operating_system,
+                    architecture=request.environment_profile.architecture,
+                    selected_extras=tuple(request.environment_profile.selected_extras),
+                )
+                capture_request = validate_asset_snapshot_request(
+                    CaptureAssetSnapshot(
+                        repository=request.repository,
+                        commit=request.commit,
+                        project_root=request.project_root,
+                        lockfile_path=request.lockfile_path,
+                        environment_profile=profile,
+                    )
+                )
+            except AssetSnapshotRejected as error:
+                repository.record_policy_decision(
+                    replace(
+                        decision,
+                        result=PolicyResult.BLOCKED,
+                        reason=(
+                            f"Target scope is invalid; the Assessment request is blocked: {error}"
+                        ),
+                    )
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"code": error.code, "message": str(error)},
+                ) from error
+            except ValueError as error:
+                repository.record_policy_decision(
+                    replace(
+                        decision,
+                        result=PolicyResult.BLOCKED,
+                        reason=(
+                            "Environment Profile is invalid; the Assessment request is blocked: "
+                            f"{error}"
+                        ),
+                    )
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"code": "invalid_environment_profile", "message": str(error)},
+                ) from error
+            target_scope = f"{capture_request.repository}@{capture_request.commit}"
+            decision = CyberPolicy.decide(
+                AssessmentRequest(
+                    operation=operation,
+                    target_scope=target_scope,
+                    authorization_scope="local operator",
+                    authorization_status=AuthorizationStatus.CONFIRMED,
+                    operation_chain=tuple(context.operation_chain),
+                )
+            )
+        if isinstance(request, CreateRepositoryAssessmentRunRequest):
+            assessment_run = repository.create_repository(
+                capture_request=capture_request,
+                label=(
+                    f"{capture_request.repository.removeprefix('https://github.com/')}"
+                    f"@{capture_request.commit[:12]}"
+                ),
+                policy_decision=decision,
+            )
+        else:
+            assessment_run = repository.create_synthetic(
+                scenario=request.scenario,
+                policy_decision=decision,
+            )
         return _assessment_response(repository, assessment_run)
 
     @application.get(

@@ -74,7 +74,35 @@ curl -sS http://localhost:8000/api/v1/assessment-runs/<assessment-run-id>
 curl -sS http://localhost:8000/api/v1/policy-decisions
 ```
 
-SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench lists the same live runs and always labels this path `SYNTHETIC`.
+Capture a live public repository as an immutable `uv.lock` Asset Snapshot by creating a
+repository Assessment Run with a complete commit ID and explicit Environment Profile:
+
+```bash
+curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "mode": "repository",
+    "repository": "https://github.com/OWNER/REPOSITORY",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "projectRoot": ".",
+    "lockfilePath": "uv.lock",
+    "environmentProfile": {
+      "pythonVersion": "3.12.2",
+      "operatingSystem": "macos",
+      "architecture": "arm64",
+      "selectedExtras": []
+    }
+  }'
+```
+
+The API policy-gates and durably queues the request. The worker records a second Policy Decision at
+the repository-fetch boundary, constrains egress to public GitHub codeload addresses, and reads the
+archive and lockfile as untrusted data in memory. It never installs dependencies, imports modules,
+runs builds or hooks, or executes repository content. `GET /api/v1/asset-snapshots` exposes the
+pinned scope, digest, Environment Profile, normalized packages, and Dependency Paths shown in the
+workbench.
+
+SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
 
 Every Assessment request is classified by application-owned rules before a run is queued. The
 response and workbench show its versioned Policy Decision, including the Assistance Class, Action

@@ -7,6 +7,9 @@ name = "exposure-ledger-domain"
 version = "0.1.0"
 description = "Framework-independent domain policy for Exposure Ledger"
 requires-python = ">=3.12"
+dependencies = [
+  "packaging>=25",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/exposure_ledger"]

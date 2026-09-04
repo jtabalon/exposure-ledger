@@ -22,6 +22,7 @@ describe("AssessmentRunPanel", () => {
             ruleVersion: "assessment-request-v1",
             reason: "C2 assistance is outside the first-release capability ceiling.",
             createdAt: "2026-09-03T20:00:00Z",
+            enforcementPoint: "request",
           },
         ]}
         policyDecisionsError={null}

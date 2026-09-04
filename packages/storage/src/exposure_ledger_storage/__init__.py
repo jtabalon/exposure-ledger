@@ -10,6 +10,11 @@ from exposure_ledger_storage.assessments import (
     AssessmentStatus,
     PolicyDecisionRecord,
 )
+from exposure_ledger_storage.asset_snapshots import (
+    AssetSnapshotRecord,
+    AssetSnapshotRepository,
+    PackageInstanceRecord,
+)
 from exposure_ledger_storage.configuration import (
     DEFAULT_DATABASE_URL,
     normalize_database_url,
@@ -24,8 +29,11 @@ __all__ = [
     "AssessmentRunRepository",
     "AssessmentScenario",
     "AssessmentStatus",
+    "AssetSnapshotRecord",
+    "AssetSnapshotRepository",
     "DEFAULT_DATABASE_URL",
     "PolicyDecisionRecord",
+    "PackageInstanceRecord",
     "apply_migrations",
     "normalize_database_url",
 ]

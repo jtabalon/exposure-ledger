@@ -26,6 +26,7 @@ class ActionLevel(StrEnum):
 
 class AssessmentOperation(StrEnum):
     SYNTHETIC_EXPOSURE_ASSESSMENT = "synthetic_exposure_assessment"
+    PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT = "public_repository_exposure_assessment"
     SUMMARIZE_PUBLIC_ADVISORY = "summarize_public_advisory"
     DRAFT_DEPENDENCY_PATCH = "draft_dependency_patch"
     GENERATE_EXPLOIT = "generate_exploit"
@@ -74,6 +75,9 @@ class _Classification:
 
 _OPERATION_CLASSIFICATIONS: Final = {
     AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT: _Classification(
+        AssistanceClass.C1, ActionLevel.A1
+    ),
+    AssessmentOperation.PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT: _Classification(
         AssistanceClass.C1, ActionLevel.A1
     ),
     AssessmentOperation.SUMMARIZE_PUBLIC_ADVISORY: _Classification(
