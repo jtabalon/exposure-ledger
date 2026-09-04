@@ -45,8 +45,9 @@ These seams were agreed during design and are the only initial surfaces tested d
 1. **Recommendation policy:** a proposed Recommendation plus evidence state produces an accepted or safely downgraded decision.
 2. **Cyber policy:** an operation produces an auditable allow, restrict, or block decision for a policy version.
 3. **Asset snapshot:** a supported repository fixture produces a normalized snapshot or a typed rejection without executing content.
-4. **Source adapter contract:** each adapter turns captured provider responses into immutable Evidence Records under shared provenance rules.
-5. **HTTP contract:** FastAPI exposes health, versioned resources, job creation, and SSE progress through OpenAPI.
-6. **Workbench flow:** an operator can follow Exposure → Claim → Evidence and distinguish precomputed from live content.
+4. **Exposure discovery:** an Asset Snapshot plus captured OSV responses produces normalized Vulnerability Records and a deterministically ranked, package-specific Exposure queue.
+5. **Source adapter contract:** each adapter turns captured provider responses into immutable Evidence Records under shared provenance rules.
+6. **HTTP contract:** FastAPI exposes health, versioned resources, job creation, and SSE progress through OpenAPI.
+7. **Workbench flow:** an operator can follow Exposure → Claim → Evidence and distinguish precomputed from live content.
 
 Tests cross these interfaces and avoid assertions against private graph nodes, SQL layout, or internal helper calls.

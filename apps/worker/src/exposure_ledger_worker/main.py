@@ -15,6 +15,10 @@ from exposure_ledger import (
     AssetSnapshotRejected,
     AuthorizationStatus,
     CyberPolicy,
+    ExposureDiscovery,
+    OsvResponseRejected,
+    OsvSource,
+    OsvSourceUnavailable,
     PolicyResult,
     RepositoryArchiveSource,
     RepositoryArchiveUnavailable,
@@ -25,11 +29,13 @@ from exposure_ledger_storage import (
     AssessmentRunRepository,
     AssessmentScenario,
     AssetSnapshotRepository,
+    ExposureRepository,
     normalize_database_url,
 )
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from exposure_ledger_worker.osv import OsvApiSource
 from exposure_ledger_worker.repository_archives import GitHubArchiveSource
 
 logger = logging.getLogger(__name__)
@@ -87,6 +93,7 @@ def process_next_assessment(
     database_url: str,
     stale_after_seconds: float = 30,
     archive_source: RepositoryArchiveSource | None = None,
+    osv_source: OsvSource | None = None,
 ) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
     repository = AssessmentRunRepository(database_url)
@@ -160,6 +167,59 @@ def process_next_assessment(
                         assessment_run.id,
                         claim_id=assessment_run.claim_id,
                         code=error.code,
+                        message=str(error),
+                    )
+                    return True
+                exposure_repository = ExposureRepository(database_url)
+                if exposure_repository.is_recorded(
+                    assessment_run.id,
+                    asset_snapshot_id=snapshot.id,
+                ):
+                    repository.complete_repository(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        asset_snapshot_id=snapshot.id,
+                    )
+                    return True
+                osv_decision = CyberPolicy.decide(
+                    AssessmentRequest(
+                        operation=AssessmentOperation.PUBLIC_OSV_LOOKUP,
+                        target_scope="https://api.osv.dev/v1",
+                        authorization_scope="local operator",
+                        authorization_status=AuthorizationStatus.CONFIRMED,
+                    )
+                )
+                repository.record_tool_policy_decision(assessment_run.id, osv_decision)
+                if osv_decision.result is not PolicyResult.ALLOWED:
+                    repository.fail(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        code="osv_lookup_policy_blocked",
+                        message=osv_decision.reason,
+                    )
+                    return True
+                try:
+                    result = ExposureDiscovery(osv_source or OsvApiSource()).discover(
+                        snapshot.as_domain()
+                    )
+                    exposure_repository.record(
+                        assessment_run_id=assessment_run.id,
+                        asset_snapshot_id=snapshot.id,
+                        result=result,
+                    )
+                except OsvSourceUnavailable as error:
+                    repository.fail(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        code="osv_unavailable",
+                        message=str(error),
+                    )
+                    return True
+                except OsvResponseRejected as error:
+                    repository.fail(
+                        assessment_run.id,
+                        claim_id=assessment_run.claim_id,
+                        code="invalid_osv_response",
                         message=str(error),
                     )
                     return True

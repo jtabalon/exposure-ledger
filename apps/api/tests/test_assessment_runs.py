@@ -12,6 +12,16 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE exposure_discoveries")
+    connection.execute("DROP TABLE assessment_run_exposures")
+    connection.execute("DROP TABLE exposures")
+    connection.execute(
+        "ALTER TABLE package_instances DROP CONSTRAINT package_instances_id_snapshot_key"
+    )
+    connection.execute("DROP TABLE vulnerability_aliases")
+    connection.execute("DROP TABLE vulnerability_records")
+    connection.execute("DROP FUNCTION reject_exposure_mutation")
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 8")
     connection.execute("DROP TABLE asset_capture_requests")
     connection.execute("DROP INDEX policy_decisions_one_request_per_run_idx")
     connection.execute("ALTER TABLE policy_decisions DROP COLUMN enforcement_point")
@@ -37,6 +47,15 @@ def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
     connection.execute("DROP TRIGGER asset_snapshots_cannot_be_deleted ON asset_snapshots")
     connection.execute("DROP FUNCTION protect_asset_snapshot_package_membership")
     connection.execute("DROP FUNCTION protect_asset_snapshot_path_membership")
+    connection.execute("ALTER TABLE package_instances ALTER COLUMN direct SET NOT NULL")
+    connection.execute(
+        "ALTER TABLE asset_snapshots DROP CONSTRAINT asset_snapshots_project_file_check"
+    )
+    connection.execute(
+        "ALTER TABLE asset_snapshots DROP COLUMN project_file_path, "
+        "DROP COLUMN project_file_digest, DROP COLUMN project_file_content"
+    )
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 7")
     connection.execute("DROP FUNCTION allow_only_asset_snapshot_seal")
     connection.execute(
         "CREATE TRIGGER asset_snapshots_are_immutable "
@@ -372,5 +391,5 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         ).fetchone()
 
     assert row == (True,)
-    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6, 7]
+    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert enforcement_point == ("enforcement_point",)

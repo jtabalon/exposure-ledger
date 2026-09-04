@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -14,6 +14,9 @@ from exposure_ledger import (
     AssetSnapshot,
     EnvironmentProfile,
     OperatingSystem,
+    PackageInstance,
+    PackageSource,
+    RetainedDependencyManifest,
 )
 from psycopg.rows import dict_row, tuple_row
 
@@ -35,10 +38,39 @@ class AssetSnapshotRecord:
     project_root: str
     lockfile_path: str
     lockfile_digest: str
+    lockfile_content: str = field(repr=False)
+    project_file: RetainedDependencyManifest | None
     environment_profile: EnvironmentProfile
     packages: tuple[PackageInstanceRecord, ...]
     parser_version: str
     captured_at: datetime
+
+    def as_domain(self) -> AssetSnapshot:
+        """Rehydrate the authoritative persisted Asset Snapshot aggregate."""
+        return AssetSnapshot(
+            repository=self.repository,
+            commit=self.commit,
+            project_root=self.project_root,
+            lockfile_path=self.lockfile_path,
+            lockfile_digest=self.lockfile_digest,
+            lockfile_content=self.lockfile_content,
+            project_file=self.project_file,
+            environment_profile=self.environment_profile,
+            packages=tuple(
+                PackageInstance(
+                    name=package.name,
+                    version=package.version,
+                    direct=package.direct,
+                    source=PackageSource(
+                        tuple(sorted((key, str(value)) for key, value in package.source.items()))
+                    ),
+                    dependency_paths=package.dependency_paths,
+                )
+                for package in self.packages
+            ),
+            parser_version=self.parser_version,
+            captured_at=self.captured_at,
+        )
 
 
 class AssetSnapshotRepository:
@@ -156,7 +188,10 @@ class AssetSnapshotRepository:
                 SELECT asset_snapshots.id, asset_snapshots.repository,
                        asset_snapshots.commit_sha, asset_snapshots.project_root,
                        asset_snapshots.lockfile_path, asset_snapshots.lockfile_digest,
-                       asset_snapshots.parser_version, asset_snapshots.captured_at,
+                       asset_snapshots.lockfile_content, asset_snapshots.project_file_path,
+                       asset_snapshots.project_file_digest,
+                       asset_snapshots.project_file_content, asset_snapshots.parser_version,
+                       asset_snapshots.captured_at,
                        environment_profiles.python_version,
                        environment_profiles.operating_system,
                        environment_profiles.architecture,
@@ -170,6 +205,15 @@ class AssetSnapshotRepository:
             ).fetchone()
             if row is None:
                 return None
+            project_file = None
+            if row["project_file_path"] is not None:
+                assert row["project_file_digest"] is not None
+                assert row["project_file_content"] is not None
+                project_file = RetainedDependencyManifest(
+                    path=str(row["project_file_path"]),
+                    digest=str(row["project_file_digest"]),
+                    content=str(row["project_file_content"]),
+                )
             package_rows = connection.execute(
                 """
                 SELECT id, name, version, direct, source
@@ -210,6 +254,8 @@ class AssetSnapshotRepository:
                 project_root=str(row["project_root"]),
                 lockfile_path=str(row["lockfile_path"]),
                 lockfile_digest=str(row["lockfile_digest"]),
+                lockfile_content=str(row["lockfile_content"]),
+                project_file=project_file,
                 environment_profile=EnvironmentProfile(
                     python_version=str(row["python_version"]),
                     operating_system=OperatingSystem(str(row["operating_system"])),

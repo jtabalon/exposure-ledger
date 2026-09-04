@@ -19,6 +19,11 @@ from exposure_ledger_storage.configuration import (
     DEFAULT_DATABASE_URL,
     normalize_database_url,
 )
+from exposure_ledger_storage.exposures import (
+    ExposureRecord,
+    ExposureRepository,
+    VulnerabilityRecordRecord,
+)
 from exposure_ledger_storage.migrations import apply_migrations
 
 __all__ = [
@@ -32,8 +37,11 @@ __all__ = [
     "AssetSnapshotRecord",
     "AssetSnapshotRepository",
     "DEFAULT_DATABASE_URL",
+    "ExposureRecord",
+    "ExposureRepository",
     "PolicyDecisionRecord",
     "PackageInstanceRecord",
+    "VulnerabilityRecordRecord",
     "apply_migrations",
     "normalize_database_url",
 ]

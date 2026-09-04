@@ -86,7 +86,7 @@ export type PolicyDecisionCollection = {
 
 export async function loadCollection<T>(
   resource: string,
-  contractName: "Assessment" | "Asset Snapshot" | "Policy",
+  contractName: "Assessment" | "Asset Snapshot" | "Exposure" | "Policy",
 ): Promise<{ items: T[]; error: string | null }> {
   try {
     const response = await fetch(`${apiBaseUrl()}/api/v1/${resource}`, {

@@ -7,7 +7,12 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
-from exposure_ledger import RepositoryArchive, RepositoryArchiveUnavailable
+from exposure_ledger import (
+    OsvBatchResponse,
+    OsvPackageQuery,
+    RepositoryArchive,
+    RepositoryArchiveUnavailable,
+)
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_worker.main import process_next_assessment
@@ -127,6 +132,40 @@ content-hash = "fixture"
         return RepositoryArchive(content=buffer.getvalue())
 
 
+class EmptyOsvSource:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
+        return OsvBatchResponse(results=tuple(() for _ in queries))
+
+
+class RequirementsOsvSource:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
+        assert queries == (
+            OsvPackageQuery(name="http-x", version="2.3.0"),
+            OsvPackageQuery(name="leaf-lib", version="1.0.0"),
+        )
+        return OsvBatchResponse.capture(
+            {
+                "results": [
+                    {
+                        "vulns": [
+                            {
+                                "id": "PYSEC-2026-42",
+                                "affected": [
+                                    {
+                                        "package": {"ecosystem": "PyPI", "name": "http-x"},
+                                        "versions": ["2.3.0"],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    {},
+                ]
+            },
+            expected_results=len(queries),
+        )
+
+
 def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
     database_url: str,
 ) -> None:
@@ -159,7 +198,11 @@ def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
         )
 
     assert (
-        process_next_assessment(database_url=database_url, archive_source=FixtureArchiveSource())
+        process_next_assessment(
+            database_url=database_url,
+            archive_source=FixtureArchiveSource(),
+            osv_source=EmptyOsvSource(),
+        )
         is True
     )
 
@@ -273,7 +316,11 @@ def test_asset_snapshot_is_captured_once_and_exposed_as_immutable_scope(
         }
 
     assert (
-        process_next_assessment(database_url=database_url, archive_source=FixtureArchiveSource())
+        process_next_assessment(
+            database_url=database_url,
+            archive_source=FixtureArchiveSource(),
+            osv_source=EmptyOsvSource(),
+        )
         is True
     )
 
@@ -306,7 +353,9 @@ def test_pinned_requirements_unknown_dependency_paths_are_visible_in_api(
         assessment_id = response.json()["id"]
 
     assert process_next_assessment(
-        database_url=database_url, archive_source=RequirementsArchiveSource()
+        database_url=database_url,
+        archive_source=RequirementsArchiveSource(),
+        osv_source=RequirementsOsvSource(),
     )
 
     with TestClient(app) as client:
@@ -330,6 +379,12 @@ def test_pinned_requirements_unknown_dependency_paths_are_visible_in_api(
                 "dependencyPaths": None,
             },
         ]
+        exposures = client.get(f"/api/v1/assessment-runs/{assessment_id}/exposures").json()
+        assert len(exposures["items"]) == 1
+        assert exposures["items"][0]["package"]["name"] == "http-x"
+        assert exposures["items"][0]["ranking"]["directDependency"] is None
+        assert exposures["items"][0]["ranking"]["dependencyDepth"] is None
+        assert exposures["items"][0]["ranking"]["score"] == 0
 
 
 def test_unpinned_requirements_rejection_code_is_visible_in_api(database_url: str) -> None:
@@ -388,7 +443,11 @@ def test_poetry_lock_can_be_selected_through_the_assessment_flow(database_url: s
         assert response.status_code == 201
         assessment_id = response.json()["id"]
 
-    assert process_next_assessment(database_url=database_url, archive_source=PoetryArchiveSource())
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=PoetryArchiveSource(),
+        osv_source=EmptyOsvSource(),
+    )
 
     with TestClient(app) as client:
         assessment = client.get(f"/api/v1/assessment-runs/{assessment_id}").json()
