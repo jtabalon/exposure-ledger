@@ -474,6 +474,95 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         FOR EACH ROW EXECUTE FUNCTION reject_exposure_mutation();
         """,
     ),
+    (
+        9,
+        """
+        CREATE TABLE sources (
+            id uuid PRIMARY KEY,
+            identity_key text NOT NULL,
+            authority text NOT NULL,
+            location text NOT NULL,
+            UNIQUE (identity_key, authority, location)
+        );
+
+        CREATE TABLE evidence_records (
+            id uuid PRIMARY KEY,
+            identity_key text NOT NULL UNIQUE,
+            source_id uuid NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+            captured_at timestamptz NOT NULL,
+            content_digest text NOT NULL CHECK (content_digest LIKE 'sha256:%'),
+            attribution text NOT NULL,
+            aliases text[] NOT NULL,
+            payload_identity text NOT NULL,
+            content text NOT NULL,
+            UNIQUE (source_id, payload_identity, content_digest)
+        );
+
+        CREATE TABLE evidence_passages (
+            id uuid PRIMARY KEY,
+            evidence_record_id uuid NOT NULL
+                REFERENCES evidence_records(id) ON DELETE RESTRICT,
+            identity_key text NOT NULL UNIQUE,
+            kind text NOT NULL,
+            content text NOT NULL,
+            UNIQUE (id, evidence_record_id)
+        );
+
+        CREATE TABLE assessment_run_exposure_evidence (
+            assessment_run_id uuid NOT NULL,
+            exposure_id uuid NOT NULL,
+            evidence_record_id uuid NOT NULL
+                REFERENCES evidence_records(id) ON DELETE RESTRICT,
+            PRIMARY KEY (assessment_run_id, exposure_id, evidence_record_id),
+            FOREIGN KEY (assessment_run_id, exposure_id)
+                REFERENCES assessment_run_exposures(assessment_run_id, exposure_id)
+                ON DELETE RESTRICT
+        );
+
+        CREATE TABLE assessment_run_exposure_passages (
+            assessment_run_id uuid NOT NULL,
+            exposure_id uuid NOT NULL,
+            evidence_record_id uuid NOT NULL,
+            passage_id uuid NOT NULL,
+            PRIMARY KEY (assessment_run_id, exposure_id, passage_id),
+            FOREIGN KEY (assessment_run_id, exposure_id, evidence_record_id)
+                REFERENCES assessment_run_exposure_evidence(
+                    assessment_run_id, exposure_id, evidence_record_id
+                ) ON DELETE RESTRICT,
+            FOREIGN KEY (passage_id, evidence_record_id)
+                REFERENCES evidence_passages(id, evidence_record_id) ON DELETE RESTRICT
+        );
+
+        CREATE FUNCTION reject_evidence_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Evidence Records are immutable';
+        END;
+        $$;
+
+        CREATE TRIGGER sources_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON sources
+        FOR EACH ROW EXECUTE FUNCTION reject_evidence_mutation();
+
+        CREATE TRIGGER evidence_records_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON evidence_records
+        FOR EACH ROW EXECUTE FUNCTION reject_evidence_mutation();
+
+        CREATE TRIGGER evidence_passages_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON evidence_passages
+        FOR EACH ROW EXECUTE FUNCTION reject_evidence_mutation();
+
+        CREATE TRIGGER assessment_run_exposure_evidence_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON assessment_run_exposure_evidence
+        FOR EACH ROW EXECUTE FUNCTION reject_evidence_mutation();
+
+        CREATE TRIGGER assessment_run_exposure_passages_cannot_be_changed
+        BEFORE UPDATE OR DELETE ON assessment_run_exposure_passages
+        FOR EACH ROW EXECUTE FUNCTION reject_evidence_mutation();
+        """,
+    ),
 )
 
 

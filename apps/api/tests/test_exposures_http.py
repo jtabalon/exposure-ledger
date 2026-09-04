@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import zipfile
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID
 
-from exposure_ledger import AssessmentResult, OsvBatchResponse, OsvPackageQuery, RepositoryArchive
+import psycopg
+import pytest
+from exposure_ledger import (
+    AssessmentResult,
+    OsvBatchResponse,
+    OsvPackageQuery,
+    OsvSourceUnavailable,
+    RepositoryArchive,
+)
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_storage import ExposureRepository
@@ -32,6 +41,7 @@ class FixtureArchiveSource:
 class CapturedOsvSource:
     def __init__(self) -> None:
         self.batches: list[tuple[OsvPackageQuery, ...]] = []
+        self._captured_at = datetime(2026, 9, 3, 12, 30, tzinfo=UTC)
 
     def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         self.batches.append(queries)
@@ -42,7 +52,7 @@ class CapturedOsvSource:
             OsvPackageQuery(name="platform-only", version="4.0.0"),
         )
         shared_aliases = ["CVE-2026-4000", "GHSA-4444-5555-6666"]
-        return OsvBatchResponse.capture(
+        response = OsvBatchResponse.capture(
             {
                 "results": [
                     {
@@ -91,7 +101,15 @@ class CapturedOsvSource:
                 ]
             },
             expected_results=len(queries),
+            captured_at=self._captured_at,
         )
+        self._captured_at += timedelta(minutes=1)
+        return response
+
+
+class UnavailableOsvSource:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
+        raise OsvSourceUnavailable("The public OSV API is unavailable.")
 
 
 def repository_payload() -> dict[str, object]:
@@ -153,6 +171,45 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
             "fixedVersionAvailable": False,
             "score": 59,
         }
+        feature_evidence = first[0]["evidenceRecords"]
+        assert len(feature_evidence) == 1
+        assert feature_evidence[0]["source"] == {
+            "identity": "osv",
+            "authority": "Open Source Vulnerabilities",
+            "location": "https://api.osv.dev/v1/vulns/PYSEC-2026-40",
+        }
+        assert feature_evidence[0]["capturedAt"] == "2026-09-03T12:30:00Z"
+        assert feature_evidence[0]["contentDigest"].startswith("sha256:")
+        assert feature_evidence[0]["attribution"] == "Open Source Vulnerabilities (OSV)"
+        assert feature_evidence[0]["aliases"] == [
+            "CVE-2026-4000",
+            "GHSA-4444-5555-6666",
+            "PYSEC-2026-40",
+        ]
+        assert feature_evidence[0]["payloadIdentity"] == "PYSEC-2026-40"
+        assert feature_evidence[0]["passages"] == [
+            {
+                "id": feature_evidence[0]["passages"][0]["id"],
+                "identity": feature_evidence[0]["passages"][0]["identity"],
+                "kind": "affected",
+                "content": (
+                    '{"package":{"ecosystem":"PyPI","name":"feature_lib"},'
+                    '"ranges":[{"events":[{"introduced":"5.0"},{"fixed":"5.2"}],'
+                    '"type":"ECOSYSTEM"}]}'
+                ),
+            }
+        ]
+        with (
+            psycopg.connect(database_url) as connection,
+            pytest.raises(
+                psycopg.errors.RaiseException,
+                match="Evidence Records are immutable",
+            ),
+        ):
+            connection.execute(
+                "UPDATE evidence_records SET attribution = 'changed' WHERE id = %s",
+                (feature_evidence[0]["id"],),
+            )
         decisions = [
             item
             for item in client.get("/api/v1/policy-decisions").json()["items"]
@@ -185,4 +242,31 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
     assert [item["vulnerabilityRecord"]["id"] for item in second] == [
         item["vulnerabilityRecord"]["id"] for item in first
     ]
+    assert [record["id"] for item in second for record in item["evidenceRecords"]] == [
+        record["id"] for item in first for record in item["evidenceRecords"]
+    ]
+    assert second[0]["evidenceRecords"][0]["capturedAt"] == "2026-09-03T12:30:00Z"
     assert len(osv_source.batches) == 2
+
+
+def test_osv_unavailability_is_visible_without_fabricated_evidence(database_url: str) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=UnavailableOsvSource(),
+    )
+
+    with TestClient(app) as client:
+        failed = client.get(f"/api/v1/assessment-runs/{run['id']}").json()
+        exposures = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"]
+
+    assert failed["status"] == "failed"
+    assert failed["errorCode"] == "osv_unavailable"
+    assert failed["errorMessage"] == "The public OSV API is unavailable."
+    assert exposures == []
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (0,)

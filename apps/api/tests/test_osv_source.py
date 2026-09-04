@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -10,16 +11,11 @@ from exposure_ledger_worker.osv import OsvApiSource
 
 def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
     requests: list[httpx.Request] = []
-    full_record = {
-        "id": "PYSEC-2026-50",
-        "aliases": ["CVE-2026-5000"],
-        "affected": [
-            {
-                "package": {"ecosystem": "PyPI", "name": "demo-pkg"},
-                "versions": ["1.0"],
-            }
-        ],
-    }
+    full_record_content = (
+        '{\n  "id": "PYSEC-2026-50",\n  "aliases": ["CVE-2026-5000"],\n'
+        '  "affected": [{"package": {"ecosystem": "PyPI", "name": "demo-pkg"},'
+        ' "versions": ["1.0"]}]\n}'
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -37,9 +33,16 @@ def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
                 json={"results": [{"vulns": [{"id": "PYSEC-2026-50"}]}]},
             )
         assert request.url.path == "/v1/vulns/PYSEC-2026-50"
-        return httpx.Response(200, json=full_record)
+        return httpx.Response(
+            200,
+            content=full_record_content.encode(),
+            headers={"content-type": "application/json"},
+        )
 
-    source = OsvApiSource(transport=httpx.MockTransport(handler))
+    source = OsvApiSource(
+        transport=httpx.MockTransport(handler),
+        capture_clock=lambda: datetime(2026, 9, 3, 12, 30, tzinfo=UTC),
+    )
 
     response = source.query_batch((OsvPackageQuery(name="demo-pkg", version="1.0"),))
 
@@ -50,6 +53,15 @@ def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
     assert vulnerability.aliases == ("CVE-2026-5000",)
     assert vulnerability.affected[0].name == "demo-pkg"
     assert vulnerability.affected[0].versions == ("1.0",)
+    assert len(response.evidence_records) == 1
+    evidence = response.evidence_records[0]
+    assert evidence.payload_identity == "PYSEC-2026-50"
+    assert evidence.captured_at == datetime(2026, 9, 3, 12, 30, tzinfo=UTC)
+    assert evidence.content_digest.startswith("sha256:")
+    assert evidence.content == full_record_content
+    assert evidence.passages[0].content == (
+        '{"package":{"ecosystem":"PyPI","name":"demo-pkg"},"versions":["1.0"]}'
+    )
     assert [request.method for request in requests] == ["POST", "GET"]
     assert all(request.url.host == "api.osv.dev" for request in requests)
 

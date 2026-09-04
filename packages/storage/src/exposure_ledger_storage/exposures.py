@@ -9,12 +9,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
-from exposure_ledger import (
-    AssessmentResult,
-    ExposureRanking,
-    ExposureSeverity,
-    VulnerabilityRecord,
-)
+from exposure_ledger import AssessmentResult, ExposureRanking, ExposureSeverity, VulnerabilityRecord
+from exposure_ledger import EvidenceRecord as DomainEvidenceRecord
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -28,6 +24,35 @@ class VulnerabilityRecordRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRecord:
+    identity: str
+    authority: str
+    location: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidencePassageRecord:
+    id: UUID
+    identity: str
+    kind: str
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRecordRecord:
+    id: UUID
+    identity: str
+    source: SourceRecord
+    captured_at: datetime
+    content_digest: str
+    attribution: str
+    aliases: tuple[str, ...]
+    payload_identity: str
+    content: str
+    passages: tuple[EvidencePassageRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ExposureRecord:
     id: UUID
     assessment_run_id: UUID
@@ -37,6 +62,7 @@ class ExposureRecord:
     ranking: ExposureRanking
     rank: int
     selected_for_investigation: bool
+    evidence_records: tuple[EvidenceRecordRecord, ...]
 
 
 class ExposureRepository:
@@ -68,6 +94,25 @@ class ExposureRepository:
         ):
             return self.list_for_assessment(assessment_run_id)
         with psycopg.connect(self._database_url) as connection, connection.transaction():
+            evidence_by_identity = {
+                evidence.identity: evidence for evidence in result.evidence_records
+            }
+            referenced_evidence = {
+                reference.record_identity
+                for exposure in result.exposures
+                for reference in exposure.evidence
+            }
+            missing_evidence = referenced_evidence - evidence_by_identity.keys()
+            if missing_evidence:
+                raise ValueError("Exposure discovery references unavailable Evidence Records")
+            evidence_ids: dict[str, UUID] = {}
+            passage_ids: dict[str, UUID] = {}
+            for identity in sorted(referenced_evidence):
+                evidence_id, stored_passages = self._evidence_id(
+                    connection, evidence_by_identity[identity]
+                )
+                evidence_ids[identity] = evidence_id
+                passage_ids.update(stored_passages)
             vulnerability_ids = {
                 vulnerability.identity: self._vulnerability_id(connection, vulnerability)
                 for vulnerability in result.vulnerability_records
@@ -128,6 +173,35 @@ class ExposureRepository:
                         exposure.ranking.score,
                     ),
                 )
+                for evidence in exposure.evidence:
+                    evidence_id = evidence_ids[evidence.record_identity]
+                    connection.execute(
+                        """
+                        INSERT INTO assessment_run_exposure_evidence (
+                            assessment_run_id, exposure_id, evidence_record_id
+                        ) VALUES (%s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (assessment_run_id, exposure_id, evidence_id),
+                    )
+                    with connection.cursor() as cursor:
+                        cursor.executemany(
+                            """
+                            INSERT INTO assessment_run_exposure_passages (
+                                assessment_run_id, exposure_id, evidence_record_id, passage_id
+                            ) VALUES (%s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            [
+                                (
+                                    assessment_run_id,
+                                    exposure_id,
+                                    evidence_id,
+                                    passage_ids[passage_identity],
+                                )
+                                for passage_identity in evidence.passage_identities
+                            ],
+                        )
             connection.execute(
                 """
                 INSERT INTO exposure_discoveries (
@@ -184,6 +258,116 @@ class ExposureRepository:
                 (assessment_run_id,),
             ).fetchall()
             return [self._from_row(connection, row) for row in rows]
+
+    @staticmethod
+    def _evidence_id(
+        connection: psycopg.Connection[Any], evidence: DomainEvidenceRecord
+    ) -> tuple[UUID, dict[str, UUID]]:
+        source_inserted = connection.execute(
+            """
+            INSERT INTO sources (id, identity_key, authority, location)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (identity_key, authority, location) DO NOTHING
+            RETURNING id
+            """,
+            (
+                uuid4(),
+                evidence.source.identity,
+                evidence.source.authority,
+                evidence.source.location,
+            ),
+        ).fetchone()
+        if source_inserted is None:
+            source_row = connection.execute(
+                """
+                SELECT id FROM sources
+                WHERE identity_key = %s AND authority = %s AND location = %s
+                """,
+                (evidence.source.identity, evidence.source.authority, evidence.source.location),
+            ).fetchone()
+            assert source_row is not None
+            source_id = UUID(str(source_row[0]))
+        else:
+            source_id = UUID(str(source_inserted[0]))
+
+        inserted = connection.execute(
+            """
+            INSERT INTO evidence_records (
+                id, identity_key, source_id, captured_at, content_digest, attribution,
+                aliases, payload_identity, content
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (identity_key) DO NOTHING
+            RETURNING id
+            """,
+            (
+                uuid4(),
+                evidence.identity,
+                source_id,
+                evidence.captured_at,
+                evidence.content_digest,
+                evidence.attribution,
+                list(evidence.aliases),
+                evidence.payload_identity,
+                evidence.content,
+            ),
+        ).fetchone()
+        if inserted is None:
+            existing = connection.execute(
+                """
+                SELECT id, source_id, content_digest, attribution, aliases,
+                       payload_identity, content
+                FROM evidence_records WHERE identity_key = %s
+                """,
+                (evidence.identity,),
+            ).fetchone()
+            assert existing is not None
+            expected = (
+                source_id,
+                evidence.content_digest,
+                evidence.attribution,
+                list(evidence.aliases),
+                evidence.payload_identity,
+                evidence.content,
+            )
+            actual = (UUID(str(existing[1])), *existing[2:])
+            if actual != expected:
+                raise ValueError("Evidence identity conflicts with an immutable stored record")
+            evidence_id = UUID(str(existing[0]))
+        else:
+            evidence_id = UUID(str(inserted[0]))
+
+        passage_ids: dict[str, UUID] = {}
+        for passage in evidence.passages:
+            passage_inserted = connection.execute(
+                """
+                INSERT INTO evidence_passages (
+                    id, evidence_record_id, identity_key, kind, content
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (identity_key) DO NOTHING
+                RETURNING id
+                """,
+                (uuid4(), evidence_id, passage.identity, passage.kind, passage.content),
+            ).fetchone()
+            if passage_inserted is None:
+                passage_row = connection.execute(
+                    """
+                    SELECT id, evidence_record_id, kind, content
+                    FROM evidence_passages WHERE identity_key = %s
+                    """,
+                    (passage.identity,),
+                ).fetchone()
+                assert passage_row is not None
+                if (
+                    UUID(str(passage_row[1])),
+                    str(passage_row[2]),
+                    str(passage_row[3]),
+                ) != (evidence_id, passage.kind, passage.content):
+                    raise ValueError("Evidence Passage identity conflicts with immutable content")
+                passage_id = UUID(str(passage_row[0]))
+            else:
+                passage_id = UUID(str(passage_inserted[0]))
+            passage_ids[passage.identity] = passage_id
+        return evidence_id, passage_ids
 
     @staticmethod
     def _vulnerability_id(
@@ -290,6 +474,11 @@ class ExposureRepository:
                 (row["package_id"],),
             ).fetchall()
         )
+        evidence_records = ExposureRepository._evidence_records(
+            connection,
+            assessment_run_id=UUID(str(row["assessment_run_id"])),
+            exposure_id=UUID(str(row["id"])),
+        )
         return ExposureRecord(
             id=UUID(str(row["id"])),
             assessment_run_id=UUID(str(row["assessment_run_id"])),
@@ -317,4 +506,74 @@ class ExposureRepository:
             ),
             rank=int(row["rank"]),
             selected_for_investigation=bool(row["selected_for_investigation"]),
+            evidence_records=evidence_records,
         )
+
+    @staticmethod
+    def _evidence_records(
+        connection: psycopg.Connection[Any],
+        *,
+        assessment_run_id: UUID,
+        exposure_id: UUID,
+    ) -> tuple[EvidenceRecordRecord, ...]:
+        rows = connection.execute(
+            """
+            SELECT evidence_records.id, evidence_records.identity_key,
+                   evidence_records.captured_at, evidence_records.content_digest,
+                   evidence_records.attribution, evidence_records.aliases,
+                   evidence_records.payload_identity, evidence_records.content,
+                   sources.identity_key AS source_identity, sources.authority,
+                   sources.location
+            FROM assessment_run_exposure_evidence
+            JOIN evidence_records
+              ON evidence_records.id = assessment_run_exposure_evidence.evidence_record_id
+            JOIN sources ON sources.id = evidence_records.source_id
+            WHERE assessment_run_exposure_evidence.assessment_run_id = %s
+              AND assessment_run_exposure_evidence.exposure_id = %s
+            ORDER BY evidence_records.identity_key
+            """,
+            (assessment_run_id, exposure_id),
+        ).fetchall()
+        records: list[EvidenceRecordRecord] = []
+        for evidence in rows:
+            passages = connection.execute(
+                """
+                SELECT evidence_passages.id, evidence_passages.identity_key,
+                       evidence_passages.kind, evidence_passages.content
+                FROM assessment_run_exposure_passages
+                JOIN evidence_passages
+                  ON evidence_passages.id = assessment_run_exposure_passages.passage_id
+                WHERE assessment_run_exposure_passages.assessment_run_id = %s
+                  AND assessment_run_exposure_passages.exposure_id = %s
+                  AND assessment_run_exposure_passages.evidence_record_id = %s
+                ORDER BY evidence_passages.identity_key
+                """,
+                (assessment_run_id, exposure_id, evidence["id"]),
+            ).fetchall()
+            records.append(
+                EvidenceRecordRecord(
+                    id=UUID(str(evidence["id"])),
+                    identity=str(evidence["identity_key"]),
+                    source=SourceRecord(
+                        identity=str(evidence["source_identity"]),
+                        authority=str(evidence["authority"]),
+                        location=str(evidence["location"]),
+                    ),
+                    captured_at=evidence["captured_at"],
+                    content_digest=str(evidence["content_digest"]),
+                    attribution=str(evidence["attribution"]),
+                    aliases=tuple(str(alias) for alias in evidence["aliases"]),
+                    payload_identity=str(evidence["payload_identity"]),
+                    content=str(evidence["content"]),
+                    passages=tuple(
+                        EvidencePassageRecord(
+                            id=UUID(str(passage["id"])),
+                            identity=str(passage["identity_key"]),
+                            kind=str(passage["kind"]),
+                            content=str(passage["content"]),
+                        )
+                        for passage in passages
+                    ),
+                )
+            )
+        return tuple(records)

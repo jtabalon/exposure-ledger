@@ -7,6 +7,7 @@ import json
 import socket
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -30,11 +31,13 @@ class OsvApiSource:
         timeout_seconds: float = 20.0,
         transport: httpx.BaseTransport | None = None,
         clock: Callable[[], float] | None = None,
+        capture_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._timeout_seconds = timeout_seconds
         self._timeout = httpx.Timeout(timeout_seconds)
         self._transport = transport
         self._clock = clock or time.monotonic
+        self._capture_clock = capture_clock or (lambda: datetime.now(UTC))
 
     def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         if not queries:
@@ -62,7 +65,7 @@ class OsvApiSource:
                 for _ in range(_MAX_PAGES):
                     if not pending:
                         break
-                    response_payload = _request_json(
+                    response_payload, _ = _request_json(
                         client,
                         "POST",
                         f"{_OSV_ORIGIN}/v1/querybatch",
@@ -111,16 +114,22 @@ class OsvApiSource:
                 if pending:
                     raise OsvSourceUnavailable("OSV pagination exceeded the bounded page limit.")
 
-                records = {
-                    identifier: _request_json(
+                records: dict[str, dict[str, Any]] = {}
+                captured_contents: dict[str, str] = {}
+                for identifier in sorted(set[str]().union(*vulnerability_ids)):
+                    record, captured_content = _request_json(
                         client,
                         "GET",
                         f"{_OSV_ORIGIN}/v1/vulns/{quote(identifier, safe='')}",
                         deadline=deadline,
                         clock=self._clock,
                     )
-                    for identifier in sorted(set[str]().union(*vulnerability_ids))
-                }
+                    if record.get("id") != identifier:
+                        raise OsvSourceUnavailable(
+                            "OSV returned a vulnerability record with a mismatched identifier."
+                        )
+                    records[identifier] = record
+                    captured_contents[identifier] = captured_content
         except httpx.HTTPError as error:
             raise OsvSourceUnavailable("The public OSV API could not be retrieved.") from error
 
@@ -130,7 +139,12 @@ class OsvApiSource:
                 for identifiers in vulnerability_ids
             ]
         }
-        return OsvBatchResponse.capture(payload, expected_results=len(queries))
+        return OsvBatchResponse.capture(
+            payload,
+            expected_results=len(queries),
+            captured_at=self._capture_clock(),
+            captured_contents=captured_contents,
+        )
 
 
 def _request_json(
@@ -141,7 +155,7 @@ def _request_json(
     json_body: dict[str, object] | None = None,
     deadline: float,
     clock: Callable[[], float],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     timeout_seconds = _remaining_time(deadline, clock)
     with client.stream(
         method,
@@ -162,12 +176,13 @@ def _request_json(
             if len(content) > _MAX_RESPONSE_BYTES:
                 raise OsvSourceUnavailable("The public OSV response exceeds the size limit.")
     try:
-        payload = json.loads(content)
+        captured_content = content.decode("utf-8")
+        payload = json.loads(captured_content)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise OsvSourceUnavailable("The public OSV API returned invalid JSON.") from error
     if not isinstance(payload, dict):
         raise OsvSourceUnavailable("The public OSV API returned an invalid JSON object.")
-    return payload
+    return payload, captured_content
 
 
 def _remaining_time(deadline: float, clock: Callable[[], float]) -> float:

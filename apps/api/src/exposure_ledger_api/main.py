@@ -35,6 +35,8 @@ from exposure_ledger_storage import (
     AssessmentStatus,
     AssetSnapshotRecord,
     AssetSnapshotRepository,
+    EvidencePassageRecord,
+    EvidenceRecordRecord,
     ExposureRecord,
     ExposureRepository,
     PackageInstanceRecord,
@@ -253,6 +255,51 @@ class ExposureRankingResponse(ApiModel):
         return cls.model_validate(ranking, from_attributes=True)
 
 
+class SourceResponse(ApiModel):
+    identity: str
+    authority: str
+    location: str
+
+
+class EvidencePassageResponse(ApiModel):
+    id: UUID
+    identity: str
+    kind: str
+    content: str
+
+    @classmethod
+    def from_record(cls, passage: EvidencePassageRecord) -> "EvidencePassageResponse":
+        return cls.model_validate(passage, from_attributes=True)
+
+
+class EvidenceRecordResponse(ApiModel):
+    id: UUID
+    identity: str
+    source: SourceResponse
+    captured_at: datetime
+    content_digest: str
+    attribution: str
+    aliases: list[str]
+    payload_identity: str
+    content: str
+    passages: list[EvidencePassageResponse]
+
+    @classmethod
+    def from_record(cls, evidence: EvidenceRecordRecord) -> "EvidenceRecordResponse":
+        return cls(
+            id=evidence.id,
+            identity=evidence.identity,
+            source=SourceResponse.model_validate(evidence.source, from_attributes=True),
+            captured_at=evidence.captured_at,
+            content_digest=evidence.content_digest,
+            attribution=evidence.attribution,
+            aliases=list(evidence.aliases),
+            payload_identity=evidence.payload_identity,
+            content=evidence.content,
+            passages=[EvidencePassageResponse.from_record(item) for item in evidence.passages],
+        )
+
+
 class ExposureResponse(ApiModel):
     id: UUID
     assessment_run_id: UUID
@@ -262,6 +309,7 @@ class ExposureResponse(ApiModel):
     ranking: ExposureRankingResponse
     rank: int
     selected_for_investigation: bool
+    evidence_records: list[EvidenceRecordResponse]
 
     @classmethod
     def from_record(cls, exposure: ExposureRecord) -> "ExposureResponse":
@@ -277,6 +325,9 @@ class ExposureResponse(ApiModel):
             ranking=ExposureRankingResponse.from_domain(exposure.ranking),
             rank=exposure.rank,
             selected_for_investigation=exposure.selected_for_investigation,
+            evidence_records=[
+                EvidenceRecordResponse.from_record(item) for item in exposure.evidence_records
+            ],
         )
 
 

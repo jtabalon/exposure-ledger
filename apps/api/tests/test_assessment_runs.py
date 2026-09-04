@@ -12,6 +12,13 @@ from fastapi.testclient import TestClient
 
 
 def _downgrade_to_migration_five(connection: psycopg.Connection[Any]) -> None:
+    connection.execute("DROP TABLE assessment_run_exposure_passages")
+    connection.execute("DROP TABLE assessment_run_exposure_evidence")
+    connection.execute("DROP TABLE evidence_passages")
+    connection.execute("DROP TABLE evidence_records")
+    connection.execute("DROP TABLE sources")
+    connection.execute("DROP FUNCTION reject_evidence_mutation")
+    connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 9")
     connection.execute("DROP TABLE exposure_discoveries")
     connection.execute("DROP TABLE assessment_run_exposures")
     connection.execute("DROP TABLE exposures")
@@ -391,5 +398,5 @@ def test_migration_six_seals_existing_version_five_snapshots(database_url: str) 
         ).fetchone()
 
     assert row == (True,)
-    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [version for (version,) in versions] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert enforcement_point == ("enforcement_point",)

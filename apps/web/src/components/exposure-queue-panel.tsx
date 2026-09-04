@@ -52,12 +52,16 @@ export function ExposureQueuePanel({
           </div>
         ) : exposures.length === 0 ? (
           <div className="border border-dashed p-3 text-xs leading-5 text-muted-foreground">
-            No OSV Exposures were discovered for the latest completed repository Assessment Run.
+            No OSV Exposures were discovered for the latest repository Assessment Run.
           </div>
         ) : (
           <ol className="grid gap-3 xl:grid-cols-2" aria-label="Ranked Exposures">
-            {exposures.map((exposure) => (
+            {exposures.map((exposure, index) => (
               <li key={exposure.id} className="rounded-md border bg-card p-4">
+                <details open={index === 0}>
+                  <summary className="mb-3 cursor-pointer text-xs font-semibold text-primary">
+                    Inspect Exposure and Evidence trace
+                  </summary>
                 <div className="flex items-start gap-3">
                   <div className="grid size-9 shrink-0 place-items-center rounded-md border bg-accent/45 font-mono text-sm font-semibold text-primary">
                     {exposure.rank}
@@ -123,6 +127,88 @@ export function ExposureQueuePanel({
                     </div>
                   </div>
                 </div>
+                <div className="mt-4 border-t pt-4">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-xs font-semibold">Evidence trace</h4>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {exposure.evidenceRecords.length} immutable OSV record
+                      {exposure.evidenceRecords.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  {exposure.evidenceRecords.length === 0 ? (
+                    <div
+                      role="status"
+                      className="border-l-2 border-amber-600 bg-amber-600/7 p-3 text-xs text-amber-900"
+                    >
+                      Evidence unavailable. No Source content is substituted or inferred.
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {exposure.evidenceRecords.map((evidence) => (
+                        <article key={evidence.id} className="rounded-md border bg-muted/25 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <div className="text-xs font-semibold">{evidence.attribution}</div>
+                              <a
+                                href={evidence.source.location}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-1 block break-all font-mono text-[10px] text-primary underline-offset-2 hover:underline"
+                              >
+                                {evidence.source.location}
+                              </a>
+                            </div>
+                            <Badge variant="outline" className="font-mono text-[9px]">
+                              {evidence.payloadIdentity}
+                            </Badge>
+                          </div>
+                          <dl className="mt-3 grid gap-2 text-[10px] sm:grid-cols-2">
+                            <div>
+                              <dt className="text-muted-foreground">Captured</dt>
+                              <dd className="font-mono">{evidence.capturedAt}</dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Source identity</dt>
+                              <dd className="font-mono">{evidence.source.identity}</dd>
+                            </div>
+                            <div className="sm:col-span-2">
+                              <dt className="text-muted-foreground">Content digest</dt>
+                              <dd className="break-all font-mono">{evidence.contentDigest}</dd>
+                            </div>
+                          </dl>
+                          <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Evidence aliases">
+                            {evidence.aliases.map((alias) => (
+                              <Badge key={alias} variant="outline" className="font-mono text-[9px]">
+                                {alias}
+                              </Badge>
+                            ))}
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {evidence.passages.map((passage) => (
+                              <div key={passage.id}>
+                                <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                                  Affected-range passage
+                                </div>
+                                <pre className="overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
+                                  {passage.content}
+                                </pre>
+                              </div>
+                            ))}
+                          </div>
+                          <details className="mt-3">
+                            <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground">
+                              Full captured OSV payload
+                            </summary>
+                            <pre className="mt-2 overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
+                              {evidence.content}
+                            </pre>
+                          </details>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                </details>
               </li>
             ))}
           </ol>
