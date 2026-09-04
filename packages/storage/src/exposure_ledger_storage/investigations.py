@@ -155,27 +155,40 @@ class InvestigationRepository:
             model=model,
         )
 
-    def acquire(self, command: RunInvestigation) -> InvestigationExposure:
+    def acquire(
+        self, command: RunInvestigation, *, timeout_seconds: float
+    ) -> InvestigationExposure:
         """Load one selected package-specific Exposure and its immutable evidence state."""
-        exposure = next(
-            (
-                item
-                for item in ExposureRepository(self._database_url).list_for_assessment(
-                    command.assessment_run_id
-                )
-                if item.id == command.exposure_id
-            ),
-            None,
-        )
+        timeout_ms = _timeout_ms(timeout_seconds)
+        try:
+            exposure = next(
+                (
+                    item
+                    for item in ExposureRepository(self._database_url).list_for_assessment(
+                        command.assessment_run_id, statement_timeout_ms=timeout_ms
+                    )
+                    if item.id == command.exposure_id
+                ),
+                None,
+            )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError("Evidence acquisition exceeded its wall-time budget") from error
         if exposure is None or not exposure.selected_for_investigation:
             raise ValueError("Investigation command does not identify a selected Exposure")
         if exposure.asset_snapshot_id != command.asset_snapshot_id:
             raise ValueError("Pinned Asset Snapshot does not match the Exposure")
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
-            snapshot = connection.execute(
-                "SELECT parser_version FROM asset_snapshots WHERE id = %s",
-                (exposure.asset_snapshot_id,),
-            ).fetchone()
+            try:
+                connection.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{timeout_ms}ms",),
+                )
+                snapshot = connection.execute(
+                    "SELECT parser_version FROM asset_snapshots WHERE id = %s",
+                    (exposure.asset_snapshot_id,),
+                ).fetchone()
+            except psycopg.errors.QueryCanceled as error:
+                raise TimeoutError("Evidence acquisition exceeded its wall-time budget") from error
         if snapshot is None or snapshot["parser_version"] != command.configuration.parser_version:
             raise ValueError("Pinned parser version does not match the Asset Snapshot")
         return InvestigationExposure(
@@ -203,13 +216,19 @@ class InvestigationRepository:
         self,
         exposure: InvestigationExposure,
         command: RunInvestigation,
+        *,
+        timeout_seconds: float,
     ) -> RetrievedInvestigationEvidence:
         """Run the pinned hybrid retrieval configuration inside the Exposure scope."""
+        timeout_ms = _timeout_ms(timeout_seconds)
         if command.configuration.source_policy_version != "explicit-source-allowlist-v1":
             raise ValueError("Pinned Source policy version is not current")
-        records = ExposureRepository(self._database_url).list_for_assessment(
-            command.assessment_run_id
-        )
+        try:
+            records = ExposureRepository(self._database_url).list_for_assessment(
+                command.assessment_run_id, statement_timeout_ms=timeout_ms
+            )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError("Evidence retrieval exceeded its wall-time budget") from error
         record = next((item for item in records if item.id == exposure.exposure_id), None)
         if record is None:
             raise ValueError("Exposure is no longer available in the Assessment scope")
@@ -225,27 +244,31 @@ class InvestigationRepository:
                 }
             )
         )
-        result = EvidenceRetriever(self._database_url).retrieve(
-            RetrievalQuery(
-                assessment_run_id=command.assessment_run_id,
-                exposure_id=command.exposure_id,
-                text=build_exposure_retrieval_query(
-                    exposure.package_name,
-                    exposure.package_version,
-                    exposure.vulnerability_aliases,
+        try:
+            result = EvidenceRetriever(self._database_url).retrieve(
+                RetrievalQuery(
+                    assessment_run_id=command.assessment_run_id,
+                    exposure_id=command.exposure_id,
+                    text=build_exposure_retrieval_query(
+                        exposure.package_name,
+                        exposure.package_version,
+                        exposure.vulnerability_aliases,
+                    ),
+                    source_policy=SourcePolicy(
+                        version=command.configuration.source_policy_version,
+                        allowed_source_identities=source_identities,
+                    ),
+                    evidence_types=evidence_types,
+                    retrieval_configuration_version=(
+                        command.configuration.retrieval_configuration_version
+                    ),
+                    embedding_space_identity=command.configuration.embedding_space.identity,
+                    limit=10,
                 ),
-                source_policy=SourcePolicy(
-                    version=command.configuration.source_policy_version,
-                    allowed_source_identities=source_identities,
-                ),
-                evidence_types=evidence_types,
-                retrieval_configuration_version=(
-                    command.configuration.retrieval_configuration_version
-                ),
-                embedding_space_identity=command.configuration.embedding_space.identity,
-                limit=10,
+                statement_timeout_ms=timeout_ms,
             )
-        )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError("Evidence retrieval exceeded its wall-time budget") from error
         if result.embedding_space != command.configuration.embedding_space:
             raise ValueError("Retrieved evidence used a different Embedding Space")
         return RetrievedInvestigationEvidence(
@@ -849,7 +872,11 @@ class InvestigationRepository:
                 passages=_retrieved_passages_from_json(row["retrieved_passages"]),
             ),
             material_claims_supported=bool(row["material_claims_supported"]),
-            authoritative_conflict=bool(row["authoritative_conflict"]),
+            authoritative_conflict=(
+                bool(row["authoritative_conflict"])
+                if row["authoritative_conflict"] is not None
+                else None
+            ),
             validation_issues=tuple(str(item) for item in row["validation_issues"]),
         )
         revision = InvestigationRevision(
@@ -1014,3 +1041,9 @@ def _source_adapter_versions(values: tuple[str, ...]) -> dict[str, str]:
             raise ValueError("Source adapter versions must uniquely map Source identity to version")
         versions[source_identity] = version
     return versions
+
+
+def _timeout_ms(timeout_seconds: float) -> int:
+    if timeout_seconds <= 0:
+        raise TimeoutError("Investigation wall-time budget exhausted")
+    return max(1, int(timeout_seconds * 1000))

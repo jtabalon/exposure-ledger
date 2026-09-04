@@ -430,9 +430,16 @@ class EvidenceRetriever:
             space=space,
         )
 
-    def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
+    def retrieve(
+        self, query: RetrievalQuery, *, statement_timeout_ms: int | None = None
+    ) -> RetrievalResult:
         self._validate_query(query)
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            if statement_timeout_ms is not None:
+                connection.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{statement_timeout_ms}ms",),
+                )
             if not self._configuration_is_current(
                 connection, query.retrieval_configuration_version
             ):
@@ -449,6 +456,11 @@ class EvidenceRetriever:
                 "Hybrid retrieval requires one explicit Embedding Space identity."
             )
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            if statement_timeout_ms is not None:
+                connection.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{statement_timeout_ms}ms",),
+                )
             stored_space = self._stored_space_by_identity(
                 connection, query.embedding_space_identity
             )

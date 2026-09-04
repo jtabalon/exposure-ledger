@@ -319,7 +319,9 @@ export function InvestigationWorkbench({
                     <span className="font-mono text-xs">
                       {investigation.exposure.authoritativeConflict
                         ? "Conflicting guidance — compare Sources"
-                        : investigation.exposure.affectedRange}
+                        : investigation.exposure.authoritativeConflict === null
+                          ? "Not checked — evidence acquisition stopped"
+                          : investigation.exposure.affectedRange}
                     </span>
                   }
                 />
@@ -329,7 +331,9 @@ export function InvestigationWorkbench({
                     <span className="font-mono">
                       {investigation.exposure.authoritativeConflict
                         ? "Unresolved"
-                        : investigation.exposure.fixedVersion}
+                        : investigation.exposure.authoritativeConflict === null
+                          ? "Not checked"
+                          : investigation.exposure.fixedVersion}
                     </span>
                   }
                 />
@@ -343,7 +347,14 @@ export function InvestigationWorkbench({
               </dl>
             </div>
 
-            {investigation.exposure.authoritativeConflict ? (
+            {investigation.exposure.authoritativeConflict === null ? (
+              <div
+                role="status"
+                className="mt-4 border-l-2 border-amber-600 bg-amber-500/8 p-3 text-xs leading-5"
+              >
+                Evidence acquisition stopped before authoritative conflict could be checked.
+              </div>
+            ) : investigation.exposure.authoritativeConflict ? (
               <div
                 role="status"
                 className="mt-4 border-l-2 border-red-700 bg-red-700/7 p-3 text-xs leading-5 text-red-950"

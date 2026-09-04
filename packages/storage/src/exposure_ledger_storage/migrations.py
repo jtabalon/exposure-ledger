@@ -854,7 +854,7 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
             status text NOT NULL CHECK (status IN ('complete', 'incomplete')),
             stopping_condition text NOT NULL,
             material_claims_supported boolean NOT NULL,
-            authoritative_conflict boolean NOT NULL,
+            authoritative_conflict boolean,
             validation_issues text[] NOT NULL,
             retrieval_query text NOT NULL,
             retrieved_passages jsonb NOT NULL,

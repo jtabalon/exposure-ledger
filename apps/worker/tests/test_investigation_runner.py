@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -83,8 +83,11 @@ class ControlledEvidenceAcquirer:
     def __init__(self) -> None:
         self.calls = 0
 
-    def acquire(self, command: RunInvestigation) -> InvestigationExposure:
+    def acquire(
+        self, command: RunInvestigation, *, timeout_seconds: float
+    ) -> InvestigationExposure:
         self.calls += 1
+        assert timeout_seconds > 0
         assert command.exposure_id == EXPOSURE_ID
         return InvestigationExposure(
             assessment_run_id=ASSESSMENT_ID,
@@ -115,8 +118,11 @@ class ControlledRetriever:
         self,
         exposure: InvestigationExposure,
         command: RunInvestigation,
+        *,
+        timeout_seconds: float,
     ) -> RetrievedInvestigationEvidence:
         self.calls += 1
+        assert timeout_seconds > 0
         assert exposure.exposure_id == command.exposure_id
         return RetrievedInvestigationEvidence(
             query="feature-lib 5.1.0 CVE-2026-4000 affected fixed upgrade",
@@ -147,7 +153,8 @@ class ControlledGenerator:
         self._draft = draft
         self.calls = 0
 
-    def check_readiness(self) -> GenerationReadiness:
+    def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness:
+        assert timeout_seconds is None or timeout_seconds > 0
         return GenerationReadiness(
             status="ready",
             code=None,
@@ -161,8 +168,11 @@ class ControlledGenerator:
         exposure: InvestigationExposure,
         evidence: RetrievedInvestigationEvidence,
         configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
     ) -> StructuredInvestigationDraft:
         self.calls += 1
+        assert timeout_seconds > 0
         assert exposure.exposure_id == EXPOSURE_ID
         assert evidence.passages[0].evidence_record_id == EVIDENCE_ID
         assert configuration.generation_model == _generation_model()
@@ -298,8 +308,13 @@ async def test_unsupported_claim_is_preserved_and_recommendation_is_downgraded()
 
 
 class ConflictingEvidenceAcquirer(ControlledEvidenceAcquirer):
-    def acquire(self, command: RunInvestigation) -> InvestigationExposure:
-        return replace(super().acquire(command), authoritative_conflict=True)
+    def acquire(
+        self, command: RunInvestigation, *, timeout_seconds: float
+    ) -> InvestigationExposure:
+        return replace(
+            super().acquire(command, timeout_seconds=timeout_seconds),
+            authoritative_conflict=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -345,14 +360,15 @@ async def test_unsafe_structured_operation_is_blocked_before_revision_completion
 
 @pytest.mark.asyncio
 async def test_wall_time_budget_stops_model_use_and_persists_incomplete_revision() -> None:
-    clock_values = iter((NOW, NOW + timedelta(seconds=2)))
+    monotonic_values = iter((0.0, 2.0))
     generator = ControlledGenerator(_supported_draft())
     runner = BoundedInvestigationRunner(
         evidence_acquirer=ControlledEvidenceAcquirer(),
         retriever=ControlledRetriever(),
         generator=generator,
         revision_history=InMemoryRevisionHistory(),
-        clock=lambda: next(clock_values, NOW + timedelta(seconds=2)),
+        clock=lambda: NOW,
+        monotonic_clock=lambda: next(monotonic_values, 2.0),
     )
     command = replace(_command(), budget=InvestigationBudget(wall_time_seconds=1))
 
@@ -402,6 +418,7 @@ async def test_transition_budget_stops_before_evidence_acquisition() -> None:
     assert revision.status is InvestigationRevisionStatus.INCOMPLETE
     assert revision.stopping_condition == "graph_transition_budget_exhausted"
     assert revision.asset_snapshot_id == SNAPSHOT_ID
+    assert revision.evidence_state.authoritative_conflict is None
     assert revision.measurements.tool_calls == 0
     assert acquirer.calls == 0
 
@@ -450,8 +467,42 @@ async def test_tool_budget_does_not_record_unperformed_retrieval() -> None:
     ]
 
 
+class TimedOutRetriever(ControlledRetriever):
+    def retrieve(
+        self,
+        exposure: InvestigationExposure,
+        command: RunInvestigation,
+        *,
+        timeout_seconds: float,
+    ) -> RetrievedInvestigationEvidence:
+        assert timeout_seconds > 0
+        raise TimeoutError("controlled retrieval timeout")
+
+
+@pytest.mark.asyncio
+async def test_active_retrieval_timeout_persists_an_incomplete_revision() -> None:
+    generator = ControlledGenerator(_supported_draft())
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=TimedOutRetriever(),
+        generator=generator,
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "wall_time_budget_exhausted"
+    assert revision.evidence_state.retrieved.passages == ()
+    assert revision.measurements.generation_model_calls == 0
+    assert revision.measurements.tool_calls == 2
+    assert generator.calls == 0
+
+
 class UnavailableGenerator(ControlledGenerator):
-    def check_readiness(self) -> GenerationReadiness:
+    def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness:
+        assert timeout_seconds is None or timeout_seconds > 0
         return GenerationReadiness(
             status="unavailable",
             code="generation_model_not_installed",
@@ -465,6 +516,8 @@ class UnavailableGenerator(ControlledGenerator):
         exposure: InvestigationExposure,
         evidence: RetrievedInvestigationEvidence,
         configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
     ) -> StructuredInvestigationDraft:
         raise AssertionError("Unavailable local generation must not invoke any provider")
 

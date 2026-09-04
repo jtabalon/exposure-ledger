@@ -330,7 +330,7 @@ class InvestigationEvidenceState:
     available: tuple[AvailableEvidence, ...]
     retrieved: RetrievedInvestigationEvidence
     material_claims_supported: bool
-    authoritative_conflict: bool
+    authoritative_conflict: bool | None
     validation_issues: tuple[str, ...]
 
 

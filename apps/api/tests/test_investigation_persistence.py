@@ -58,7 +58,7 @@ class ControlledGenerationProvider:
         artifact_digest="sha256:" + "d" * 64,
     )
 
-    def check_readiness(self) -> GenerationReadiness:
+    def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness:
         return GenerationReadiness(
             status="ready",
             code=None,
@@ -67,7 +67,9 @@ class ControlledGenerationProvider:
             model=self.model,
         )
 
-    def generate(self, exposure, evidence, configuration):  # type: ignore[no-untyped-def]
+    def generate(  # type: ignore[no-untyped-def]
+        self, exposure, evidence, configuration, *, timeout_seconds: float
+    ):
         assert configuration.generation_model == self.model
         passage = evidence.passages[0]
         return StructuredInvestigationDraft(
@@ -338,7 +340,7 @@ def test_revision_persists_when_budget_expires_before_evidence_acquisition(
             available=(),
             retrieved=RetrievedInvestigationEvidence(query="", passages=()),
             material_claims_supported=False,
-            authoritative_conflict=False,
+            authoritative_conflict=None,
             validation_issues=(),
         ),
         claims=(),

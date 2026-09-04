@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Protocol, TypedDict, cast
 from uuid import UUID, uuid4
 
@@ -44,7 +46,9 @@ from exposure_ledger_worker.local_generation import (
 
 
 class EvidenceAcquirer(Protocol):
-    def acquire(self, command: RunInvestigation) -> InvestigationExposure: ...
+    def acquire(
+        self, command: RunInvestigation, *, timeout_seconds: float
+    ) -> InvestigationExposure: ...
 
 
 class InvestigationRetriever(Protocol):
@@ -52,6 +56,8 @@ class InvestigationRetriever(Protocol):
         self,
         exposure: InvestigationExposure,
         command: RunInvestigation,
+        *,
+        timeout_seconds: float,
     ) -> RetrievedInvestigationEvidence: ...
 
 
@@ -62,6 +68,7 @@ class RevisionHistory(Protocol):
 class _GraphState(TypedDict, total=False):
     command: RunInvestigation
     started_at: datetime
+    deadline_monotonic: float
     exposure: InvestigationExposure
     retrieved: RetrievedInvestigationEvidence
     draft: StructuredInvestigationDraft
@@ -81,42 +88,42 @@ _STAGES: tuple[tuple[InvestigationStage, InvestigationEventMode, str], ...] = (
     (
         InvestigationStage.LOAD_EXPOSURE,
         InvestigationEventMode.DETERMINISTIC,
-        "Pinned package-specific Exposure loaded.",
+        "Load the pinned package-specific Exposure.",
     ),
     (
         InvestigationStage.ACQUIRE_EVIDENCE,
         InvestigationEventMode.DETERMINISTIC,
-        "Immutable Evidence Records acquired.",
+        "Acquire immutable Evidence Records.",
     ),
     (
         InvestigationStage.RETRIEVE_PASSAGES,
         InvestigationEventMode.RETRIEVAL,
-        "Exposure-scoped hybrid retrieval completed.",
+        "Run Exposure-scoped hybrid retrieval.",
     ),
     (
         InvestigationStage.SYNTHESIZE_CLAIMS,
         InvestigationEventMode.MODEL,
-        "Structured Claims synthesized locally.",
+        "Synthesize structured Claims locally.",
     ),
     (
         InvestigationStage.VALIDATE_CLAIMS,
         InvestigationEventMode.DETERMINISTIC,
-        "Claim citations and limitations validated.",
+        "Validate Claim citations and limitations.",
     ),
     (
         InvestigationStage.RECOMMEND,
         InvestigationEventMode.DETERMINISTIC,
-        "Recommendation evidence policy applied.",
+        "Apply the Recommendation evidence policy.",
     ),
     (
         InvestigationStage.VALIDATE_POLICY,
         InvestigationEventMode.POLICY,
-        "Structured output cyber policy applied.",
+        "Apply the structured-output cyber policy.",
     ),
     (
         InvestigationStage.PERSIST_REVISION,
         InvestigationEventMode.DETERMINISTIC,
-        "Immutable Investigation Revision persisted.",
+        "Persist the immutable Investigation Revision.",
     ),
 )
 
@@ -132,21 +139,25 @@ class BoundedInvestigationRunner:
         generator: GenerationProvider,
         revision_history: RevisionHistory,
         clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ) -> None:
         self._evidence_acquirer = evidence_acquirer
         self._retriever = retriever
         self._generator = generator
         self._revision_history = revision_history
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic_clock or monotonic
         self._graph = self._build_graph()
 
     async def run(self, command: RunInvestigation) -> InvestigationRevision:
+        started_at = self._clock()
         state = cast(
             _GraphState,
             await self._graph.ainvoke(
                 {
                     "command": command,
-                    "started_at": self._clock(),
+                    "started_at": started_at,
+                    "deadline_monotonic": self._monotonic() + command.budget.wall_time_seconds,
                     "events": (),
                     "generation_model_calls": 0,
                     "tool_calls": 0,
@@ -186,8 +197,7 @@ class BoundedInvestigationRunner:
         _, mode, detail = next(item for item in _STAGES if item[0] == stage)
         command = state["command"]
         occurred_at = self._clock()
-        elapsed_seconds = (occurred_at - state["started_at"]).total_seconds()
-        if elapsed_seconds > command.budget.wall_time_seconds:
+        if self._remaining_seconds(state) <= 0:
             return {
                 "status": InvestigationRevisionStatus.INCOMPLETE,
                 "stopping_condition": "wall_time_budget_exhausted",
@@ -206,24 +216,33 @@ class BoundedInvestigationRunner:
     def _stopped(state: _GraphState, updates: dict[str, object]) -> bool:
         return updates.get("status", state["status"]) is InvestigationRevisionStatus.INCOMPLETE
 
+    def _remaining_seconds(self, state: _GraphState) -> float:
+        return max(0.0, state["deadline_monotonic"] - self._monotonic())
+
     def _load_exposure(self, state: _GraphState) -> dict[str, object]:
         return self._event(state, InvestigationStage.LOAD_EXPOSURE)
 
-    def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
+    async def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.ACQUIRE_EVIDENCE)
         if self._stopped(state, updates):
-            updates["exposure"] = InvestigationExposure(
-                assessment_run_id=state["command"].assessment_run_id,
-                exposure_id=state["command"].exposure_id,
-                asset_snapshot_id=state["command"].asset_snapshot_id,
-                package_name="",
-                package_version="",
-                vulnerability_aliases=(),
-                authoritative_conflict=False,
-                evidence=(),
+            return updates
+        timeout_seconds = self._remaining_seconds(state)
+        updates["tool_calls"] = state["tool_calls"] + 1
+        try:
+            exposure = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._evidence_acquirer.acquire,
+                    state["command"],
+                    timeout_seconds=timeout_seconds,
+                ),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition="wall_time_budget_exhausted",
             )
             return updates
-        exposure = self._evidence_acquirer.acquire(state["command"])
         if (
             exposure.assessment_run_id != state["command"].assessment_run_id
             or exposure.exposure_id != state["command"].exposure_id
@@ -231,10 +250,9 @@ class BoundedInvestigationRunner:
         ):
             raise ValueError("Acquired Exposure does not match the Investigation command")
         updates["exposure"] = exposure
-        updates["tool_calls"] = state["tool_calls"] + 1
         return updates
 
-    def _retrieve_passages(self, state: _GraphState) -> dict[str, object]:
+    async def _retrieve_passages(self, state: _GraphState) -> dict[str, object]:
         if state["tool_calls"] >= state["command"].budget.max_tool_calls:
             return dict(
                 status=InvestigationRevisionStatus.INCOMPLETE,
@@ -245,20 +263,55 @@ class BoundedInvestigationRunner:
         if self._stopped(state, updates):
             updates["retrieved"] = RetrievedInvestigationEvidence(query="", passages=())
             return updates
-        updates["retrieved"] = self._retriever.retrieve(state["exposure"], state["command"])
+        timeout_seconds = self._remaining_seconds(state)
         updates["tool_calls"] = state["tool_calls"] + 1
+        try:
+            updates["retrieved"] = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._retriever.retrieve,
+                    state["exposure"],
+                    state["command"],
+                    timeout_seconds=timeout_seconds,
+                ),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition="wall_time_budget_exhausted",
+                retrieved=RetrievedInvestigationEvidence(query="", passages=()),
+            )
+            return updates
         return updates
 
-    def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
+    async def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.SYNTHESIZE_CLAIMS)
         if self._stopped(state, updates):
             return updates
-        readiness = self._generator.check_readiness()
+        timeout_seconds = self._remaining_seconds(state)
+        try:
+            readiness = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generator.check_readiness,
+                    timeout_seconds=timeout_seconds,
+                ),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition="wall_time_budget_exhausted",
+            )
+            return updates
         configured = state["command"].configuration.generation_model
         if readiness.model is None:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition=readiness.code or "generation_provider_unavailable",
+                stopping_condition=(
+                    "wall_time_budget_exhausted"
+                    if readiness.code == "generation_wall_time_budget_exhausted"
+                    else readiness.code or "generation_provider_unavailable"
+                ),
             )
             return updates
         if readiness.model != configured:
@@ -274,16 +327,31 @@ class BoundedInvestigationRunner:
             )
             return updates
         try:
-            updates["draft"] = self._generator.generate(
-                state["exposure"],
-                state["retrieved"],
-                state["command"].configuration,
-            )
+            timeout_seconds = self._remaining_seconds(state)
             updates["generation_model_calls"] = state["generation_model_calls"] + 1
+            updates["draft"] = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._generator.generate,
+                    state["exposure"],
+                    state["retrieved"],
+                    state["command"].configuration,
+                    timeout_seconds=timeout_seconds,
+                ),
+                timeout=timeout_seconds,
+            )
         except GenerationProviderUnavailable as error:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition=error.readiness.code or "generation_provider_unavailable",
+                stopping_condition=(
+                    "wall_time_budget_exhausted"
+                    if error.readiness.code == "generation_wall_time_budget_exhausted"
+                    else error.readiness.code or "generation_provider_unavailable"
+                ),
+            )
+        except TimeoutError:
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition="wall_time_budget_exhausted",
             )
         return updates
 
@@ -291,11 +359,16 @@ class BoundedInvestigationRunner:
         updates = self._event(state, InvestigationStage.VALIDATE_CLAIMS)
         draft = state.get("draft")
         retrieved = state["retrieved"]
-        available = _retrieved_evidence_scope(retrieved, state["exposure"].evidence)
+        exposure = state.get("exposure")
+        available = _retrieved_evidence_scope(
+            retrieved, exposure.evidence if exposure is not None else ()
+        )
         updates["validation"] = ClaimValidator.validate(
             claims=draft.claims if draft is not None else (),
             available_evidence=available,
-            authoritative_conflict=state["exposure"].authoritative_conflict,
+            authoritative_conflict=(
+                exposure.authoritative_conflict if exposure is not None else False
+            ),
         )
         return updates
 
@@ -399,14 +472,16 @@ class BoundedInvestigationRunner:
             id=uuid4(),
             assessment_run_id=state["command"].assessment_run_id,
             exposure_id=state["command"].exposure_id,
-            asset_snapshot_id=state["exposure"].asset_snapshot_id,
+            asset_snapshot_id=state["command"].asset_snapshot_id,
             status=status,
             stopping_condition=stopping_condition,
             evidence_state=InvestigationEvidenceState(
-                available=state["exposure"].evidence,
+                available=(state["exposure"].evidence if "exposure" in state else ()),
                 retrieved=state["retrieved"],
                 material_claims_supported=validation.material_claims_supported,
-                authoritative_conflict=validation.authoritative_conflict,
+                authoritative_conflict=(
+                    validation.authoritative_conflict if "exposure" in state else None
+                ),
                 validation_issues=validation.issues,
             ),
             claims=validation.claims,

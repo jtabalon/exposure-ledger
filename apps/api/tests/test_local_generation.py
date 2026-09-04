@@ -119,6 +119,27 @@ def test_generation_readiness_requires_an_explicitly_installed_local_artifact() 
     assert [(request.method, request.url.path) for request in requests] == [("GET", "/api/tags")]
 
 
+def test_generation_requests_use_the_remaining_investigation_timeout() -> None:
+    request_timeouts: list[float] = []
+    ticks = iter((10.0, 10.25))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]
+        assert isinstance(timeout, dict)
+        request_timeouts.append(float(timeout["read"]))
+        return httpx.Response(200, json={"models": []})
+
+    readiness = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+        monotonic=lambda: next(ticks),
+    ).check_readiness(timeout_seconds=1)
+
+    assert readiness.code == "generation_model_not_installed"
+    assert request_timeouts == [0.75]
+
+
 def test_generation_returns_only_validated_structured_output_without_reasoning() -> None:
     chat_requests: list[dict[str, object]] = []
     structured = {

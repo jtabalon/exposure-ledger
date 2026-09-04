@@ -52,7 +52,7 @@ export type DemoInvestigation = {
     installedVersion: string
     affectedRange: string
     fixedVersion: string
-    authoritativeConflict: boolean
+    authoritativeConflict: boolean | null
     advisoryGuidance: {
       source: string
       authority: string

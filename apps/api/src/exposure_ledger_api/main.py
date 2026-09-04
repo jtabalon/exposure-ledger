@@ -664,7 +664,7 @@ class RevisionEvidenceStateResponse(ApiModel):
     available: list[RevisionEvidenceRecordResponse]
     retrieved: RevisionRetrievedEvidenceResponse
     material_claims_supported: bool
-    authoritative_conflict: bool
+    authoritative_conflict: bool | None
     validation_issues: list[str]
 
 

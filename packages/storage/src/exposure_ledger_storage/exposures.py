@@ -269,8 +269,15 @@ class ExposureRepository:
             raise ValueError("Assessment Run Exposure discovery belongs to another Asset Snapshot")
         return True
 
-    def list_for_assessment(self, assessment_run_id: UUID) -> list[ExposureRecord]:
+    def list_for_assessment(
+        self, assessment_run_id: UUID, *, statement_timeout_ms: int | None = None
+    ) -> list[ExposureRecord]:
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+            if statement_timeout_ms is not None:
+                connection.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{statement_timeout_ms}ms",),
+                )
             rows = connection.execute(
                 """
                 SELECT exposures.id, assessment_run_exposures.assessment_run_id,

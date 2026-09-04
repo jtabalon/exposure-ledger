@@ -29,7 +29,7 @@ The local installation runs live Assessments. The initial hosted demo is a stati
 | Exposure discovery | `discover(snapshot) -> AssessmentResult` | OSV batch matching, alias coalescing, package-specific Exposure identity, deterministic ranking |
 | Evidence acquisition | `collect(plan) -> EvidenceSet` | allowlists, HTTP policy, caching, conditional requests, capture digests, source-specific parsing |
 | Retrieval | `retrieve(query, space) -> RetrievedEvidence` | source-aware passage construction, metadata filters, FTS, pgvector similarity, reciprocal-rank fusion |
-| Investigation | `run(command) -> InvestigationRevision` | graph execution, checkpoints, evidence-gap follow-ups, model calls, stopping rules, persistence |
+| Investigation | `run(command) -> InvestigationRevision` | fixed graph execution, model calls, stopping rules, persistence |
 | Recommendation policy | `validate(draft, claims) -> RecommendationDecision` | evidence requirements, conflict handling, allowed vocabulary, safe downgrade |
 | Cyber policy | `decide(request) -> PolicyDecision` | Assistance Class, Action Level, target/tool restrictions, policy versioning |
 | Revision history | `append(revision)` and `load(investigation)` | transactional immutability, event ordering, deletion/export behavior |
@@ -44,13 +44,12 @@ Each module is deep: callers cross a small interface while the volatile source, 
 4. The top five Exposures receive Investigations. Evidence acquisition captures first-party and public-source material with timestamps and digests.
 5. Retrieval constructs source-aware passages and performs metadata-filtered full-text and vector retrieval within one Embedding Space.
 6. The model synthesizes atomic facts or labeled inferences, each linked to Evidence Records.
-7. The model may propose one enumerated follow-up for an Evidence Gap. The deterministic controller authorizes the target, tool, policy class, action level, and remaining budget.
-8. Citation and cyber-policy validation either accepts the allowed Recommendation or downgrades it to `More Evidence Required`.
-9. The worker appends an immutable complete or incomplete Investigation Revision and emits persisted progress events for SSE clients.
+7. Citation and cyber-policy validation either accepts the allowed Recommendation or downgrades it to `More Evidence Required`.
+8. The worker appends an immutable complete or incomplete Investigation Revision and emits persisted progress events for SSE clients.
 
 ## Reliability invariants
 
-- PostgreSQL is authoritative for jobs, events, Evidence Records, graph checkpoints, and domain history.
+- PostgreSQL is authoritative for jobs, events, Evidence Records, and domain history. Future graph checkpoints will use the same store.
 - Every retry is idempotent and cannot mutate a prior Evidence Record or Investigation Revision.
 - Model or source failure is visible; no provider fallback occurs implicitly.
 - Budgets cap model calls, tool calls, graph transitions, wall time, and—when hosted models arrive—money.

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from time import monotonic as monotonic_time
 from typing import Protocol, cast
 from urllib.parse import urlparse
 from uuid import UUID
@@ -36,13 +38,15 @@ class GenerationProviderUnavailable(RuntimeError):
 
 
 class GenerationProvider(Protocol):
-    def check_readiness(self) -> GenerationReadiness: ...
+    def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness: ...
 
     def generate(
         self,
         exposure: InvestigationExposure,
         evidence: RetrievedInvestigationEvidence,
         configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
     ) -> StructuredInvestigationDraft: ...
 
 
@@ -89,6 +93,7 @@ class OllamaGenerationProvider:
         model_artifact: str,
         transport: httpx.BaseTransport | None = None,
         timeout_seconds: float = 120,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         parsed = urlparse(base_url)
         if (
@@ -106,14 +111,16 @@ class OllamaGenerationProvider:
         self._model_artifact = model_artifact
         self._transport = transport
         self._timeout_seconds = timeout_seconds
+        self._monotonic = monotonic or monotonic_time
 
     @staticmethod
     def output_schema() -> dict[str, object]:
         return cast(dict[str, object], _StructuredOutput.model_json_schema(by_alias=True))
 
-    def check_readiness(self) -> GenerationReadiness:
+    def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness:
+        deadline = self._deadline(timeout_seconds)
         try:
-            tags = self._request_json("GET", "/api/tags")
+            tags = self._request_json("GET", "/api/tags", deadline=deadline)
             models = tags.get("models")
             if not isinstance(models, list):
                 return self._invalid_response("Ollama returned no model inventory.")
@@ -143,7 +150,10 @@ class OllamaGenerationProvider:
             if not isinstance(digest, str) or _HEX_DIGEST.fullmatch(digest) is None:
                 return self._invalid_response("Ollama returned an invalid model artifact digest.")
             details = self._request_json(
-                "POST", "/api/show", json={"model": self._model_artifact, "verbose": False}
+                "POST",
+                "/api/show",
+                json={"model": self._model_artifact, "verbose": False},
+                deadline=deadline,
             )
             if details.get("remote_model") is not None or details.get("remote_host") is not None:
                 return self._cloud_rejected()
@@ -167,6 +177,14 @@ class OllamaGenerationProvider:
                 ),
             )
         except (httpx.HTTPError, ValueError) as error:
+            if timeout_seconds is not None and isinstance(error, httpx.TimeoutException):
+                return GenerationReadiness(
+                    status="unavailable",
+                    code="generation_wall_time_budget_exhausted",
+                    message="Local generation exceeded the Investigation wall-time budget.",
+                    setup="Retry the Investigation with a sufficient explicit budget.",
+                    model=None,
+                )
             return GenerationReadiness(
                 status="unavailable",
                 code="generation_runtime_unavailable",
@@ -175,8 +193,8 @@ class OllamaGenerationProvider:
                 model=None,
             )
 
-    def require_model(self) -> GenerationModel:
-        readiness = self.check_readiness()
+    def require_model(self, *, timeout_seconds: float | None = None) -> GenerationModel:
+        readiness = self.check_readiness(timeout_seconds=timeout_seconds)
         if readiness.model is None:
             raise GenerationProviderUnavailable(readiness)
         return readiness.model
@@ -186,8 +204,11 @@ class OllamaGenerationProvider:
         exposure: InvestigationExposure,
         evidence: RetrievedInvestigationEvidence,
         configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float | None = None,
     ) -> StructuredInvestigationDraft:
-        current_model = self.require_model()
+        deadline = self._deadline(timeout_seconds)
+        current_model = self.require_model(timeout_seconds=self._remaining(deadline))
         if current_model != configuration.generation_model:
             raise GenerationProviderUnavailable(
                 GenerationReadiness(
@@ -225,6 +246,7 @@ class OllamaGenerationProvider:
                     "options": {"temperature": 0, "seed": 0},
                     "messages": self._messages(exposure, evidence),
                 },
+                deadline=deadline,
             )
             message = response.get("message")
             if not isinstance(message, dict) or not isinstance(message.get("content"), str):
@@ -255,7 +277,7 @@ class OllamaGenerationProvider:
                 recommendation_reasons=tuple(parsed.recommendation_reasons),
                 recommendation_limitations=tuple(parsed.recommendation_limitations),
             )
-            final_model = self.require_model()
+            final_model = self.require_model(timeout_seconds=self._remaining(deadline))
             if final_model != current_model:
                 raise GenerationProviderUnavailable(
                     GenerationReadiness(
@@ -273,6 +295,16 @@ class OllamaGenerationProvider:
         except GenerationProviderUnavailable:
             raise
         except (httpx.HTTPError, ValueError, ValidationError, json.JSONDecodeError) as error:
+            if timeout_seconds is not None and isinstance(error, httpx.TimeoutException):
+                raise GenerationProviderUnavailable(
+                    GenerationReadiness(
+                        status="unavailable",
+                        code="generation_wall_time_budget_exhausted",
+                        message="Local generation exceeded the Investigation wall-time budget.",
+                        setup="Retry the Investigation with a sufficient explicit budget.",
+                        model=None,
+                    )
+                ) from error
             raise GenerationProviderUnavailable(
                 GenerationReadiness(
                     status="unavailable",
@@ -338,11 +370,17 @@ class OllamaGenerationProvider:
         path: str,
         *,
         json: dict[str, object] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, object]:
+        request_timeout = self._timeout_seconds
+        if deadline is not None:
+            request_timeout = min(request_timeout, max(0.0, deadline - self._monotonic()))
+            if request_timeout <= 0:
+                raise httpx.TimeoutException("Investigation wall-time budget exhausted")
         with httpx.Client(
             base_url=self._base_url,
             transport=self._transport,
-            timeout=self._timeout_seconds,
+            timeout=request_timeout,
             follow_redirects=False,
         ) as client:
             response = client.request(method, path, json=json)
@@ -351,6 +389,16 @@ class OllamaGenerationProvider:
         if not isinstance(payload, dict):
             raise ValueError("Ollama returned a non-object response")
         return cast(dict[str, object], payload)
+
+    def _deadline(self, timeout_seconds: float | None) -> float | None:
+        if timeout_seconds is None:
+            return None
+        return self._monotonic() + max(0.0, timeout_seconds)
+
+    def _remaining(self, deadline: float | None) -> float | None:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - self._monotonic())
 
     def _cloud_rejected(self) -> GenerationReadiness:
         return GenerationReadiness(

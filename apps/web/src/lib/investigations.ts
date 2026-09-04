@@ -21,7 +21,7 @@ export type InvestigationRevision = {
   stoppingCondition: string
   evidenceState: {
     materialClaimsSupported: boolean
-    authoritativeConflict: boolean
+    authoritativeConflict: boolean | null
     validationIssues: string[]
     retrieved: {
       query: string
