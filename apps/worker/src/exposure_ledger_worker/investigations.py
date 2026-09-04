@@ -17,7 +17,13 @@ from exposure_ledger import (
     ClaimValidation,
     ClaimValidator,
     CyberPolicy,
+    EvidenceFollowUpAuthorization,
+    EvidenceFollowUpProposal,
+    EvidenceFollowUpUnavailable,
+    EvidenceGap,
     EvidenceState,
+    FollowUpAuthorizationContext,
+    FollowUpValidator,
     InvestigationEvent,
     InvestigationEventMode,
     InvestigationEvidenceState,
@@ -60,6 +66,15 @@ class InvestigationRetriever(Protocol):
         timeout_seconds: float,
     ) -> RetrievedInvestigationEvidence: ...
 
+    def follow_up(
+        self,
+        exposure: InvestigationExposure,
+        command: RunInvestigation,
+        proposal: EvidenceFollowUpProposal,
+        *,
+        timeout_seconds: float,
+    ) -> RetrievedInvestigationEvidence: ...
+
 
 class RevisionHistory(Protocol):
     def append(self, revision: InvestigationRevision) -> InvestigationRevision: ...
@@ -75,8 +90,11 @@ class _GraphState(TypedDict, total=False):
     validation: ClaimValidation
     recommendation: RevisionRecommendation
     policy_decision: PolicyDecision
+    evidence_gap: EvidenceGap
+    follow_up: EvidenceFollowUpAuthorization
     status: InvestigationRevisionStatus
     stopping_condition: InvestigationStoppingCondition
+    stopping_reason: str
     events: tuple[InvestigationEvent, ...]
     generation_model_calls: int
     tool_calls: int
@@ -103,7 +121,22 @@ _STAGES: tuple[tuple[InvestigationStage, InvestigationEventMode, str], ...] = (
     (
         InvestigationStage.SYNTHESIZE_CLAIMS,
         InvestigationEventMode.MODEL,
-        "Synthesize structured Claims locally.",
+        "Model proposed structured Claims and at most one Evidence Gap follow-up.",
+    ),
+    (
+        InvestigationStage.AUTHORIZE_FOLLOW_UP,
+        InvestigationEventMode.POLICY,
+        "Deterministically validate the proposed follow-up target, arguments, policy, and budgets.",
+    ),
+    (
+        InvestigationStage.EXECUTE_FOLLOW_UP,
+        InvestigationEventMode.RETRIEVAL,
+        "Execute one authorized search over captured Exposure evidence.",
+    ),
+    (
+        InvestigationStage.SYNTHESIZE_FOLLOW_UP,
+        InvestigationEventMode.MODEL,
+        "Synthesize final Claims from the untrusted follow-up result.",
     ),
     (
         InvestigationStage.VALIDATE_CLAIMS,
@@ -129,7 +162,7 @@ _STAGES: tuple[tuple[InvestigationStage, InvestigationEventMode, str], ...] = (
 
 
 class BoundedInvestigationRunner:
-    """Run one fixed graph pass; Evidence Gap follow-ups and resumption are later seams."""
+    """Run one bounded graph pass with at most one authorized Evidence Gap follow-up."""
 
     def __init__(
         self,
@@ -173,23 +206,82 @@ class BoundedInvestigationRunner:
         self,
     ) -> CompiledStateGraph[_GraphState, None, _GraphState, _GraphState]:
         graph = StateGraph(_GraphState)
-        nodes = (
-            self._load_exposure,
-            self._acquire_evidence,
-            self._retrieve_passages,
-            self._synthesize_claims,
-            self._validate_claims,
-            self._recommend,
-            self._validate_policy,
-            self._persist_revision,
-        )
-        for (stage, _, _), node in zip(_STAGES, nodes, strict=True):
+        nodes = {
+            InvestigationStage.LOAD_EXPOSURE: self._load_exposure,
+            InvestigationStage.ACQUIRE_EVIDENCE: self._acquire_evidence,
+            InvestigationStage.RETRIEVE_PASSAGES: self._retrieve_passages,
+            InvestigationStage.SYNTHESIZE_CLAIMS: self._synthesize_claims,
+            InvestigationStage.AUTHORIZE_FOLLOW_UP: self._authorize_follow_up,
+            InvestigationStage.EXECUTE_FOLLOW_UP: self._execute_follow_up,
+            InvestigationStage.SYNTHESIZE_FOLLOW_UP: self._synthesize_follow_up,
+            InvestigationStage.VALIDATE_CLAIMS: self._validate_claims,
+            InvestigationStage.RECOMMEND: self._recommend,
+            InvestigationStage.VALIDATE_POLICY: self._validate_policy,
+            InvestigationStage.PERSIST_REVISION: self._persist_revision,
+        }
+        for stage, node in nodes.items():
             graph.add_node(stage, node)
-        graph.add_edge(START, _STAGES[0][0])
-        for current, following in zip(_STAGES, _STAGES[1:], strict=False):
-            graph.add_edge(current[0], following[0])
-        graph.add_edge(_STAGES[-1][0], END)
+        graph.add_edge(START, InvestigationStage.LOAD_EXPOSURE)
+        graph.add_edge(InvestigationStage.LOAD_EXPOSURE, InvestigationStage.ACQUIRE_EVIDENCE)
+        graph.add_edge(InvestigationStage.ACQUIRE_EVIDENCE, InvestigationStage.RETRIEVE_PASSAGES)
+        graph.add_edge(InvestigationStage.RETRIEVE_PASSAGES, InvestigationStage.SYNTHESIZE_CLAIMS)
+        graph.add_conditional_edges(
+            InvestigationStage.SYNTHESIZE_CLAIMS,
+            self._route_after_initial_synthesis,
+            {
+                "authorize": InvestigationStage.AUTHORIZE_FOLLOW_UP,
+                "validate": InvestigationStage.VALIDATE_CLAIMS,
+            },
+        )
+        graph.add_conditional_edges(
+            InvestigationStage.AUTHORIZE_FOLLOW_UP,
+            self._route_after_authorization,
+            {
+                "execute": InvestigationStage.EXECUTE_FOLLOW_UP,
+                "validate": InvestigationStage.VALIDATE_CLAIMS,
+            },
+        )
+        graph.add_conditional_edges(
+            InvestigationStage.EXECUTE_FOLLOW_UP,
+            self._route_after_execution,
+            {
+                "synthesize": InvestigationStage.SYNTHESIZE_FOLLOW_UP,
+                "validate": InvestigationStage.VALIDATE_CLAIMS,
+            },
+        )
+        graph.add_edge(InvestigationStage.SYNTHESIZE_FOLLOW_UP, InvestigationStage.VALIDATE_CLAIMS)
+        graph.add_edge(InvestigationStage.VALIDATE_CLAIMS, InvestigationStage.RECOMMEND)
+        graph.add_edge(InvestigationStage.RECOMMEND, InvestigationStage.VALIDATE_POLICY)
+        graph.add_edge(InvestigationStage.VALIDATE_POLICY, InvestigationStage.PERSIST_REVISION)
+        graph.add_edge(InvestigationStage.PERSIST_REVISION, END)
         return graph.compile()
+
+    @staticmethod
+    def _route_after_initial_synthesis(state: _GraphState) -> str:
+        draft = state.get("draft")
+        return "authorize" if draft is not None and draft.follow_up is not None else "validate"
+
+    @staticmethod
+    def _route_after_authorization(state: _GraphState) -> str:
+        follow_up = state.get("follow_up")
+        return (
+            "execute"
+            if follow_up is not None
+            and follow_up.authorized
+            and state["status"] is InvestigationRevisionStatus.COMPLETE
+            else "validate"
+        )
+
+    @staticmethod
+    def _route_after_execution(state: _GraphState) -> str:
+        follow_up = state.get("follow_up")
+        return (
+            "synthesize"
+            if follow_up is not None
+            and follow_up.executed
+            and state["status"] is InvestigationRevisionStatus.COMPLETE
+            else "validate"
+        )
 
     def _event(self, state: _GraphState, stage: InvestigationStage) -> dict[str, object]:
         if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
@@ -278,7 +370,39 @@ class BoundedInvestigationRunner:
         return updates
 
     async def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, InvestigationStage.SYNTHESIZE_CLAIMS)
+        updates = await self._synthesize(state, InvestigationStage.SYNTHESIZE_CLAIMS)
+        draft = cast(StructuredInvestigationDraft | None, updates.get("draft"))
+        if draft is not None and draft.evidence_gap is not None:
+            updates["evidence_gap"] = draft.evidence_gap
+            if draft.follow_up is None and FollowUpValidator.validate_gap(draft.evidence_gap):
+                updates.update(
+                    status=InvestigationRevisionStatus.INCOMPLETE,
+                    stopping_condition=(
+                        InvestigationStoppingCondition.GENERATION_INVALID_STRUCTURED_OUTPUT
+                    ),
+                    stopping_reason=(
+                        "The model returned an invalid structured Evidence Gap without a "
+                        "follow-up proposal."
+                    ),
+                )
+        return updates
+
+    async def _synthesize_follow_up(self, state: _GraphState) -> dict[str, object]:
+        updates = await self._synthesize(state, InvestigationStage.SYNTHESIZE_FOLLOW_UP)
+        draft = cast(StructuredInvestigationDraft | None, updates.get("draft"))
+        if draft is not None and draft.follow_up is not None:
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition=InvestigationStoppingCondition.FOLLOW_UP_LIMIT_REACHED,
+                stopping_reason=(
+                    "The final model response proposed another follow-up after the single "
+                    "authorized follow-up had already been used."
+                ),
+            )
+        return updates
+
+    async def _synthesize(self, state: _GraphState, stage: InvestigationStage) -> dict[str, object]:
+        updates = self._event(state, stage)
         if self._stopped(state, updates):
             return updates
         timeout_seconds = self._remaining_seconds(state)
@@ -331,6 +455,85 @@ class BoundedInvestigationRunner:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
                 stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
+            )
+        return updates
+
+    def _authorize_follow_up(self, state: _GraphState) -> dict[str, object]:
+        updates = self._event(state, InvestigationStage.AUTHORIZE_FOLLOW_UP)
+        draft = state["draft"]
+        proposal = draft.follow_up
+        assert proposal is not None
+        exposure = state["exposure"]
+        authorization = FollowUpValidator.authorize(
+            gap=draft.evidence_gap,
+            proposal=proposal,
+            context=FollowUpAuthorizationContext(
+                exposure_id=state["command"].exposure_id,
+                allowed_source_identities=tuple(
+                    sorted({item.source_identity for item in exposure.evidence})
+                ),
+                generation_model_calls=state["generation_model_calls"],
+                tool_calls=state["tool_calls"],
+                graph_transitions=cast(
+                    int, updates.get("graph_transitions", state["graph_transitions"])
+                ),
+                remaining_wall_time_seconds=self._remaining_seconds(state),
+                budget=state["command"].budget,
+            ),
+        )
+        updates["evidence_gap"] = draft.evidence_gap
+        updates["follow_up"] = authorization
+        if not authorization.authorized:
+            stopping_condition = _follow_up_stopping_condition(authorization.reason)
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition=stopping_condition,
+                stopping_reason=_stopping_reason(stopping_condition, authorization.reason),
+            )
+        return updates
+
+    def _execute_follow_up(self, state: _GraphState) -> dict[str, object]:
+        updates = self._event(state, InvestigationStage.EXECUTE_FOLLOW_UP)
+        authorization = state["follow_up"]
+        if self._stopped(state, updates):
+            stopping_condition = cast(
+                InvestigationStoppingCondition,
+                updates.get("stopping_condition", state["stopping_condition"]),
+            )
+            updates["follow_up"] = authorization
+            updates["stopping_reason"] = _stopping_reason(stopping_condition)
+            return updates
+        if state["tool_calls"] >= state["command"].budget.max_tool_calls:
+            stopping_condition = InvestigationStoppingCondition.TOOL_CALL_BUDGET_EXHAUSTED
+            return {
+                **updates,
+                "status": InvestigationRevisionStatus.INCOMPLETE,
+                "stopping_condition": stopping_condition,
+                "stopping_reason": _stopping_reason(stopping_condition),
+                "follow_up": authorization,
+            }
+        updates["tool_calls"] = state["tool_calls"] + 1
+        try:
+            updates["retrieved"] = self._retriever.follow_up(
+                state["exposure"],
+                state["command"],
+                authorization.proposal,
+                timeout_seconds=self._remaining_seconds(state),
+            )
+            updates["follow_up"] = replace(authorization, executed=True)
+        except TimeoutError:
+            stopping_condition = InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition=stopping_condition,
+                stopping_reason=_stopping_reason(stopping_condition),
+            )
+        except EvidenceFollowUpUnavailable as error:
+            stopping_condition = InvestigationStoppingCondition.FOLLOW_UP_UNAVAILABLE
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition=stopping_condition,
+                stopping_reason=_stopping_reason(stopping_condition, str(error)),
             )
         return updates
 
@@ -469,6 +672,13 @@ class BoundedInvestigationRunner:
             claims=validation.claims,
             recommendation=recommendation,
             output_policy_decision=state["policy_decision"],
+            evidence_gap=state.get("evidence_gap"),
+            follow_up=state.get("follow_up"),
+            stopping_reason=(
+                None
+                if status is InvestigationRevisionStatus.COMPLETE
+                else state.get("stopping_reason") or _stopping_reason(stopping_condition)
+            ),
             events=events,
             measurements=InvestigationMeasurements(
                 started_at=state["started_at"],
@@ -541,3 +751,46 @@ def _generation_stopping_condition(code: str | None) -> InvestigationStoppingCon
         )
     except ValueError:
         return InvestigationStoppingCondition.GENERATION_PROVIDER_UNAVAILABLE
+
+
+def _follow_up_stopping_condition(reason: str) -> InvestigationStoppingCondition:
+    try:
+        return InvestigationStoppingCondition(reason)
+    except ValueError:
+        if reason == "follow_up_policy_blocked":
+            return InvestigationStoppingCondition.FOLLOW_UP_POLICY_BLOCKED
+        return InvestigationStoppingCondition.FOLLOW_UP_INVALID
+
+
+def _stopping_reason(
+    condition: InvestigationStoppingCondition,
+    detail: str | None = None,
+) -> str:
+    reasons = {
+        InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED: (
+            "The two-minute Investigation wall-time budget was exhausted."
+        ),
+        InvestigationStoppingCondition.GRAPH_TRANSITION_BUDGET_EXHAUSTED: (
+            "The Investigation graph-transition budget was exhausted."
+        ),
+        InvestigationStoppingCondition.TOOL_CALL_BUDGET_EXHAUSTED: (
+            "The Investigation tool-call budget was exhausted."
+        ),
+        InvestigationStoppingCondition.GENERATION_MODEL_CALL_BUDGET_EXHAUSTED: (
+            "The Investigation generation-model-call budget was exhausted."
+        ),
+        InvestigationStoppingCondition.FOLLOW_UP_INVALID: (
+            "The proposed Evidence Gap follow-up failed deterministic validation."
+        ),
+        InvestigationStoppingCondition.FOLLOW_UP_POLICY_BLOCKED: (
+            "The proposed Evidence Gap follow-up was blocked by the Cyber Policy."
+        ),
+        InvestigationStoppingCondition.FOLLOW_UP_UNAVAILABLE: (
+            "The authorized Evidence Gap follow-up was unavailable."
+        ),
+        InvestigationStoppingCondition.FOLLOW_UP_LIMIT_REACHED: (
+            "A second Evidence Gap follow-up was rejected because only one is permitted."
+        ),
+    }
+    base = reasons.get(condition, f"The Investigation stopped: {condition.value}.")
+    return f"{base} ({detail})" if detail and detail != condition else base

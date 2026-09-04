@@ -9,7 +9,16 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from exposure_ledger.cyber_policy import AssessmentOperation, PolicyDecision
+from exposure_ledger.cyber_policy import (
+    ActionLevel,
+    AssessmentOperation,
+    AssessmentRequest,
+    AssistanceClass,
+    AuthorizationStatus,
+    CyberPolicy,
+    PolicyDecision,
+    PolicyResult,
+)
 from exposure_ledger.embeddings import EmbeddingSpace
 from exposure_ledger.evidence import EvidenceRelationship
 from exposure_ledger.recommendations import Recommendation
@@ -269,6 +278,168 @@ class InvestigationExposure:
     evidence: tuple[AvailableEvidence, ...]
 
 
+class EvidenceGapKind(StrEnum):
+    MISSING = "missing"
+    INSUFFICIENT = "insufficient"
+    STALE = "stale"
+    CONFLICTING = "conflicting"
+
+
+class EvidenceType(StrEnum):
+    AFFECTED = "affected"
+    AFFECTED_GUIDANCE = "affected_guidance"
+    EPSS_SCORE = "epss_score"
+    KNOWN_EXPLOITED_VULNERABILITY = "known_exploited_vulnerability"
+    PUBLICATION = "publication"
+    QUERY_RESULT = "query_result"
+
+
+class EvidenceFollowUpTool(StrEnum):
+    SEARCH_CAPTURED_EXPOSURE_EVIDENCE = "search_captured_exposure_evidence"
+
+
+class EvidenceFollowUpUnavailable(RuntimeError):
+    """An authorized Evidence Gap follow-up could not return captured evidence."""
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceGap:
+    identity: str
+    kind: EvidenceGapKind | str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceFollowUpArguments:
+    source_identity: str
+    evidence_type: EvidenceType | str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceFollowUpProposal:
+    tool: EvidenceFollowUpTool | str
+    target: str
+    arguments: EvidenceFollowUpArguments
+    assistance_class: AssistanceClass | str
+    action_level: ActionLevel | str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceFollowUpAuthorization:
+    proposal: EvidenceFollowUpProposal
+    authorized: bool
+    executed: bool
+    reason: str
+    issues: tuple[str, ...]
+    policy_decision: PolicyDecision
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUpAuthorizationContext:
+    exposure_id: UUID
+    allowed_source_identities: tuple[str, ...]
+    generation_model_calls: int
+    tool_calls: int
+    graph_transitions: int
+    remaining_wall_time_seconds: float
+    budget: InvestigationBudget
+
+
+class FollowUpValidator:
+    """Independently authorize one model-proposed read of captured Exposure evidence."""
+
+    _REQUIRED_TRANSITIONS_AFTER_AUTHORIZATION = 6
+
+    @staticmethod
+    def validate_gap(gap: EvidenceGap | None) -> tuple[str, ...]:
+        if gap is None:
+            return ("evidence_gap_required",)
+        issues: list[str] = []
+        try:
+            EvidenceGapKind(gap.kind)
+        except ValueError:
+            issues.append("evidence_gap_kind_invalid")
+        if (
+            not gap.identity.strip()
+            or "\n" in gap.identity
+            or len(gap.identity) > 100
+            or not gap.description.strip()
+            or "\n" in gap.description
+            or len(gap.description) > 500
+        ):
+            issues.append("evidence_gap_invalid")
+        return tuple(issues)
+
+    @classmethod
+    def authorize(
+        cls,
+        *,
+        gap: EvidenceGap | None,
+        proposal: EvidenceFollowUpProposal,
+        context: FollowUpAuthorizationContext,
+    ) -> EvidenceFollowUpAuthorization:
+        expected_target = f"exposure:{context.exposure_id}"
+        operation: AssessmentOperation | str = (
+            AssessmentOperation.SEARCH_CAPTURED_EXPOSURE_EVIDENCE
+            if proposal.tool == EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE
+            else str(proposal.tool)
+        )
+        decision = CyberPolicy.decide(
+            AssessmentRequest(
+                operation=operation,
+                target_scope=proposal.target,
+                authorization_scope="local operator",
+                authorization_status=AuthorizationStatus.CONFIRMED,
+            )
+        )
+        issues = list(cls.validate_gap(gap))
+        if proposal.tool != EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE:
+            issues.append("follow_up_tool_invalid")
+        if proposal.target != expected_target:
+            issues.append("follow_up_target_outside_exposure")
+        if (
+            not proposal.arguments.source_identity.strip()
+            or proposal.arguments.source_identity not in context.allowed_source_identities
+        ):
+            issues.append("follow_up_source_not_allowed")
+        try:
+            EvidenceType(proposal.arguments.evidence_type)
+        except ValueError:
+            issues.append("follow_up_evidence_type_invalid")
+        if proposal.assistance_class != decision.assistance_class:
+            issues.append("follow_up_assistance_class_mismatch")
+        if proposal.action_level != decision.action_level:
+            issues.append("follow_up_action_level_mismatch")
+        if decision.result is not PolicyResult.ALLOWED:
+            issues.append("follow_up_policy_blocked")
+        if context.generation_model_calls >= context.budget.max_generation_model_calls:
+            issues.append("generation_model_call_budget_exhausted")
+        if context.tool_calls >= context.budget.max_tool_calls:
+            issues.append("tool_call_budget_exhausted")
+        if (
+            context.budget.max_graph_transitions - context.graph_transitions
+            < cls._REQUIRED_TRANSITIONS_AFTER_AUTHORIZATION
+        ):
+            issues.append("graph_transition_budget_exhausted")
+        if context.remaining_wall_time_seconds <= 0:
+            issues.append("wall_time_budget_exhausted")
+        reason = (
+            "follow_up_policy_blocked"
+            if "follow_up_policy_blocked" in issues
+            else issues[0]
+            if issues
+            else "follow_up_authorized"
+        )
+        return EvidenceFollowUpAuthorization(
+            proposal=proposal,
+            authorized=not issues,
+            executed=False,
+            reason=reason,
+            issues=tuple(issues),
+            policy_decision=decision,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RetrievedInvestigationPassage:
     evidence_record_id: UUID
@@ -302,6 +473,8 @@ class StructuredInvestigationDraft:
     recommendation_summary: str
     recommendation_reasons: tuple[str, ...]
     recommendation_limitations: tuple[str, ...]
+    evidence_gap: EvidenceGap | None = None
+    follow_up: EvidenceFollowUpProposal | None = None
 
 
 class InvestigationRevisionStatus(StrEnum):
@@ -325,6 +498,10 @@ class InvestigationStoppingCondition(StrEnum):
     GENERATION_ARTIFACT_CHANGED = "generation_artifact_changed"
     GENERATION_INVALID_STRUCTURED_OUTPUT = "generation_invalid_structured_output"
     STRUCTURED_OUTPUT_POLICY_BLOCKED = "structured_output_policy_blocked"
+    FOLLOW_UP_INVALID = "follow_up_invalid"
+    FOLLOW_UP_POLICY_BLOCKED = "follow_up_policy_blocked"
+    FOLLOW_UP_UNAVAILABLE = "follow_up_unavailable"
+    FOLLOW_UP_LIMIT_REACHED = "follow_up_limit_reached"
 
 
 class InvestigationStage(StrEnum):
@@ -332,6 +509,9 @@ class InvestigationStage(StrEnum):
     ACQUIRE_EVIDENCE = "acquire_evidence"
     RETRIEVE_PASSAGES = "retrieve_passages"
     SYNTHESIZE_CLAIMS = "synthesize_claims"
+    AUTHORIZE_FOLLOW_UP = "authorize_follow_up"
+    EXECUTE_FOLLOW_UP = "execute_follow_up"
+    SYNTHESIZE_FOLLOW_UP = "synthesize_follow_up"
     VALIDATE_CLAIMS = "validate_claims"
     RECOMMEND = "recommend"
     VALIDATE_POLICY = "validate_policy"
@@ -394,6 +574,9 @@ class InvestigationRevision:
     claims: tuple[Claim, ...]
     recommendation: RevisionRecommendation
     output_policy_decision: PolicyDecision
+    evidence_gap: EvidenceGap | None
+    follow_up: EvidenceFollowUpAuthorization | None
+    stopping_reason: str | None
     events: tuple[InvestigationEvent, ...]
     measurements: InvestigationMeasurements
     configuration: InvestigationConfiguration
@@ -410,3 +593,14 @@ class InvestigationRevision:
             stopping_condition is InvestigationStoppingCondition.COMPLETED
         ):
             raise ValueError("Complete Revision status must exactly match completed stopping state")
+        if self.status is InvestigationRevisionStatus.INCOMPLETE and not (
+            self.stopping_reason and self.stopping_reason.strip()
+        ):
+            raise ValueError("Incomplete Revision requires a human-readable stopping reason")
+        if self.status is InvestigationRevisionStatus.COMPLETE and self.stopping_reason is not None:
+            raise ValueError("Complete Revision must not have a stopping reason")
+        if self.follow_up is not None:
+            if self.follow_up.executed and not self.follow_up.authorized:
+                raise ValueError("An unauthorized Evidence Gap follow-up cannot be executed")
+            if self.follow_up.authorized and self.evidence_gap is None:
+                raise ValueError("An authorized follow-up requires an Evidence Gap")

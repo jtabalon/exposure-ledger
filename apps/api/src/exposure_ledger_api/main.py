@@ -686,10 +686,15 @@ class RevisionPolicyDecisionResponse(ApiModel):
     result: PolicyResult
     rule_version: str
     reason: str
-    enforcement_point: Literal["structured_output"] = "structured_output"
+    enforcement_point: Literal["structured_output", "follow_up_tool"]
 
     @classmethod
-    def from_domain(cls, decision: PolicyDecision) -> "RevisionPolicyDecisionResponse":
+    def from_domain(
+        cls,
+        decision: PolicyDecision,
+        *,
+        enforcement_point: Literal["structured_output", "follow_up_tool"] = "structured_output",
+    ) -> "RevisionPolicyDecisionResponse":
         return cls(
             standard_version=decision.standard_version,
             assistance_class=decision.assistance_class,
@@ -699,7 +704,40 @@ class RevisionPolicyDecisionResponse(ApiModel):
             result=decision.result,
             rule_version=decision.rule_version,
             reason=decision.reason,
+            enforcement_point=enforcement_point,
         )
+
+
+class EvidenceGapResponse(ApiModel):
+    identity: str
+    kind: str
+    description: str
+
+
+class EvidenceFollowUpArgumentsResponse(ApiModel):
+    source_identity: str
+    evidence_type: str
+
+
+class EvidenceFollowUpProposalResponse(ApiModel):
+    tool: str
+    target: str
+    arguments: EvidenceFollowUpArgumentsResponse
+    assistance_class: str
+    action_level: str
+
+
+class EvidenceFollowUpAuthorizationResponse(ApiModel):
+    authorized: bool
+    executed: bool
+    reason: str
+    issues: list[str]
+    policy_decision: RevisionPolicyDecisionResponse
+
+
+class EvidenceFollowUpResponse(ApiModel):
+    proposal: EvidenceFollowUpProposalResponse
+    authorization: EvidenceFollowUpAuthorizationResponse
 
 
 class InvestigationEventResponse(ApiModel):
@@ -740,6 +778,9 @@ class InvestigationRevisionResponse(ApiModel):
     asset_snapshot_id: UUID
     status: str
     stopping_condition: str
+    stopping_reason: str | None
+    evidence_gap: EvidenceGapResponse | None
+    follow_up: EvidenceFollowUpResponse | None
     evidence_state: RevisionEvidenceStateResponse
     claims: list[InvestigationClaimResponse]
     recommendation: RevisionRecommendationResponse
@@ -761,6 +802,37 @@ class InvestigationRevisionResponse(ApiModel):
             asset_snapshot_id=revision.asset_snapshot_id,
             status=revision.status,
             stopping_condition=revision.stopping_condition,
+            stopping_reason=revision.stopping_reason,
+            evidence_gap=(
+                EvidenceGapResponse.model_validate(revision.evidence_gap, from_attributes=True)
+                if revision.evidence_gap is not None
+                else None
+            ),
+            follow_up=(
+                EvidenceFollowUpResponse(
+                    proposal=EvidenceFollowUpProposalResponse(
+                        tool=revision.follow_up.proposal.tool,
+                        target=revision.follow_up.proposal.target,
+                        arguments=EvidenceFollowUpArgumentsResponse.model_validate(
+                            revision.follow_up.proposal.arguments, from_attributes=True
+                        ),
+                        assistance_class=revision.follow_up.proposal.assistance_class,
+                        action_level=revision.follow_up.proposal.action_level,
+                    ),
+                    authorization=EvidenceFollowUpAuthorizationResponse(
+                        authorized=revision.follow_up.authorized,
+                        executed=revision.follow_up.executed,
+                        reason=revision.follow_up.reason,
+                        issues=list(revision.follow_up.issues),
+                        policy_decision=RevisionPolicyDecisionResponse.from_domain(
+                            revision.follow_up.policy_decision,
+                            enforcement_point="follow_up_tool",
+                        ),
+                    ),
+                )
+                if revision.follow_up is not None
+                else None
+            ),
             evidence_state=RevisionEvidenceStateResponse(
                 available=[
                     RevisionEvidenceRecordResponse(

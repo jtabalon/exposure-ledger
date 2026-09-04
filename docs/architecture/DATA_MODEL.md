@@ -33,6 +33,9 @@ erDiagram
 - An Investigation belongs to one Exposure. Reassessment of unchanged code appends an Investigation Revision.
 - A new commit or Environment Profile creates a new Asset Snapshot and new Investigations.
 - Evidence Records, Investigation Revisions, Policy Decisions, and Dispositions are append-only.
+- An Investigation Revision preserves a model-proposed Evidence Gap and follow-up separately from the
+  deterministic follow-up Policy Decision and execution outcome. Invalid and blocked proposals remain
+  visible without gaining authority.
 - Every allowed Assessment Run has a request-gate Policy Decision. Restricted and blocked request
   decisions are retained without an Assessment Run, so denial is auditable without creating work.
 - External reads append a separate tool-call Policy Decision before the worker crosses the source

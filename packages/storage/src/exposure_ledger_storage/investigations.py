@@ -16,7 +16,14 @@ from exposure_ledger import (
     ClaimEvidenceRelationship,
     ClaimKind,
     EmbeddingSpace,
+    EvidenceFollowUpArguments,
+    EvidenceFollowUpAuthorization,
+    EvidenceFollowUpProposal,
+    EvidenceFollowUpTool,
+    EvidenceFollowUpUnavailable,
+    EvidenceGap,
     EvidenceRelationship,
+    EvidenceType,
     GenerationModel,
     GenerationReadiness,
     InvestigationConfiguration,
@@ -47,6 +54,7 @@ from exposure_ledger_storage.postgres_deadline import (
     set_statement_deadline,
 )
 from exposure_ledger_storage.retrieval import (
+    EmbeddingIndexUnavailable,
     EvidenceRetriever,
     RetrievalQuery,
     SourcePolicy,
@@ -310,6 +318,104 @@ class InvestigationRepository:
             ),
         )
 
+    def follow_up(
+        self,
+        exposure: InvestigationExposure,
+        command: RunInvestigation,
+        proposal: EvidenceFollowUpProposal,
+        *,
+        timeout_seconds: float,
+    ) -> RetrievedInvestigationEvidence:
+        """Search one validated Source and evidence type inside the pinned Exposure."""
+        if proposal.tool != EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE:
+            raise ValueError("Evidence follow-up tool is not supported")
+        if proposal.target != f"exposure:{command.exposure_id}":
+            raise ValueError("Evidence follow-up target is outside the pinned Exposure")
+        try:
+            evidence_type = EvidenceType(proposal.arguments.evidence_type)
+        except ValueError as error:
+            raise ValueError("Evidence follow-up type is not supported") from error
+        deadline_monotonic = deadline_after(timeout_seconds)
+        try:
+            records = ExposureRepository(self._database_url).list_for_assessment(
+                command.assessment_run_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError("Evidence follow-up exceeded its wall-time budget") from error
+        record = next((item for item in records if item.id == exposure.exposure_id), None)
+        if record is None:
+            raise ValueError("Evidence follow-up Exposure is outside the Assessment scope")
+        source_identity = proposal.arguments.source_identity
+        matching_passages = tuple(
+            passage
+            for evidence in record.evidence_records
+            if evidence.source.identity == source_identity
+            for passage in evidence.passages
+            if passage.kind == evidence_type
+        )
+        if not matching_passages:
+            raise EvidenceFollowUpUnavailable(
+                "No captured passage matches the authorized Source and evidence type."
+            )
+        query_text = build_exposure_retrieval_query(
+            exposure.package_name,
+            exposure.package_version,
+            exposure.vulnerability_aliases,
+        )
+        try:
+            result = EvidenceRetriever(self._database_url).retrieve(
+                RetrievalQuery(
+                    assessment_run_id=command.assessment_run_id,
+                    exposure_id=command.exposure_id,
+                    text=query_text,
+                    source_policy=SourcePolicy(
+                        version=command.configuration.source_policy_version,
+                        allowed_source_identities=(source_identity,),
+                    ),
+                    evidence_types=(evidence_type.value,),
+                    retrieval_configuration_version=(
+                        command.configuration.retrieval_configuration_version
+                    ),
+                    embedding_space_identity=command.configuration.embedding_space.identity,
+                    limit=10,
+                ),
+                deadline_monotonic=deadline_monotonic,
+            )
+        except psycopg.errors.QueryCanceled as error:
+            raise TimeoutError("Evidence follow-up exceeded its wall-time budget") from error
+        except EmbeddingIndexUnavailable as error:
+            raise EvidenceFollowUpUnavailable(str(error)) from error
+        if result.embedding_space != command.configuration.embedding_space:
+            raise ValueError("Evidence follow-up used a different Embedding Space")
+        if not result.passages:
+            raise EvidenceFollowUpUnavailable(
+                "The authorized captured-evidence follow-up returned no passages."
+            )
+        return RetrievedInvestigationEvidence(
+            query=result.query.text,
+            passages=tuple(
+                RetrievedInvestigationPassage(
+                    evidence_record_id=item.evidence_record_id,
+                    evidence_record_identity=item.capture.identity,
+                    evidence_record_digest=item.capture.content_digest,
+                    passage_identity=item.passage.identity,
+                    passage=item.passage.content,
+                    source_identity=item.source.identity,
+                    source_authority=item.source.authority,
+                    source_location=item.source.location,
+                    captured_at=item.capture.captured_at,
+                    full_text_rank=item.full_text_rank,
+                    full_text_score=item.full_text_score,
+                    vector_rank=item.vector_rank,
+                    vector_score=item.vector_score,
+                    fused_rank=item.fused_rank or 0,
+                    fused_score=item.fused_score or 0.0,
+                )
+                for item in result.passages
+            ),
+        )
+
     def append(self, revision: InvestigationRevision) -> InvestigationRevision:
         with (
             psycopg.connect(self._database_url, row_factory=dict_row) as connection,
@@ -338,23 +444,27 @@ class InvestigationRepository:
             investigation_id = self._investigation_id(connection, revision)
             revision_number = self._next_revision_number(connection, investigation_id)
             policy_decision_id = self._insert_output_policy_decision(connection, revision)
+            follow_up_policy_decision_id = self._insert_follow_up_policy_decision(
+                connection, revision
+            )
             connection.execute(
                 """
                 INSERT INTO investigation_revisions (
                     id, investigation_id, revision_number, assessment_run_id, exposure_id,
-                    asset_snapshot_id, status, stopping_condition,
+                    asset_snapshot_id, status, stopping_condition, stopping_reason,
                     material_claims_supported, authoritative_conflict, validation_issues,
                     retrieval_query, retrieved_passages,
                     recommendation, recommendation_accepted, recommendation_reason,
                     recommendation_summary, recommendation_reasons,
-                    recommendation_limitations, output_policy_decision_id, events, measurements,
+                    recommendation_limitations, output_policy_decision_id,
+                    evidence_gap, follow_up, follow_up_policy_decision_id, events, measurements,
                     application_release, graph_version, prompt_version, policy_version,
                     parser_version, retrieval_configuration_version, source_policy_version,
                     source_adapter_versions, generation_provider, generation_model_artifact,
                     generation_artifact_digest, embedding_space_identity, created_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
@@ -367,6 +477,7 @@ class InvestigationRepository:
                     revision.asset_snapshot_id,
                     revision.status,
                     revision.stopping_condition,
+                    revision.stopping_reason,
                     revision.evidence_state.material_claims_supported,
                     revision.evidence_state.authoritative_conflict,
                     list(revision.evidence_state.validation_issues),
@@ -379,6 +490,17 @@ class InvestigationRepository:
                     list(revision.recommendation.reasons),
                     list(revision.recommendation.limitations),
                     policy_decision_id,
+                    (
+                        Jsonb(_evidence_gap_json(revision.evidence_gap))
+                        if revision.evidence_gap is not None
+                        else None
+                    ),
+                    (
+                        Jsonb(_follow_up_json(revision.follow_up))
+                        if revision.follow_up is not None
+                        else None
+                    ),
+                    follow_up_policy_decision_id,
                     Jsonb(_events_json(revision.events)),
                     Jsonb(_measurements_json(revision.measurements)),
                     revision.configuration.application_release,
@@ -470,23 +592,34 @@ class InvestigationRepository:
                        embedding_spaces.retrieval_instruction,
                        embedding_spaces.normalizer,
                        embedding_spaces.passage_construction_version,
-                       policy_decisions.standard_version AS output_standard_version,
-                       policy_decisions.assistance_class AS output_assistance_class,
-                       policy_decisions.action_level AS output_action_level,
-                       policy_decisions.target_scope AS output_target_scope,
-                       policy_decisions.authorization_scope AS output_authorization_scope,
-                       policy_decisions.result AS output_result,
-                       policy_decisions.rule_version AS output_rule_version,
-                       policy_decisions.reason AS output_reason
+                       output_decisions.standard_version AS output_standard_version,
+                       output_decisions.assistance_class AS output_assistance_class,
+                       output_decisions.action_level AS output_action_level,
+                       output_decisions.target_scope AS output_target_scope,
+                       output_decisions.authorization_scope AS output_authorization_scope,
+                       output_decisions.result AS output_result,
+                       output_decisions.rule_version AS output_rule_version,
+                       output_decisions.reason AS output_reason,
+                       follow_up_decisions.standard_version AS follow_up_standard_version,
+                       follow_up_decisions.assistance_class AS follow_up_assistance_class,
+                       follow_up_decisions.action_level AS follow_up_action_level,
+                       follow_up_decisions.target_scope AS follow_up_target_scope,
+                       follow_up_decisions.authorization_scope AS follow_up_authorization_scope,
+                       follow_up_decisions.result AS follow_up_result,
+                       follow_up_decisions.rule_version AS follow_up_rule_version,
+                       follow_up_decisions.reason AS follow_up_policy_reason
                 FROM investigation_revisions
                 JOIN investigations
                   ON investigations.id = investigation_revisions.investigation_id
                 JOIN embedding_spaces
                   ON embedding_spaces.identity_key =
                      investigation_revisions.embedding_space_identity
-                JOIN policy_decisions
-                  ON policy_decisions.id =
+                JOIN policy_decisions AS output_decisions
+                  ON output_decisions.id =
                      investigation_revisions.output_policy_decision_id
+                LEFT JOIN policy_decisions AS follow_up_decisions
+                  ON follow_up_decisions.id =
+                     investigation_revisions.follow_up_policy_decision_id
                 WHERE investigation_revisions.exposure_id = %s
                 ORDER BY investigation_revisions.revision_number DESC
                 """,
@@ -679,6 +812,27 @@ class InvestigationRepository:
             != revision.output_policy_decision.standard_version
         ):
             raise ValueError("Pinned policy version does not match the output Policy Decision")
+        if revision.follow_up is not None:
+            follow_up = revision.follow_up
+            proposal = follow_up.proposal
+            if (
+                follow_up.policy_decision.standard_version != revision.configuration.policy_version
+                or follow_up.policy_decision.target_scope != proposal.target
+            ):
+                raise ValueError("Follow-up Policy Decision conflicts with the pinned proposal")
+            if follow_up.executed and not follow_up.authorized:
+                raise ValueError("An unauthorized Evidence Gap follow-up cannot be executed")
+            if follow_up.authorized and (
+                revision.evidence_gap is None
+                or proposal.tool != EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE
+                or proposal.target != f"exposure:{revision.exposure_id}"
+                or proposal.arguments.source_identity
+                not in {item.source_identity for item in revision.evidence_state.available}
+                or follow_up.policy_decision.result is not PolicyResult.ALLOWED
+                or proposal.assistance_class != follow_up.policy_decision.assistance_class
+                or proposal.action_level != follow_up.policy_decision.action_level
+            ):
+                raise ValueError("Authorized Evidence Gap follow-up conflicts with its scope")
 
     @staticmethod
     def _store_embedding_space(
@@ -788,6 +942,38 @@ class InvestigationRepository:
                 target_scope, authorization_scope, result, rule_version, reason, created_at,
                 enforcement_point
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'structured_output')
+            """,
+            (
+                decision_id,
+                revision.assessment_run_id,
+                decision.standard_version,
+                decision.assistance_class,
+                decision.action_level,
+                decision.target_scope,
+                decision.authorization_scope,
+                decision.result,
+                decision.rule_version,
+                decision.reason,
+                revision.created_at,
+            ),
+        )
+        return decision_id
+
+    @staticmethod
+    def _insert_follow_up_policy_decision(
+        connection: psycopg.Connection[dict[str, Any]], revision: InvestigationRevision
+    ) -> UUID | None:
+        if revision.follow_up is None:
+            return None
+        decision = revision.follow_up.policy_decision
+        decision_id = uuid4()
+        connection.execute(
+            """
+            INSERT INTO policy_decisions (
+                id, assessment_run_id, standard_version, assistance_class, action_level,
+                target_scope, authorization_scope, result, rule_version, reason, created_at,
+                enforcement_point
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'follow_up_tool')
             """,
             (
                 decision_id,
@@ -921,6 +1107,8 @@ class InvestigationRepository:
             ),
             validation_issues=tuple(str(item) for item in row["validation_issues"]),
         )
+        evidence_gap = _evidence_gap_from_json(row["evidence_gap"])
+        follow_up = _follow_up_from_json(row)
         revision = InvestigationRevision(
             id=UUID(str(row["id"])),
             assessment_run_id=UUID(str(row["assessment_run_id"])),
@@ -956,6 +1144,11 @@ class InvestigationRepository:
                 rule_version=str(row["output_rule_version"]),
                 reason=str(row["output_reason"]),
             ),
+            evidence_gap=evidence_gap,
+            follow_up=follow_up,
+            stopping_reason=(
+                str(row["stopping_reason"]) if row["stopping_reason"] is not None else None
+            ),
             events=_events_from_json(row["events"]),
             measurements=_measurements_from_json(row["measurements"]),
             configuration=configuration,
@@ -989,6 +1182,87 @@ def _retrieved_passages_json(evidence: RetrievedInvestigationEvidence) -> list[d
         }
         for item in evidence.passages
     ]
+
+
+def _evidence_gap_json(gap: EvidenceGap) -> dict[str, object]:
+    return {
+        "identity": gap.identity,
+        "kind": gap.kind,
+        "description": gap.description,
+    }
+
+
+def _evidence_gap_from_json(value: object) -> EvidenceGap | None:
+    if value is None:
+        return None
+    item = cast(dict[str, object], value)
+    return EvidenceGap(
+        identity=str(item["identity"]),
+        kind=str(item["kind"]),
+        description=str(item["description"]),
+    )
+
+
+def _follow_up_json(follow_up: EvidenceFollowUpAuthorization) -> dict[str, object]:
+    proposal = follow_up.proposal
+    return {
+        "proposal": {
+            "tool": proposal.tool,
+            "target": proposal.target,
+            "arguments": {
+                "sourceIdentity": proposal.arguments.source_identity,
+                "evidenceType": proposal.arguments.evidence_type,
+            },
+            "assistanceClass": proposal.assistance_class,
+            "actionLevel": proposal.action_level,
+        },
+        "authorized": follow_up.authorized,
+        "executed": follow_up.executed,
+        "reason": follow_up.reason,
+        "issues": list(follow_up.issues),
+    }
+
+
+def _follow_up_from_json(row: dict[str, Any]) -> EvidenceFollowUpAuthorization | None:
+    value = row["follow_up"]
+    if value is None:
+        return None
+    if row["follow_up_standard_version"] is None:
+        raise ValueError("Stored follow-up is missing its Policy Decision")
+    item = cast(dict[str, object], value)
+    proposal_item = cast(dict[str, object], item["proposal"])
+    arguments_item = cast(dict[str, object], proposal_item["arguments"])
+    proposal = EvidenceFollowUpProposal(
+        tool=str(proposal_item["tool"]),
+        target=str(proposal_item["target"]),
+        arguments=EvidenceFollowUpArguments(
+            source_identity=str(arguments_item["sourceIdentity"]),
+            evidence_type=str(arguments_item["evidenceType"]),
+        ),
+        assistance_class=str(proposal_item["assistanceClass"]),
+        action_level=str(proposal_item["actionLevel"]),
+    )
+    return EvidenceFollowUpAuthorization(
+        proposal=proposal,
+        authorized=bool(item["authorized"]),
+        executed=bool(item["executed"]),
+        reason=str(item["reason"]),
+        issues=tuple(str(issue) for issue in cast(list[object], item["issues"])),
+        policy_decision=PolicyDecision(
+            standard_version=str(row["follow_up_standard_version"]),
+            assistance_class=AssistanceClass(str(row["follow_up_assistance_class"])),
+            action_level=ActionLevel(str(row["follow_up_action_level"])),
+            target_scope=str(row["follow_up_target_scope"]),
+            authorization_scope=(
+                str(row["follow_up_authorization_scope"])
+                if row["follow_up_authorization_scope"] is not None
+                else None
+            ),
+            result=PolicyResult(str(row["follow_up_result"])),
+            rule_version=str(row["follow_up_rule_version"]),
+            reason=str(row["follow_up_policy_reason"]),
+        ),
+    )
 
 
 def _retrieved_passages_from_json(value: object) -> tuple[RetrievedInvestigationPassage, ...]:

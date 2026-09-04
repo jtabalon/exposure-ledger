@@ -19,6 +19,32 @@ export type InvestigationRevision = {
   assetSnapshotId: string
   status: "complete" | "incomplete"
   stoppingCondition: string
+  stoppingReason: string | null
+  evidenceGap: {
+    identity: string
+    kind: string
+    description: string
+  } | null
+  followUp: {
+    proposal: {
+      tool: string
+      target: string
+      arguments: { sourceIdentity: string; evidenceType: string }
+      assistanceClass: string
+      actionLevel: string
+    }
+    authorization: {
+      authorized: boolean
+      executed: boolean
+      reason: string
+      issues: string[]
+      policyDecision: {
+        assistanceClass: string
+        actionLevel: string
+        result: string
+      }
+    }
+  } | null
   evidenceState: {
     materialClaimsSupported: boolean
     authoritativeConflict: boolean | null
@@ -135,6 +161,26 @@ export function revisionToWorkbench(
     revision.claims.map((claim, index) => [claim.identity, `C${index + 1}`]),
   )
   return {
+    stoppingReason: revision.stoppingReason ?? undefined,
+    evidenceGap: revision.evidenceGap ?? undefined,
+    followUp: revision.followUp
+      ? {
+          tool: revision.followUp.proposal.tool,
+          target: revision.followUp.proposal.target,
+          sourceIdentity: revision.followUp.proposal.arguments.sourceIdentity,
+          evidenceType: revision.followUp.proposal.arguments.evidenceType,
+          proposedAssistanceClass: revision.followUp.proposal.assistanceClass,
+          proposedActionLevel: revision.followUp.proposal.actionLevel,
+          authorized: revision.followUp.authorization.authorized,
+          executed: revision.followUp.authorization.executed,
+          reason: revision.followUp.authorization.reason,
+          issues: revision.followUp.authorization.issues,
+          policyAssistanceClass:
+            revision.followUp.authorization.policyDecision.assistanceClass,
+          policyActionLevel: revision.followUp.authorization.policyDecision.actionLevel,
+          policyResult: revision.followUp.authorization.policyDecision.result,
+        }
+      : undefined,
     meta: {
       mode: "live",
       status: revision.status,

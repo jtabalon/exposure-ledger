@@ -32,6 +32,7 @@ class AssessmentOperation(StrEnum):
     PUBLIC_CISA_KEV_LOOKUP = "public_cisa_kev_lookup"
     PUBLIC_FIRST_EPSS_LOOKUP = "public_first_epss_lookup"
     EMBED_RETRIEVED_EVIDENCE = "embed_retrieved_evidence"
+    SEARCH_CAPTURED_EXPOSURE_EVIDENCE = "search_captured_exposure_evidence"
     PRODUCE_EXPOSURE_RECOMMENDATION = "produce_exposure_recommendation"
     SUMMARIZE_PUBLIC_ADVISORY = "summarize_public_advisory"
     DRAFT_DEPENDENCY_PATCH = "draft_dependency_patch"
@@ -95,6 +96,9 @@ _OPERATION_CLASSIFICATIONS: Final = {
         AssistanceClass.C1, ActionLevel.A1
     ),
     AssessmentOperation.EMBED_RETRIEVED_EVIDENCE: _Classification(
+        AssistanceClass.C1, ActionLevel.A1
+    ),
+    AssessmentOperation.SEARCH_CAPTURED_EXPOSURE_EVIDENCE: _Classification(
         AssistanceClass.C1, ActionLevel.A1
     ),
     AssessmentOperation.PRODUCE_EXPOSURE_RECOMMENDATION: _Classification(

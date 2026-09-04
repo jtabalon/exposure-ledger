@@ -1028,6 +1028,56 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         FOR EACH ROW EXECUTE FUNCTION protect_investigation_revision_children();
         """,
     ),
+    (
+        16,
+        """
+        ALTER TABLE policy_decisions
+            DROP CONSTRAINT policy_decisions_enforcement_point_check,
+            ADD CONSTRAINT policy_decisions_enforcement_point_check
+                CHECK (enforcement_point IN (
+                    'request', 'tool_call', 'retrieved_content', 'structured_output',
+                    'follow_up_tool'
+                ));
+
+        ALTER TABLE investigation_revisions
+            DROP CONSTRAINT investigation_revisions_stopping_condition_check,
+            ADD CONSTRAINT investigation_revisions_stopping_condition_check
+                CHECK (stopping_condition IN (
+                    'completed', 'wall_time_budget_exhausted',
+                    'graph_transition_budget_exhausted', 'tool_call_budget_exhausted',
+                    'generation_model_call_budget_exhausted',
+                    'generation_provider_unavailable', 'generation_runtime_unavailable',
+                    'generation_model_not_installed', 'generation_model_not_current',
+                    'generation_cloud_model_rejected', 'generation_provider_invalid_response',
+                    'generation_prompt_not_current', 'generation_artifact_changed',
+                    'generation_invalid_structured_output', 'structured_output_policy_blocked',
+                    'follow_up_invalid', 'follow_up_policy_blocked',
+                    'follow_up_unavailable', 'follow_up_limit_reached'
+                )),
+            ADD COLUMN stopping_reason text,
+            ADD COLUMN evidence_gap jsonb,
+            ADD COLUMN follow_up jsonb,
+            ADD COLUMN follow_up_policy_decision_id uuid UNIQUE
+                REFERENCES policy_decisions(id) ON DELETE RESTRICT;
+
+        UPDATE investigation_revisions
+        SET stopping_reason = 'The Investigation stopped: ' || stopping_condition || '.'
+        WHERE status = 'incomplete';
+
+        ALTER TABLE investigation_revisions
+            ADD CONSTRAINT investigation_revisions_stopping_reason_check
+                CHECK (
+                    (status = 'complete' AND stopping_reason IS NULL)
+                    OR
+                    (status = 'incomplete' AND stopping_reason IS NOT NULL
+                     AND length(trim(stopping_reason)) > 0)
+                ),
+            ADD CONSTRAINT investigation_revisions_follow_up_check
+                CHECK (
+                    (follow_up IS NULL) = (follow_up_policy_decision_id IS NULL)
+                );
+        """,
+    ),
 )
 
 
