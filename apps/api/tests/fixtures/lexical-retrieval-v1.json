@@ -5,7 +5,7 @@
   "limit": 10,
   "passages": {
     "targetAffected": {
-      "identity": "sha256:220e1c9e3e30bc946cb7a212ed485ebf0925dfa9184ee879543233f306cccd7a",
+      "identity": "sha256:a84e295e97ab9cd9ae1092dc63724440916c51e146729521e3e2e1998a9e4f67",
       "kind": "affected",
       "selector": "/affected/0",
       "source": {
@@ -14,7 +14,7 @@
         "location": "https://api.osv.dev/v1/vulns/PYSEC-2026-40"
       },
       "capture": {
-        "identity": "sha256:c54a1484c550c8c11297ffa43942b564a384c8964177db8b399577b8fd137564",
+        "identity": "sha256:8539a88324676c204c72a531cb254a06ca6b75f7d17a247116b7f984af7bff94",
         "capturedAt": "2026-09-03T12:30:00Z",
         "contentDigest": "sha256:2e29b52877a32914eb23c652a1b0131193839bda6b1ce53a3d4848e006dcfd0e",
         "payloadIdentity": "PYSEC-2026-40",
@@ -22,7 +22,7 @@
       }
     },
     "targetQueryResult": {
-      "identity": "sha256:7b81c8a9f97418ec1c9f5079cfad1eccc19b752f346fdcab232676d779ef05dd",
+      "identity": "sha256:281f6a83874d8071255cd89666477231fb8c67d88e046bbf2d8ab0da8c44122b",
       "kind": "query_result",
       "selector": "/results/0",
       "source": {
@@ -31,7 +31,7 @@
         "location": "https://api.osv.dev/v1/querybatch"
       },
       "capture": {
-        "identity": "sha256:d57985d30c4e101693fdfbc0129bc9fb55b621ea8b104ff631d267505725e263",
+        "identity": "sha256:697d37a4e4fa0cea7835ff93370a745350876e46473a507a268489da818a37ac",
         "capturedAt": "2026-09-03T12:30:00Z",
         "contentDigest": "sha256:e7d885bd105e043ca85900d879af052e4ac5cc08354aa06f6969db82b6c532e0",
         "payloadIdentity": "lexical-known-answer-page-v1",

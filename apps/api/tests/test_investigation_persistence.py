@@ -325,6 +325,44 @@ def test_revision_rejects_an_unverified_source_adapter_pin(database_url: str) ->
         )
 
 
+def test_revision_persists_when_budget_expires_before_evidence_acquisition(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    incomplete = replace(
+        revision,
+        status=InvestigationRevisionStatus.INCOMPLETE,
+        stopping_condition="wall_time_budget_exhausted",
+        evidence_state=InvestigationEvidenceState(
+            available=(),
+            retrieved=RetrievedInvestigationEvidence(query="", passages=()),
+            material_claims_supported=False,
+            authoritative_conflict=False,
+            validation_issues=(),
+        ),
+        claims=(),
+        recommendation=RevisionRecommendation(
+            recommendation=Recommendation.MORE_EVIDENCE_REQUIRED,
+            accepted=False,
+            reason="wall_time_budget_exhausted",
+            summary="More evidence is required before a Recommendation can be supported.",
+            reasons=("wall_time_budget_exhausted",),
+            limitations=(),
+        ),
+        measurements=replace(
+            revision.measurements,
+            generation_model_calls=0,
+            tool_calls=0,
+            graph_transitions=0,
+        ),
+    )
+
+    repository = InvestigationRepository(database_url)
+    assert repository.append(incomplete) == incomplete
+    assert repository.list_for_exposure(exposure.id)[0].revision == incomplete
+
+
 def test_controlled_adapters_exercise_the_complete_investigation_path(
     database_url: str,
 ) -> None:

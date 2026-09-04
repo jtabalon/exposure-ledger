@@ -233,6 +233,7 @@ def _run_investigations_or_fail(
                 RunInvestigation(
                     assessment_run_id=assessment_run_id,
                     exposure_id=exposure.id,
+                    asset_snapshot_id=exposure.asset_snapshot_id,
                     configuration=InvestigationConfiguration(
                         application_release="0.1.0",
                         graph_version="bounded-investigation-v1",

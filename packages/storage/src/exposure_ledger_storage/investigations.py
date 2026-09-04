@@ -169,6 +169,8 @@ class InvestigationRepository:
         )
         if exposure is None or not exposure.selected_for_investigation:
             raise ValueError("Investigation command does not identify a selected Exposure")
+        if exposure.asset_snapshot_id != command.asset_snapshot_id:
+            raise ValueError("Pinned Asset Snapshot does not match the Exposure")
         with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
             snapshot = connection.execute(
                 "SELECT parser_version FROM asset_snapshots WHERE id = %s",
@@ -599,7 +601,13 @@ class InvestigationRepository:
             item.source_identity: item.source_adapter_version
             for item in revision.evidence_state.available
         }
-        if adapter_versions != expected_adapter_versions:
+        evidence_was_skipped_by_budget = (
+            revision.status is InvestigationRevisionStatus.INCOMPLETE
+            and not revision.evidence_state.available
+            and revision.stopping_condition
+            in {"wall_time_budget_exhausted", "graph_transition_budget_exhausted"}
+        )
+        if adapter_versions != expected_adapter_versions and not evidence_was_skipped_by_budget:
             raise ValueError("Revision does not pin the exact Evidence Source adapter versions")
         if (
             revision.configuration.policy_version

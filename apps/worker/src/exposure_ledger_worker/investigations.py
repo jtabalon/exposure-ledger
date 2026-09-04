@@ -181,55 +181,69 @@ class BoundedInvestigationRunner:
         return graph.compile()
 
     def _event(self, state: _GraphState, stage: InvestigationStage) -> dict[str, object]:
+        if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
+            return {}
         _, mode, detail = next(item for item in _STAGES if item[0] == stage)
         command = state["command"]
-        transitions = state["graph_transitions"] + 1
         occurred_at = self._clock()
-        updates: dict[str, object] = {
-            "events": (*state["events"], InvestigationEvent(stage, mode, detail, occurred_at)),
-            "graph_transitions": transitions,
-        }
-        if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
-            return updates
         elapsed_seconds = (occurred_at - state["started_at"]).total_seconds()
         if elapsed_seconds > command.budget.wall_time_seconds:
-            updates.update(
-                status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="wall_time_budget_exhausted",
-            )
-        elif transitions > command.budget.max_graph_transitions:
-            updates.update(
-                status=InvestigationRevisionStatus.INCOMPLETE,
-                stopping_condition="graph_transition_budget_exhausted",
-            )
-        return updates
+            return {
+                "status": InvestigationRevisionStatus.INCOMPLETE,
+                "stopping_condition": "wall_time_budget_exhausted",
+            }
+        if state["graph_transitions"] >= command.budget.max_graph_transitions:
+            return {
+                "status": InvestigationRevisionStatus.INCOMPLETE,
+                "stopping_condition": "graph_transition_budget_exhausted",
+            }
+        return {
+            "events": (*state["events"], InvestigationEvent(stage, mode, detail, occurred_at)),
+            "graph_transitions": state["graph_transitions"] + 1,
+        }
+
+    @staticmethod
+    def _stopped(state: _GraphState, updates: dict[str, object]) -> bool:
+        return updates.get("status", state["status"]) is InvestigationRevisionStatus.INCOMPLETE
 
     def _load_exposure(self, state: _GraphState) -> dict[str, object]:
         return self._event(state, InvestigationStage.LOAD_EXPOSURE)
 
     def _acquire_evidence(self, state: _GraphState) -> dict[str, object]:
+        updates = self._event(state, InvestigationStage.ACQUIRE_EVIDENCE)
+        if self._stopped(state, updates):
+            updates["exposure"] = InvestigationExposure(
+                assessment_run_id=state["command"].assessment_run_id,
+                exposure_id=state["command"].exposure_id,
+                asset_snapshot_id=state["command"].asset_snapshot_id,
+                package_name="",
+                package_version="",
+                vulnerability_aliases=(),
+                authoritative_conflict=False,
+                evidence=(),
+            )
+            return updates
         exposure = self._evidence_acquirer.acquire(state["command"])
         if (
             exposure.assessment_run_id != state["command"].assessment_run_id
             or exposure.exposure_id != state["command"].exposure_id
+            or exposure.asset_snapshot_id != state["command"].asset_snapshot_id
         ):
             raise ValueError("Acquired Exposure does not match the Investigation command")
-        updates = self._event(state, InvestigationStage.ACQUIRE_EVIDENCE)
         updates["exposure"] = exposure
         updates["tool_calls"] = state["tool_calls"] + 1
         return updates
 
     def _retrieve_passages(self, state: _GraphState) -> dict[str, object]:
-        updates = self._event(state, InvestigationStage.RETRIEVE_PASSAGES)
-        if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
-            updates["retrieved"] = RetrievedInvestigationEvidence(query="", passages=())
-            return updates
         if state["tool_calls"] >= state["command"].budget.max_tool_calls:
-            updates.update(
+            return dict(
                 status=InvestigationRevisionStatus.INCOMPLETE,
                 stopping_condition="tool_call_budget_exhausted",
                 retrieved=RetrievedInvestigationEvidence(query="", passages=()),
             )
+        updates = self._event(state, InvestigationStage.RETRIEVE_PASSAGES)
+        if self._stopped(state, updates):
+            updates["retrieved"] = RetrievedInvestigationEvidence(query="", passages=())
             return updates
         updates["retrieved"] = self._retriever.retrieve(state["exposure"], state["command"])
         updates["tool_calls"] = state["tool_calls"] + 1
@@ -237,7 +251,7 @@ class BoundedInvestigationRunner:
 
     def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.SYNTHESIZE_CLAIMS)
-        if state["status"] is InvestigationRevisionStatus.INCOMPLETE:
+        if self._stopped(state, updates):
             return updates
         readiness = self._generator.check_readiness()
         configured = state["command"].configuration.generation_model
@@ -357,7 +371,7 @@ class BoundedInvestigationRunner:
 
     def _persist_revision(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.PERSIST_REVISION)
-        events = cast(tuple[InvestigationEvent, ...], updates["events"])
+        events = cast(tuple[InvestigationEvent, ...], updates.get("events", state["events"]))
         completed_at = self._clock()
         duration_ms = max(
             0,
@@ -405,7 +419,9 @@ class BoundedInvestigationRunner:
                 duration_ms=duration_ms,
                 generation_model_calls=state["generation_model_calls"],
                 tool_calls=state["tool_calls"],
-                graph_transitions=cast(int, updates["graph_transitions"]),
+                graph_transitions=cast(
+                    int, updates.get("graph_transitions", state["graph_transitions"])
+                ),
             ),
             configuration=state["command"].configuration,
             created_at=completed_at,

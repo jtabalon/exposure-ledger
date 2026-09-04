@@ -250,6 +250,7 @@ class InvestigationBudget:
 class RunInvestigation:
     assessment_run_id: UUID
     exposure_id: UUID
+    asset_snapshot_id: UUID
     configuration: InvestigationConfiguration
     budget: InvestigationBudget
 

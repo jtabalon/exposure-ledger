@@ -62,6 +62,7 @@ def _command() -> RunInvestigation:
     return RunInvestigation(
         assessment_run_id=ASSESSMENT_ID,
         exposure_id=EXPOSURE_ID,
+        asset_snapshot_id=SNAPSHOT_ID,
         configuration=InvestigationConfiguration(
             application_release="0.1.0",
             graph_version="bounded-investigation-v1",
@@ -79,7 +80,11 @@ def _command() -> RunInvestigation:
 
 
 class ControlledEvidenceAcquirer:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def acquire(self, command: RunInvestigation) -> InvestigationExposure:
+        self.calls += 1
         assert command.exposure_id == EXPOSURE_ID
         return InvestigationExposure(
             assessment_run_id=ASSESSMENT_ID,
@@ -103,11 +108,15 @@ class ControlledEvidenceAcquirer:
 
 
 class ControlledRetriever:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def retrieve(
         self,
         exposure: InvestigationExposure,
         command: RunInvestigation,
     ) -> RetrievedInvestigationEvidence:
+        self.calls += 1
         assert exposure.exposure_id == command.exposure_id
         return RetrievedInvestigationEvidence(
             query="feature-lib 5.1.0 CVE-2026-4000 affected fixed upgrade",
@@ -352,8 +361,93 @@ async def test_wall_time_budget_stops_model_use_and_persists_incomplete_revision
     assert revision.status is InvestigationRevisionStatus.INCOMPLETE
     assert revision.stopping_condition == "wall_time_budget_exhausted"
     assert revision.measurements.generation_model_calls == 0
-    assert revision.measurements.tool_calls == 1
+    assert revision.measurements.tool_calls == 0
     assert generator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_transition_budget_stops_before_retrieval_call() -> None:
+    retriever = ControlledRetriever()
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=retriever,
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+    command = replace(_command(), budget=InvestigationBudget(max_graph_transitions=2))
+
+    revision = await runner.run(command)
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "graph_transition_budget_exhausted"
+    assert revision.measurements.tool_calls == 1
+    assert retriever.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_transition_budget_stops_before_evidence_acquisition() -> None:
+    acquirer = ControlledEvidenceAcquirer()
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=acquirer,
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+    command = replace(_command(), budget=InvestigationBudget(max_graph_transitions=1))
+
+    revision = await runner.run(command)
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "graph_transition_budget_exhausted"
+    assert revision.asset_snapshot_id == SNAPSHOT_ID
+    assert revision.measurements.tool_calls == 0
+    assert acquirer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_transition_budget_stops_before_generation_call() -> None:
+    generator = ControlledGenerator(_supported_draft())
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=generator,
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+    command = replace(_command(), budget=InvestigationBudget(max_graph_transitions=3))
+
+    revision = await runner.run(command)
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "graph_transition_budget_exhausted"
+    assert revision.measurements.tool_calls == 2
+    assert generator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_does_not_record_unperformed_retrieval() -> None:
+    retriever = ControlledRetriever()
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=retriever,
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+    command = replace(_command(), budget=InvestigationBudget(max_tool_calls=1))
+
+    revision = await runner.run(command)
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "tool_call_budget_exhausted"
+    assert revision.measurements.tool_calls == 1
+    assert retriever.calls == 0
+    assert [event.stage for event in revision.events] == [
+        "load_exposure",
+        "acquire_evidence",
+    ]
 
 
 class UnavailableGenerator(ControlledGenerator):
