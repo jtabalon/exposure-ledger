@@ -6,7 +6,6 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from time import monotonic
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -17,6 +16,10 @@ from psycopg.rows import dict_row
 from exposure_ledger_storage.local_embeddings import (
     EmbeddingProviderUnavailable,
     EmbeddingReadiness,
+)
+from exposure_ledger_storage.postgres_deadline import (
+    connect_with_deadline,
+    set_statement_deadline,
 )
 
 LEXICAL_RETRIEVAL_CONFIGURATION_VERSION = "postgres-lexical-v1"
@@ -435,18 +438,18 @@ class EvidenceRetriever:
         self, query: RetrievalQuery, *, deadline_monotonic: float | None = None
     ) -> RetrievalResult:
         self._validate_query(query)
-        with _connect_with_deadline(self._database_url, deadline_monotonic) as connection:
-            _set_statement_deadline(connection, deadline_monotonic)
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
+            set_statement_deadline(connection, deadline_monotonic)
             if not self._configuration_is_current(
                 connection, query.retrieval_configuration_version
             ):
                 raise RetrievalConfigurationNotCurrent(
                     "The requested retrieval configuration is not current"
                 )
-            _set_statement_deadline(connection, deadline_monotonic)
+            set_statement_deadline(connection, deadline_monotonic)
             self._require_exposure_scope(connection, query)
             if query.retrieval_configuration_version == LEXICAL_RETRIEVAL_CONFIGURATION_VERSION:
-                _set_statement_deadline(connection, deadline_monotonic)
+                set_statement_deadline(connection, deadline_monotonic)
                 passages = self._retrieve_full_text(connection, query)
                 return self._result(query, passages, embedding_space=None)
 
@@ -454,8 +457,8 @@ class EvidenceRetriever:
             raise EmbeddingSpaceNotCurrent(
                 "Hybrid retrieval requires one explicit Embedding Space identity."
             )
-        with _connect_with_deadline(self._database_url, deadline_monotonic) as connection:
-            _set_statement_deadline(connection, deadline_monotonic)
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
+            set_statement_deadline(connection, deadline_monotonic)
             stored_space = self._stored_space_by_identity(
                 connection, query.embedding_space_identity
             )
@@ -464,7 +467,7 @@ class EvidenceRetriever:
                     "The requested Embedding Space is not stored by this installation."
                 )
             stored_space_id, space = stored_space
-            _set_statement_deadline(connection, deadline_monotonic)
+            set_statement_deadline(connection, deadline_monotonic)
             query_vector_row = connection.execute(
                 """
                 SELECT query_text, representation::text AS representation
@@ -487,9 +490,9 @@ class EvidenceRetriever:
             vector = self._validate_vector(
                 self._parse_vector(str(query_vector_row["representation"])), space
             )
-            _set_statement_deadline(connection, deadline_monotonic)
+            set_statement_deadline(connection, deadline_monotonic)
             self._require_complete_index(connection, query, stored_space_id)
-            _set_statement_deadline(connection, deadline_monotonic)
+            set_statement_deadline(connection, deadline_monotonic)
             passages = self._retrieve_hybrid(connection, query, stored_space_id, vector)
         return self._result(query, passages, embedding_space=space)
 
@@ -963,32 +966,3 @@ class EvidenceRetriever:
             ),
             evidence_record_id=UUID(str(row["evidence_record_id"])),
         )
-
-
-def _set_statement_deadline(
-    connection: psycopg.Connection[dict[str, Any]], deadline_monotonic: float | None
-) -> None:
-    if deadline_monotonic is None:
-        return
-    remaining_ms = int((deadline_monotonic - monotonic()) * 1000)
-    if remaining_ms <= 0:
-        raise TimeoutError("Investigation wall-time budget exhausted")
-    connection.execute(
-        "SELECT set_config('statement_timeout', %s, true)",
-        (f"{remaining_ms}ms",),
-    )
-
-
-def _connect_with_deadline(
-    database_url: str, deadline_monotonic: float | None
-) -> psycopg.Connection[dict[str, Any]]:
-    if deadline_monotonic is None:
-        return psycopg.connect(database_url, row_factory=dict_row)
-    remaining_seconds = deadline_monotonic - monotonic()
-    if remaining_seconds < 1:
-        raise TimeoutError("Insufficient wall-time budget for a PostgreSQL connection")
-    return psycopg.connect(
-        database_url,
-        row_factory=dict_row,
-        connect_timeout=max(1, int(remaining_seconds)),
-    )

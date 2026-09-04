@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from time import monotonic
 from uuid import uuid4
 
 import psycopg
@@ -36,6 +37,7 @@ from exposure_ledger import (
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
 from exposure_ledger_storage import ExposureRepository, InvestigationRepository
+from exposure_ledger_storage.postgres_deadline import connect_with_deadline
 from exposure_ledger_worker.local_generation import GenerationReadiness
 from exposure_ledger_worker.main import process_next_assessment
 from fastapi.testclient import TestClient
@@ -49,6 +51,19 @@ from test_exposures_http import (
 )
 
 NOW = datetime(2026, 9, 4, 14, 0, tzinfo=UTC)
+
+
+def test_bounded_database_connections_reject_unenforceable_deadlines() -> None:
+    with pytest.raises(TimeoutError, match="Insufficient wall-time"):
+        connect_with_deadline(
+            "postgresql://localhost/exposure_ledger",
+            monotonic() + 1.5,
+        )
+    with pytest.raises(ValueError, match="one explicit PostgreSQL host"):
+        connect_with_deadline(
+            "postgresql://host-a:5432,host-b:5432/exposure_ledger",
+            monotonic() + 10,
+        )
 
 
 class ControlledGenerationProvider:

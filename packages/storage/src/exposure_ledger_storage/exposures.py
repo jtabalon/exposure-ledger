@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,10 +20,13 @@ from exposure_ledger import (
     VulnerabilityRecord,
 )
 from exposure_ledger import EvidenceRecord as DomainEvidenceRecord
-from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from exposure_ledger_storage.asset_snapshots import PackageInstanceRecord
+from exposure_ledger_storage.postgres_deadline import (
+    connect_with_deadline,
+    set_statement_deadline,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,8 +275,8 @@ class ExposureRepository:
     def list_for_assessment(
         self, assessment_run_id: UUID, *, deadline_monotonic: float | None = None
     ) -> list[ExposureRecord]:
-        with _connect_with_deadline(self._database_url, deadline_monotonic) as connection:
-            _set_statement_deadline(connection, deadline_monotonic)
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
+            set_statement_deadline(connection, deadline_monotonic)
             rows = connection.execute(
                 """
                 SELECT exposures.id, assessment_run_exposures.assessment_run_id,
@@ -520,7 +522,7 @@ class ExposureRepository:
         *,
         deadline_monotonic: float | None = None,
     ) -> ExposureRecord:
-        _set_statement_deadline(connection, deadline_monotonic)
+        set_statement_deadline(connection, deadline_monotonic)
         aliases = tuple(
             str(item["identifier"])
             for item in connection.execute(
@@ -532,7 +534,7 @@ class ExposureRepository:
                 (row["vulnerability_record_id"],),
             ).fetchall()
         )
-        _set_statement_deadline(connection, deadline_monotonic)
+        set_statement_deadline(connection, deadline_monotonic)
         paths = tuple(
             tuple(str(part) for part in item["path"])
             for item in connection.execute(
@@ -602,7 +604,7 @@ class ExposureRepository:
         exposure_id: UUID,
         deadline_monotonic: float | None = None,
     ) -> tuple[EvidenceRecordRecord, ...]:
-        _set_statement_deadline(connection, deadline_monotonic)
+        set_statement_deadline(connection, deadline_monotonic)
         rows = connection.execute(
             """
             SELECT evidence_records.id, evidence_records.identity_key,
@@ -624,7 +626,7 @@ class ExposureRepository:
         ).fetchall()
         records: list[EvidenceRecordRecord] = []
         for evidence in rows:
-            _set_statement_deadline(connection, deadline_monotonic)
+            set_statement_deadline(connection, deadline_monotonic)
             passages = connection.execute(
                 """
                 SELECT evidence_passages.id, evidence_passages.identity_key,
@@ -678,32 +680,3 @@ class ExposureRepository:
                 )
             )
         return tuple(records)
-
-
-def _set_statement_deadline(
-    connection: psycopg.Connection[Any], deadline_monotonic: float | None
-) -> None:
-    if deadline_monotonic is None:
-        return
-    remaining_ms = int((deadline_monotonic - monotonic()) * 1000)
-    if remaining_ms <= 0:
-        raise TimeoutError("Investigation wall-time budget exhausted")
-    connection.execute(
-        "SELECT set_config('statement_timeout', %s, true)",
-        (f"{remaining_ms}ms",),
-    )
-
-
-def _connect_with_deadline(
-    database_url: str, deadline_monotonic: float | None
-) -> psycopg.Connection[Any]:
-    if deadline_monotonic is None:
-        return psycopg.connect(database_url, row_factory=dict_row)
-    remaining_seconds = deadline_monotonic - monotonic()
-    if remaining_seconds < 1:
-        raise TimeoutError("Insufficient wall-time budget for a PostgreSQL connection")
-    return psycopg.connect(
-        database_url,
-        row_factory=dict_row,
-        connect_timeout=max(1, int(remaining_seconds)),
-    )

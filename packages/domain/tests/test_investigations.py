@@ -8,6 +8,7 @@ from exposure_ledger import (
     ClaimKind,
     ClaimValidator,
     EvidenceRelationship,
+    InvestigationBudget,
     InvestigationStoppingCondition,
 )
 
@@ -17,6 +18,11 @@ EVIDENCE_ID = UUID("00000000-0000-0000-0000-000000000081")
 def test_stopping_conditions_use_a_closed_vocabulary() -> None:
     with pytest.raises(ValueError):
         InvestigationStoppingCondition("misspelled_condition")
+
+
+def test_wall_time_budget_rejects_subsecond_limits() -> None:
+    with pytest.raises(ValueError, match="at least 1s"):
+        InvestigationBudget(wall_time_seconds=0.5)
 
 
 def _evidence() -> tuple[AvailableEvidence, ...]:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from time import monotonic
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -42,6 +41,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from exposure_ledger_storage.exposures import ExposureRepository
+from exposure_ledger_storage.postgres_deadline import (
+    connect_with_deadline,
+    deadline_after,
+    set_statement_deadline,
+)
 from exposure_ledger_storage.retrieval import (
     EvidenceRetriever,
     RetrievalQuery,
@@ -161,7 +165,7 @@ class InvestigationRepository:
         self, command: RunInvestigation, *, timeout_seconds: float
     ) -> InvestigationExposure:
         """Load one selected package-specific Exposure and its immutable evidence state."""
-        deadline_monotonic = monotonic() + timeout_seconds
+        deadline_monotonic = deadline_after(timeout_seconds)
         try:
             exposure = next(
                 (
@@ -180,17 +184,9 @@ class InvestigationRepository:
             raise ValueError("Investigation command does not identify a selected Exposure")
         if exposure.asset_snapshot_id != command.asset_snapshot_id:
             raise ValueError("Pinned Asset Snapshot does not match the Exposure")
-        with psycopg.connect(
-            self._database_url,
-            row_factory=dict_row,
-            connect_timeout=_connect_timeout(deadline_monotonic),
-        ) as connection:
+        with connect_with_deadline(self._database_url, deadline_monotonic) as connection:
             try:
-                timeout_ms = _timeout_ms(deadline_monotonic - monotonic())
-                connection.execute(
-                    "SELECT set_config('statement_timeout', %s, true)",
-                    (f"{timeout_ms}ms",),
-                )
+                set_statement_deadline(connection, deadline_monotonic)
                 snapshot = connection.execute(
                     "SELECT parser_version FROM asset_snapshots WHERE id = %s",
                     (exposure.asset_snapshot_id,),
@@ -228,7 +224,7 @@ class InvestigationRepository:
         timeout_seconds: float,
     ) -> RetrievedInvestigationEvidence:
         """Run the pinned hybrid retrieval configuration inside the Exposure scope."""
-        deadline_monotonic = monotonic() + timeout_seconds
+        deadline_monotonic = deadline_after(timeout_seconds)
         if command.configuration.source_policy_version != "explicit-source-allowlist-v1":
             raise ValueError("Pinned Source policy version is not current")
         try:
@@ -1062,16 +1058,3 @@ def _source_adapter_versions(values: tuple[str, ...]) -> dict[str, str]:
             raise ValueError("Source adapter versions must uniquely map Source identity to version")
         versions[source_identity] = version
     return versions
-
-
-def _timeout_ms(timeout_seconds: float) -> int:
-    if timeout_seconds <= 0:
-        raise TimeoutError("Investigation wall-time budget exhausted")
-    return max(1, int(timeout_seconds * 1000))
-
-
-def _connect_timeout(deadline_monotonic: float) -> int:
-    remaining_seconds = deadline_monotonic - monotonic()
-    if remaining_seconds < 1:
-        raise TimeoutError("Insufficient wall-time budget for a PostgreSQL connection")
-    return max(1, int(remaining_seconds))
