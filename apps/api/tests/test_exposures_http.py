@@ -12,11 +12,17 @@ import pytest
 from exposure_ledger import (
     AssessmentResult,
     CapturedSourcePayload,
+    CisaKevCatalog,
+    CisaKevSource,
+    EpssResponseRejected,
+    EpssSource,
     EvidenceRecord,
     ExposureEvidence,
+    FirstEpssResponse,
     GitHubAdvisorySourceUnavailable,
     GitHubAdvisoryTarget,
     GitHubRepositoryAdvisoryAdapter,
+    KevSourceUnavailable,
     OsvBatchResponse,
     OsvPackageQuery,
     OsvQueryBatchSourceAdapter,
@@ -275,6 +281,69 @@ class UnavailableAdvisorySource:
         )
 
 
+class CapturedKevSource(CisaKevSource):
+    def __init__(self) -> None:
+        self.capture_count = 0
+
+    def catalog(self) -> CisaKevCatalog:
+        self.capture_count += 1
+        payload = {
+            "catalogVersion": "2026.09.03",
+            "dateReleased": "2026-09-03T10:15:30Z",
+            "count": 1,
+            "vulnerabilities": [{"cveID": "CVE-2026-4000"}],
+        }
+        return CisaKevCatalog.capture(
+            payload,
+            capture=CapturedSourcePayload(
+                content=json.dumps(payload, separators=(",", ":")),
+                captured_at=datetime(2026, 9, 3, 12, self.capture_count, tzinfo=UTC),
+            ),
+        )
+
+
+class CapturedEpssSource(EpssSource):
+    def __init__(self) -> None:
+        self.capture_count = 0
+
+    def query(self, cve_ids: tuple[str, ...]) -> FirstEpssResponse:
+        self.capture_count += 1
+        assert cve_ids == ("CVE-2026-4000",)
+        payload = {
+            "status": "OK",
+            "status-code": 200,
+            "total": 1,
+            "offset": 0,
+            "limit": 100,
+            "data": [
+                {
+                    "cve": "CVE-2026-4000",
+                    "epss": "0.420000000",
+                    "percentile": "0.970000000",
+                    "date": "2026-09-03",
+                }
+            ],
+        }
+        return FirstEpssResponse.capture(
+            payload,
+            cve_ids=cve_ids,
+            capture=CapturedSourcePayload(
+                content=json.dumps(payload, separators=(",", ":")),
+                captured_at=datetime(2026, 9, 3, 13, self.capture_count, tzinfo=UTC),
+            ),
+        )
+
+
+class UnavailableKevSource(CisaKevSource):
+    def catalog(self) -> CisaKevCatalog:
+        raise KevSourceUnavailable("The public CISA KEV Source is unavailable.")
+
+
+class MalformedEpssSource(EpssSource):
+    def query(self, cve_ids: tuple[str, ...]) -> FirstEpssResponse:
+        raise EpssResponseRejected("FIRST EPSS returned a malformed score.")
+
+
 def repository_payload() -> dict[str, object]:
     return {
         "mode": "repository",
@@ -296,6 +365,8 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
 ) -> None:
     app = create_app(Settings(database_url=database_url))
     osv_source = CapturedOsvSource()
+    kev_source = CapturedKevSource()
+    epss_source = CapturedEpssSource()
 
     with TestClient(app) as client:
         first_run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
@@ -303,6 +374,8 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
         database_url=database_url,
         archive_source=FixtureArchiveSource(),
         osv_source=osv_source,
+        kev_source=kev_source,
+        epss_source=epss_source,
     )
 
     with TestClient(app) as client:
@@ -334,26 +407,44 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
             "fixedVersionAvailable": False,
             "score": 59,
         }
+        assert first[0]["kev"] == {
+            "state": "available",
+            "listed": True,
+            "observedAt": "2026-09-03T10:15:30Z",
+            "detail": None,
+        }
+        assert first[0]["epss"] == {
+            "state": "available",
+            "score": 0.42,
+            "percentile": 0.97,
+            "observedAt": "2026-09-03T00:00:00Z",
+            "detail": None,
+        }
+        assert first[1]["kev"] == first[0]["kev"]
+        assert first[1]["epss"] == first[0]["epss"]
         feature_evidence = first[0]["evidenceRecords"]
-        assert len(feature_evidence) == 1
-        assert feature_evidence[0]["source"] == {
+        assert len(feature_evidence) == 3
+        osv_evidence = next(
+            record for record in feature_evidence if record["source"]["identity"] == "osv"
+        )
+        assert osv_evidence["source"] == {
             "identity": "osv",
             "authority": "Open Source Vulnerabilities",
             "location": "https://api.osv.dev/v1/vulns/PYSEC-2026-40",
         }
-        assert feature_evidence[0]["capturedAt"] == "2026-09-03T12:30:00Z"
-        assert feature_evidence[0]["contentDigest"].startswith("sha256:")
-        assert feature_evidence[0]["attribution"] == "Open Source Vulnerabilities (OSV)"
-        assert feature_evidence[0]["aliases"] == [
+        assert osv_evidence["capturedAt"] == "2026-09-03T12:30:00Z"
+        assert osv_evidence["contentDigest"].startswith("sha256:")
+        assert osv_evidence["attribution"] == "Open Source Vulnerabilities (OSV)"
+        assert osv_evidence["aliases"] == [
             "CVE-2026-4000",
             "GHSA-4444-5555-6666",
             "PYSEC-2026-40",
         ]
-        assert feature_evidence[0]["payloadIdentity"] == "PYSEC-2026-40"
-        assert feature_evidence[0]["passages"] == [
+        assert osv_evidence["payloadIdentity"] == "PYSEC-2026-40"
+        assert osv_evidence["passages"] == [
             {
-                "id": feature_evidence[0]["passages"][0]["id"],
-                "identity": feature_evidence[0]["passages"][0]["identity"],
+                "id": osv_evidence["passages"][0]["id"],
+                "identity": osv_evidence["passages"][0]["identity"],
                 "kind": "affected",
                 "selector": "/affected/0",
                 "content": (
@@ -363,8 +454,13 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
                 ),
             }
         ]
+        assert {record["source"]["identity"] for record in feature_evidence} == {
+            "osv",
+            "cisa-kev",
+            "first-epss",
+        }
         with psycopg.connect(database_url) as connection:
-            assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (3,)
+            assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (5,)
         with (
             psycopg.connect(database_url) as connection,
             pytest.raises(
@@ -374,7 +470,7 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
         ):
             connection.execute(
                 "UPDATE evidence_records SET attribution = 'changed' WHERE id = %s",
-                (feature_evidence[0]["id"],),
+                (osv_evidence["id"],),
             )
         decisions = [
             item
@@ -384,6 +480,8 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
         assert {item["targetScope"] for item in decisions} == {
             f"https://github.com/example/exposure-fixture@{COMMIT}",
             "https://api.osv.dev/v1",
+            "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+            "https://api.first.org/data/v1/epss",
         }
         assert all(item["result"] == "allowed" for item in decisions)
 
@@ -399,6 +497,8 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
         database_url=database_url,
         archive_source=FixtureArchiveSource(),
         osv_source=osv_source,
+        kev_source=kev_source,
+        epss_source=epss_source,
     )
 
     with TestClient(app) as client:
@@ -411,8 +511,13 @@ def test_assessment_exposures_are_package_specific_ranked_and_idempotent(
     assert [record["id"] for item in second for record in item["evidenceRecords"]] == [
         record["id"] for item in first for record in item["evidenceRecords"]
     ]
-    assert second[0]["evidenceRecords"][0]["capturedAt"] == "2026-09-03T12:30:00Z"
+    second_osv_evidence = next(
+        record for record in second[0]["evidenceRecords"] if record["source"]["identity"] == "osv"
+    )
+    assert second_osv_evidence["capturedAt"] == "2026-09-03T12:30:00Z"
     assert len(osv_source.batches) == 2
+    assert kev_source.capture_count == 2
+    assert epss_source.capture_count == 2
 
 
 def test_osv_unavailability_is_visible_without_fabricated_evidence(database_url: str) -> None:
@@ -558,6 +663,40 @@ def test_exposure_evidence_search_rejects_stale_configuration_and_wrong_scope(
         assert wrong_scope.json()["detail"]["code"] == "exposure_not_found"
 
 
+def test_enrichment_failures_complete_with_explicit_partial_states(database_url: str) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(),
+        kev_source=UnavailableKevSource(),
+        epss_source=MalformedEpssSource(),
+    )
+
+    with TestClient(app) as client:
+        completed = client.get(f"/api/v1/assessment-runs/{run['id']}").json()
+        exposures = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"]
+
+    assert completed["status"] == "completed"
+    assert exposures[0]["kev"] == {
+        "state": "unavailable",
+        "listed": None,
+        "observedAt": None,
+        "detail": "The public CISA KEV Source is unavailable.",
+    }
+    assert exposures[0]["epss"] == {
+        "state": "malformed",
+        "score": None,
+        "percentile": None,
+        "observedAt": None,
+        "detail": "FIRST EPSS returned a malformed score.",
+    }
+    assert {record["source"]["identity"] for record in exposures[0]["evidenceRecords"]} == {"osv"}
+
+
 def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(
     database_url: str,
 ) -> None:
@@ -569,6 +708,8 @@ def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(
         database_url=database_url,
         archive_source=FixtureArchiveSource(),
         osv_source=AdvisoryLinkedOsvSource(),
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
         advisory_source=ConflictingAdvisorySource(),
     )
 
@@ -581,6 +722,8 @@ def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(
         ]
 
     assert exposure["authoritativeConflict"] is True
+    assert exposure["kev"]["state"] == "available"
+    assert exposure["epss"]["state"] == "available"
     evidence_by_source = {item["source"]["identity"]: item for item in exposure["evidenceRecords"]}
     assert evidence_by_source["osv"]["relationship"] == "contradicts"
     advisory = evidence_by_source["github_repository_security_advisory"]
@@ -595,11 +738,13 @@ def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(
     assert {item["targetScope"] for item in decisions} == {
         f"https://github.com/example/exposure-fixture@{COMMIT}",
         "https://api.osv.dev/v1",
+        "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+        "https://api.first.org/data/v1/epss",
         ("https://api.github.com/repos/acme/feature-lib/security-advisories/GHSA-4444-5555-6666"),
     }
 
 
-def test_unavailable_first_party_source_keeps_osv_evidence_visible(
+def test_unavailable_first_party_source_keeps_enriched_osv_evidence_visible(
     database_url: str,
 ) -> None:
     app = create_app(Settings(database_url=database_url))
@@ -610,6 +755,8 @@ def test_unavailable_first_party_source_keeps_osv_evidence_visible(
         database_url=database_url,
         archive_source=FixtureArchiveSource(),
         osv_source=AdvisoryLinkedOsvSource(),
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
         advisory_source=UnavailableAdvisorySource(),
     )
 
@@ -619,7 +766,13 @@ def test_unavailable_first_party_source_keeps_osv_evidence_visible(
 
     assert failed["status"] == "failed"
     assert failed["errorCode"] == "first_party_advisory_unavailable"
-    assert exposures[0]["evidenceRecords"][0]["source"]["identity"] == "osv"
+    assert exposures[0]["kev"]["state"] == "available"
+    assert exposures[0]["epss"]["state"] == "available"
+    assert {item["source"]["identity"] for item in exposures[0]["evidenceRecords"]} == {
+        "osv",
+        "cisa-kev",
+        "first-epss",
+    }
     assert all(
         item["source"]["identity"] != "github_repository_security_advisory"
         for exposure in exposures

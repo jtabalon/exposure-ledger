@@ -8,21 +8,31 @@ from threading import Event, Thread
 from uuid import UUID
 
 from exposure_ledger import (
+    CISA_KEV_CATALOG_URL,
+    FIRST_EPSS_API_URL,
     ArchiveLimits,
     AssessmentOperation,
     AssessmentRequest,
     AssetSnapshotCapture,
     AssetSnapshotRejected,
     AuthorizationStatus,
+    CisaKevCatalog,
+    CisaKevSource,
     CyberPolicy,
+    EpssSource,
+    EpssSourceUnavailable,
     ExposureDiscovery,
+    ExposureEnricher,
+    FirstEpssResponse,
     FirstPartyAdvisoryCollector,
     FirstPartyAdvisorySource,
     GitHubAdvisoryResponseRejected,
     GitHubAdvisorySourceUnavailable,
+    KevSourceUnavailable,
     OsvResponseRejected,
     OsvSource,
     OsvSourceUnavailable,
+    PolicyDecision,
     PolicyResult,
     RepositoryArchiveSource,
     RepositoryArchiveUnavailable,
@@ -40,11 +50,70 @@ from exposure_ledger_storage import (
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from exposure_ledger_worker.enrichment import CisaKevApiSource, FirstEpssApiSource
 from exposure_ledger_worker.github_advisories import GitHubAdvisoryApiSource
 from exposure_ledger_worker.osv import OsvApiSource
 from exposure_ledger_worker.repository_archives import GitHubArchiveSource
 
 logger = logging.getLogger(__name__)
+
+
+class _PolicyGatedKevSource:
+    def __init__(
+        self,
+        repository: AssessmentRunRepository,
+        assessment_run_id: UUID,
+        source: CisaKevSource,
+    ) -> None:
+        self._repository = repository
+        self._assessment_run_id = assessment_run_id
+        self._source = source
+
+    def catalog(self) -> CisaKevCatalog:
+        decision = _public_source_decision(
+            AssessmentOperation.PUBLIC_CISA_KEV_LOOKUP,
+            CISA_KEV_CATALOG_URL,
+        )
+        self._repository.record_tool_policy_decision(self._assessment_run_id, decision)
+        if decision.result is not PolicyResult.ALLOWED:
+            raise KevSourceUnavailable("CISA KEV Source access was blocked by policy.")
+        return self._source.catalog()
+
+
+class _PolicyGatedEpssSource:
+    def __init__(
+        self,
+        repository: AssessmentRunRepository,
+        assessment_run_id: UUID,
+        source: EpssSource,
+    ) -> None:
+        self._repository = repository
+        self._assessment_run_id = assessment_run_id
+        self._source = source
+
+    def query(self, cve_ids: tuple[str, ...]) -> FirstEpssResponse:
+        decision = _public_source_decision(
+            AssessmentOperation.PUBLIC_FIRST_EPSS_LOOKUP,
+            FIRST_EPSS_API_URL,
+        )
+        self._repository.record_tool_policy_decision(self._assessment_run_id, decision)
+        if decision.result is not PolicyResult.ALLOWED:
+            raise EpssSourceUnavailable("FIRST EPSS Source access was blocked by policy.")
+        return self._source.query(cve_ids)
+
+
+def _public_source_decision(
+    operation: AssessmentOperation,
+    target_scope: str,
+) -> PolicyDecision:
+    return CyberPolicy.decide(
+        AssessmentRequest(
+            operation=operation,
+            target_scope=target_scope,
+            authorization_scope="local operator",
+            authorization_status=AuthorizationStatus.CONFIRMED,
+        )
+    )
 
 
 class WorkerSettings(BaseSettings):
@@ -100,6 +169,8 @@ def process_next_assessment(
     stale_after_seconds: float = 30,
     archive_source: RepositoryArchiveSource | None = None,
     osv_source: OsvSource | None = None,
+    kev_source: CisaKevSource | None = None,
+    epss_source: EpssSource | None = None,
     advisory_source: FirstPartyAdvisorySource | None = None,
 ) -> bool:
     """Advance one queued Assessment Run, returning whether work was claimed."""
@@ -206,18 +277,26 @@ def process_next_assessment(
                     )
                     return True
                 try:
-                    result = ExposureDiscovery(osv_source or OsvApiSource()).discover(
+                    discovered = ExposureDiscovery(osv_source or OsvApiSource()).discover(
                         snapshot.as_domain()
                     )
+                    result = ExposureEnricher(
+                        kev_source=_PolicyGatedKevSource(
+                            repository,
+                            assessment_run.id,
+                            kev_source or CisaKevApiSource(),
+                        ),
+                        epss_source=_PolicyGatedEpssSource(
+                            repository,
+                            assessment_run.id,
+                            epss_source or FirstEpssApiSource(),
+                        ),
+                    ).enrich(discovered)
                     advisory_targets = derive_assessment_advisory_targets(result)
                     for target in advisory_targets:
-                        advisory_decision = CyberPolicy.decide(
-                            AssessmentRequest(
-                                operation=(AssessmentOperation.PUBLIC_FIRST_PARTY_ADVISORY_LOOKUP),
-                                target_scope=target.api_url,
-                                authorization_scope="local operator",
-                                authorization_status=AuthorizationStatus.CONFIRMED,
-                            )
+                        advisory_decision = _public_source_decision(
+                            AssessmentOperation.PUBLIC_FIRST_PARTY_ADVISORY_LOOKUP,
+                            target.api_url,
                         )
                         repository.record_tool_policy_decision(assessment_run.id, advisory_decision)
                         if advisory_decision.result is not PolicyResult.ALLOWED:

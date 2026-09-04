@@ -17,8 +17,45 @@ function passageLabel(kind: string): string {
       affected_guidance: "Maintainer affected and fixed-version guidance",
       publication: "Advisory publication identity",
       query_result: "OSV query result",
+      known_exploited_vulnerability: "KEV catalog entry",
+      epss_score: "EPSS score",
     }[kind] ?? "Evidence passage"
   )
+}
+
+function stateLabel(
+  source: "KEV" | "EPSS",
+  state: Exposure["kev"]["state"],
+): string {
+  switch (state) {
+    case "available":
+      return "Current observation"
+    case "stale":
+      return "Stale observation"
+    case "missing":
+      return `${source} evidence missing`
+    case "malformed":
+      return `${source} response malformed`
+    case "unavailable":
+      return `${source} Source unavailable`
+    case "not_collected":
+      return `${source} not collected`
+  }
+}
+
+function ordinal(value: number): string {
+  const remainder = value % 100
+  if (remainder >= 11 && remainder <= 13) return `${value}th`
+  switch (value % 10) {
+    case 1:
+      return `${value}st`
+    case 2:
+      return `${value}nd`
+    case 3:
+      return `${value}rd`
+    default:
+      return `${value}th`
+  }
 }
 
 export function ExposureQueuePanel({
@@ -136,6 +173,69 @@ export function ExposureQueuePanel({
                             .map((path) => path.join(" → "))
                             .join("; ")
                         : "Dependency paths unknown for this manifest"}
+                    </div>
+                    <div
+                      className="mt-4 grid gap-2 sm:grid-cols-2"
+                      aria-label="Exploit evidence signals"
+                    >
+                      <div className="rounded border bg-muted/20 p-3">
+                        <div className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                          Known exploitation · CISA KEV
+                        </div>
+                        <div className="mt-1 text-sm font-semibold">
+                          {exposure.kev.listed === null
+                            ? stateLabel("KEV", exposure.kev.state)
+                            : exposure.kev.listed
+                              ? "Listed"
+                              : "Not listed"}
+                        </div>
+                        {exposure.kev.state === "stale" ? (
+                          <Badge variant="outline" className="mt-2 text-[9px] text-amber-800">
+                            Stale observation
+                          </Badge>
+                        ) : null}
+                        {exposure.kev.observedAt ? (
+                          <time
+                            dateTime={exposure.kev.observedAt}
+                            className="mt-2 block font-mono text-[10px] text-muted-foreground"
+                          >
+                            Observed {exposure.kev.observedAt}
+                          </time>
+                        ) : null}
+                        {exposure.kev.detail ? (
+                          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+                            {exposure.kev.detail}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="rounded border bg-muted/20 p-3">
+                        <div className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                          Exploit probability · FIRST EPSS
+                        </div>
+                        <div className="mt-1 text-sm font-semibold">
+                          {exposure.epss.score === null || exposure.epss.percentile === null
+                            ? stateLabel("EPSS", exposure.epss.state)
+                            : `${(exposure.epss.score * 100).toFixed(1)}% probability · ${ordinal(Math.round(exposure.epss.percentile * 100))} percentile`}
+                        </div>
+                        {exposure.epss.state === "stale" ? (
+                          <Badge variant="outline" className="mt-2 text-[9px] text-amber-800">
+                            Stale observation
+                          </Badge>
+                        ) : null}
+                        {exposure.epss.observedAt ? (
+                          <time
+                            dateTime={exposure.epss.observedAt}
+                            className="mt-2 block font-mono text-[10px] text-muted-foreground"
+                          >
+                            Observed {exposure.epss.observedAt}
+                          </time>
+                        ) : null}
+                        {exposure.epss.detail ? (
+                          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+                            {exposure.epss.detail}
+                          </p>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -279,6 +280,32 @@ class ExposureRanking:
     score: int
 
 
+class SourceObservationState(StrEnum):
+    AVAILABLE = "available"
+    STALE = "stale"
+    MISSING = "missing"
+    MALFORMED = "malformed"
+    UNAVAILABLE = "unavailable"
+    NOT_COLLECTED = "not_collected"
+
+
+@dataclass(frozen=True, slots=True)
+class KevSignal:
+    state: SourceObservationState
+    listed: bool | None = None
+    observed_at: datetime | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EpssSignal:
+    state: SourceObservationState
+    score: Decimal | None = None
+    percentile: Decimal | None = None
+    observed_at: datetime | None = None
+    detail: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class Exposure:
     vulnerability_identity: str
@@ -288,6 +315,10 @@ class Exposure:
     selected_for_investigation: bool
     evidence: tuple[ExposureEvidence, ...]
     authoritative_conflict: bool = False
+    kev: KevSignal = field(default_factory=lambda: KevSignal(SourceObservationState.NOT_COLLECTED))
+    epss: EpssSignal = field(
+        default_factory=lambda: EpssSignal(SourceObservationState.NOT_COLLECTED)
+    )
 
 
 @dataclass(frozen=True, slots=True)

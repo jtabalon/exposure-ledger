@@ -606,6 +606,50 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         11,
         """
         ALTER TABLE assessment_run_exposures
+            ADD COLUMN kev_state text NOT NULL DEFAULT 'not_collected'
+                CHECK (kev_state IN (
+                    'available', 'stale', 'missing', 'malformed',
+                    'unavailable', 'not_collected'
+                )),
+            ADD COLUMN kev_listed boolean,
+            ADD COLUMN kev_observed_at timestamptz,
+            ADD COLUMN kev_detail text,
+            ADD COLUMN epss_state text NOT NULL DEFAULT 'not_collected'
+                CHECK (epss_state IN (
+                    'available', 'stale', 'missing', 'malformed',
+                    'unavailable', 'not_collected'
+                )),
+            ADD COLUMN epss_score numeric(10, 9)
+                CHECK (epss_score IS NULL OR (epss_score >= 0 AND epss_score <= 1)),
+            ADD COLUMN epss_percentile numeric(10, 9)
+                CHECK (
+                    epss_percentile IS NULL
+                    OR (epss_percentile >= 0 AND epss_percentile <= 1)
+                ),
+            ADD COLUMN epss_observed_at timestamptz,
+            ADD COLUMN epss_detail text,
+            ADD CONSTRAINT assessment_run_exposures_kev_signal_check CHECK (
+                (kev_state IN ('available', 'stale')
+                 AND kev_listed IS NOT NULL AND kev_observed_at IS NOT NULL)
+                OR
+                (kev_state NOT IN ('available', 'stale')
+                 AND kev_listed IS NULL AND kev_observed_at IS NULL)
+            ),
+            ADD CONSTRAINT assessment_run_exposures_epss_signal_check CHECK (
+                (epss_state IN ('available', 'stale')
+                 AND epss_score IS NOT NULL AND epss_percentile IS NOT NULL
+                 AND epss_observed_at IS NOT NULL)
+                OR
+                (epss_state NOT IN ('available', 'stale')
+                 AND epss_score IS NULL AND epss_percentile IS NULL
+                 AND epss_observed_at IS NULL)
+            );
+        """,
+    ),
+    (
+        12,
+        """
+        ALTER TABLE assessment_run_exposures
             ADD COLUMN authoritative_conflict boolean NOT NULL DEFAULT false;
 
         ALTER TABLE assessment_run_exposure_evidence
