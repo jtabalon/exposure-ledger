@@ -1,3 +1,8 @@
 # Use LangGraph without making it the domain model
 
-The investigation worker uses LangGraph's low-level graph API for bounded orchestration, while domain entities and immutable Investigation Revisions remain authoritative in PostgreSQL. The initial minimal Investigation is one fixed, non-resumable pass; interrupted Assessment work is reclaimed through the PostgreSQL job lease and starts a new immutable Revision. LangGraph checkpointing and within-Revision resumption are deferred until Evidence Gap follow-ups are introduced. This accepts framework coupling in the execution layer to gain explicit, inspectable agent control without allowing LangGraph threads, messages, or future checkpoints to define the product's language or history.
+The investigation worker uses LangGraph's low-level graph API for bounded orchestration, while domain entities and immutable Investigation Revisions remain authoritative in PostgreSQL. The initial minimal Investigation is one fixed, non-resumable pass; interrupted Assessment work is reclaimed through the PostgreSQL job lease and starts a new immutable Revision. LangGraph checkpointing and within-Revision resumption are deferred until resumable Evidence Gap follow-ups are introduced. This accepts framework coupling in the execution layer to gain explicit, inspectable agent control without allowing LangGraph threads, messages, or future checkpoints to define the product's language or history.
+
+The first Evidence Gap extension remains a single non-resumable invocation: it may execute one
+independently authorized search over already captured Exposure evidence, then finalize the immutable
+Revision. PostgreSQL checkpointing remains deferred until interruption recovery within a Revision is
+required; an interrupted worker still starts a new Revision under a reclaimed Assessment lease.

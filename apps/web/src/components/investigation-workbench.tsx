@@ -638,6 +638,71 @@ export function InvestigationWorkbench({
                 )
               })}
             </ol>
+
+            {(investigation.evidenceGap || investigation.stoppingReason) && (
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                {investigation.evidenceGap && (
+                  <section className="rounded-md border bg-card p-4" aria-label="Model proposal">
+                    <SectionLabel>
+                      <Bot className="size-3.5" aria-hidden="true" />
+                      Model proposal
+                    </SectionLabel>
+                    <div className="text-sm font-semibold">{investigation.evidenceGap.description}</div>
+                    <div className="mt-2 font-mono text-[10px] text-muted-foreground">
+                      {investigation.evidenceGap.kind} · {investigation.evidenceGap.identity}
+                    </div>
+                    {investigation.followUp && (
+                      <dl className="mt-3 border-t pt-2 text-xs">
+                        <FactRow label="Tool" value={investigation.followUp.tool} />
+                        <FactRow label="Target" value={investigation.followUp.target} />
+                        <FactRow
+                          label="Arguments"
+                          value={`${investigation.followUp.sourceIdentity} · ${investigation.followUp.evidenceType}`}
+                        />
+                        <FactRow
+                          label="Proposed"
+                          value={`${investigation.followUp.proposedAssistanceClass}/${investigation.followUp.proposedActionLevel}`}
+                        />
+                      </dl>
+                    )}
+                  </section>
+                )}
+
+                <section
+                  className="rounded-md border bg-card p-4"
+                  aria-label="Deterministic authorization"
+                >
+                  <SectionLabel>
+                    <ShieldCheck className="size-3.5" aria-hidden="true" />
+                    Deterministic authorization
+                  </SectionLabel>
+                  {investigation.followUp ? (
+                    <>
+                      <div className="text-sm font-semibold">
+                        {investigation.followUp.authorized
+                          ? investigation.followUp.executed
+                            ? "Authorized and executed once"
+                            : "Authorized"
+                          : "Not authorized"}
+                      </div>
+                      <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                        Independently classified {investigation.followUp.policyAssistanceClass}/
+                        {investigation.followUp.policyActionLevel} · {investigation.followUp.policyResult}
+                        {" · "}
+                        {investigation.followUp.reason}
+                      </p>
+                    </>
+                  ) : (
+                    <div className="text-sm font-semibold">No follow-up was proposed</div>
+                  )}
+                  {investigation.stoppingReason && (
+                    <p className="mt-3 border-l-2 border-amber-500/40 pl-3 text-xs leading-5 text-amber-900">
+                      {investigation.stoppingReason}
+                    </p>
+                  )}
+                </section>
+              </div>
+            )}
           </div>
         </div>
 

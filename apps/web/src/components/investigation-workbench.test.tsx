@@ -135,6 +135,44 @@ describe("InvestigationWorkbench", () => {
     expect(html).not.toContain("Synthetic precomputed demo")
   })
 
+  it("distinguishes the model proposal from deterministic authorization and stopping", () => {
+    const incomplete = {
+      ...demoInvestigation,
+      meta: { ...demoInvestigation.meta, status: "incomplete" as const },
+      stoppingReason: "The proposed Evidence Gap follow-up failed deterministic validation.",
+      evidenceGap: {
+        identity: "gap-fixed-version",
+        kind: "insufficient",
+        description: "The fixed version is not supported by the retrieved passages.",
+      },
+      followUp: {
+        tool: "search_captured_exposure_evidence",
+        target: "exposure:EXP-1042",
+        sourceIdentity: "osv",
+        evidenceType: "affected",
+        proposedAssistanceClass: "C1",
+        proposedActionLevel: "A1",
+        authorized: false,
+        executed: false,
+        reason: "follow_up_target_outside_exposure",
+        issues: ["follow_up_target_outside_exposure"],
+        policyAssistanceClass: "C1",
+        policyActionLevel: "A1",
+        policyResult: "allowed",
+      },
+    }
+
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={incomplete} {...workbenchProps} />,
+    )
+
+    expect(html).toContain("Model proposal")
+    expect(html).toContain("Deterministic authorization")
+    expect(html).toContain("Not authorized")
+    expect(html).toContain(incomplete.stoppingReason)
+    expect(html).not.toContain("chain-of-thought")
+  })
+
   it("presents immutable Revision history separately from human Dispositions", () => {
     const html = renderToStaticMarkup(
       <InvestigationWorkbench

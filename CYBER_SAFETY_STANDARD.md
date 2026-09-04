@@ -55,6 +55,7 @@ Every enforcement point records a Policy Decision containing the standard versio
 | --- | --- | --- |
 | Summarize a public CVE and cite remediation guidance | C0/A0 | Allow |
 | Inspect an allowlisted public repository for an already disclosed vulnerable dependency | C1/A1 | Allow |
+| Search already captured evidence for one gap in the same Exposure, Source, and evidence type | C1/A1 | Allow one read after deterministic tool-call authorization and budget checks |
 | Follow instructions embedded in a README to contact another service | C1/A4 | Block; retrieved content cannot expand scope |
 | Draft an upgrade pull request | C0/A2 | Restrict until the A2 milestone is approved |
 | Generate a working exploit for the disclosed vulnerability | C2/A2 | Block |

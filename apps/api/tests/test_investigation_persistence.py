@@ -23,7 +23,14 @@ from exposure_ledger import (
     Disposition,
     DispositionKind,
     EmbeddingSpace,
+    EvidenceFollowUpArguments,
+    EvidenceFollowUpAuthorization,
+    EvidenceFollowUpProposal,
+    EvidenceFollowUpTool,
+    EvidenceGap,
+    EvidenceGapKind,
     EvidenceRelationship,
+    EvidenceType,
     GenerationModel,
     InvestigationConfiguration,
     InvestigationEvent,
@@ -31,6 +38,7 @@ from exposure_ledger import (
     InvestigationMeasurements,
     InvestigationRevision,
     InvestigationRevisionStatus,
+    InvestigationStoppingCondition,
     Recommendation,
     RetrievedInvestigationEvidence,
     RetrievedInvestigationPassage,
@@ -39,7 +47,7 @@ from exposure_ledger import (
 )
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
-from exposure_ledger_storage import ExposureRepository, InvestigationRepository
+from exposure_ledger_storage import ExposureRepository, InvestigationRepository, apply_migrations
 from exposure_ledger_storage.postgres_deadline import connect_with_deadline
 from exposure_ledger_worker.local_generation import GenerationReadiness
 from exposure_ledger_worker.main import process_next_assessment
@@ -162,6 +170,44 @@ class ControlledGenerationProvider:
         )
 
 
+class ControlledFollowUpGenerationProvider(ControlledGenerationProvider):
+    def __init__(self) -> None:
+        self._calls_by_exposure: dict[object, int] = {}
+
+    def generate(  # type: ignore[no-untyped-def]
+        self, exposure, evidence, configuration, *, timeout_seconds: float
+    ):
+        draft = super().generate(
+            exposure,
+            evidence,
+            configuration,
+            timeout_seconds=timeout_seconds,
+        )
+        count = self._calls_by_exposure.get(exposure.exposure_id, 0) + 1
+        self._calls_by_exposure[exposure.exposure_id] = count
+        if count > 1:
+            return draft
+        return replace(
+            draft,
+            recommendation=Recommendation.MORE_EVIDENCE_REQUIRED,
+            evidence_gap=EvidenceGap(
+                identity="gap-affected-range",
+                kind=EvidenceGapKind.INSUFFICIENT,
+                description="A focused affected-range passage is required.",
+            ),
+            follow_up=EvidenceFollowUpProposal(
+                tool=EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE,
+                target=f"exposure:{exposure.exposure_id}",
+                arguments=EvidenceFollowUpArguments(
+                    source_identity="osv",
+                    evidence_type=EvidenceType.AFFECTED,
+                ),
+                assistance_class="C1",
+                action_level="A1",
+            ),
+        )
+
+
 def _seed_exposure(database_url: str):  # type: ignore[no-untyped-def]
     app = create_app(Settings(database_url=database_url))
     with TestClient(app) as client:
@@ -258,6 +304,9 @@ def _revision(exposure, *, created_at: datetime = NOW) -> InvestigationRevision:
             limitations=("Static analysis does not prove runtime reachability.",),
         ),
         output_policy_decision=policy,
+        evidence_gap=None,
+        follow_up=None,
+        stopping_reason=None,
         events=(
             InvestigationEvent(
                 stage="persist_revision",
@@ -277,7 +326,7 @@ def _revision(exposure, *, created_at: datetime = NOW) -> InvestigationRevision:
         configuration=InvestigationConfiguration(
             application_release="0.1.0",
             graph_version="bounded-investigation-v1",
-            prompt_version="claims-recommendation-v1",
+            prompt_version="claims-recommendation-follow-up-v2",
             policy_version="0.1",
             parser_version="uv-lock-v1",
             retrieval_configuration_version="postgres-hybrid-rrf-v1",
@@ -350,6 +399,107 @@ def test_revision_history_appends_and_reloads_complete_immutable_revisions(
             """,
             (uuid4(), first.id),
         )
+
+
+def test_follow_up_migration_preserves_legacy_incomplete_revisions(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    legacy_revision = replace(
+        _revision(exposure),
+        status=InvestigationRevisionStatus.INCOMPLETE,
+        stopping_condition=InvestigationStoppingCondition.WALL_TIME_BUDGET_EXHAUSTED,
+        stopping_reason="The Investigation wall-time budget was exhausted.",
+    )
+    repository.append(legacy_revision)
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute(
+            """
+            ALTER TABLE investigation_revisions
+                DROP CONSTRAINT investigation_revisions_stopping_reason_check,
+                DROP CONSTRAINT investigation_revisions_follow_up_check,
+                DROP COLUMN stopping_reason,
+                DROP COLUMN evidence_gap,
+                DROP COLUMN follow_up,
+                DROP COLUMN follow_up_policy_decision_id
+            """
+        )
+        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 17")
+
+    apply_migrations(database_url)
+
+    loaded = repository.list_for_exposure(exposure.id)[0].revision
+    with psycopg.connect(database_url) as connection:
+        stored_reason = connection.execute(
+            "SELECT stopping_reason FROM investigation_revisions WHERE id = %s",
+            (legacy_revision.id,),
+        ).fetchone()
+    assert stored_reason == (None,)
+    assert loaded.status is InvestigationRevisionStatus.INCOMPLETE
+    assert loaded.stopping_reason is not None
+    assert "legacy Investigation Revision" in loaded.stopping_reason
+
+
+def test_revision_persists_the_model_proposal_and_deterministic_follow_up_authorization(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    proposal = EvidenceFollowUpProposal(
+        tool=EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE,
+        target=f"exposure:{exposure.id}",
+        arguments=EvidenceFollowUpArguments(
+            source_identity=revision.evidence_state.available[0].source_identity,
+            evidence_type=EvidenceType.AFFECTED,
+        ),
+        assistance_class="C1",
+        action_level="A1",
+    )
+    policy = CyberPolicy.decide(
+        AssessmentRequest(
+            operation=AssessmentOperation.SEARCH_CAPTURED_EXPOSURE_EVIDENCE,
+            target_scope=proposal.target,
+            authorization_scope="local operator",
+            authorization_status=AuthorizationStatus.CONFIRMED,
+        )
+    )
+    followed = replace(
+        revision,
+        evidence_gap=EvidenceGap(
+            identity="gap-affected-range",
+            kind=EvidenceGapKind.INSUFFICIENT,
+            description="A focused affected-range passage was required.",
+        ),
+        follow_up=EvidenceFollowUpAuthorization(
+            proposal=proposal,
+            authorized=True,
+            executed=True,
+            reason="follow_up_authorized",
+            issues=(),
+            policy_decision=policy,
+        ),
+    )
+
+    repository = InvestigationRepository(database_url)
+    repository.append(followed)
+    loaded = repository.list_for_exposure(exposure.id)[0].revision
+
+    assert loaded.evidence_gap == followed.evidence_gap
+    assert loaded.follow_up == followed.follow_up
+
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        payload = client.get(
+            f"/api/v1/assessment-runs/{exposure.assessment_run_id}/investigation-revisions"
+        ).json()["items"][0]
+
+    assert payload["evidenceGap"]["kind"] == "insufficient"
+    assert payload["followUp"]["proposal"]["tool"] == "search_captured_exposure_evidence"
+    assert payload["followUp"]["authorization"]["authorized"] is True
+    assert payload["followUp"]["authorization"]["executed"] is True
+    assert payload["followUp"]["authorization"]["policyDecision"]["enforcementPoint"] == (
+        "tool_call"
+    )
 
 
 def test_risk_acceptance_requires_rationale_and_an_expiration_or_review_date(
@@ -760,6 +910,7 @@ def test_revision_persists_when_budget_expires_before_evidence_acquisition(
         revision,
         status=InvestigationRevisionStatus.INCOMPLETE,
         stopping_condition="wall_time_budget_exhausted",
+        stopping_reason="The Investigation wall-time budget was exhausted.",
         evidence_state=InvestigationEvidenceState(
             available=(),
             retrieved=RetrievedInvestigationEvidence(query="", passages=()),
@@ -816,6 +967,7 @@ def test_revision_rejects_known_conflict_when_evidence_acquisition_was_skipped(
         revision,
         status=InvestigationRevisionStatus.INCOMPLETE,
         stopping_condition="graph_transition_budget_exhausted",
+        stopping_reason="The graph-transition budget was exhausted.",
         evidence_state=InvestigationEvidenceState(
             available=(),
             retrieved=RetrievedInvestigationEvidence(query="", passages=()),
@@ -901,3 +1053,40 @@ def test_controlled_adapters_exercise_the_complete_investigation_path(
     assert first["measurements"]["graphTransitions"] == 8
     assert "thinking" not in json.dumps(payload).lower()
     assert "chain-of-thought" not in json.dumps(payload).lower()
+
+
+def test_controlled_adapters_execute_one_persisted_follow_up_per_exposure(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    provider = ControlledFollowUpGenerationProvider()
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(),
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
+        embedding_provider=KnownAnswerEmbeddingProvider(),
+        generation_provider=provider,
+    )
+
+    revisions = InvestigationRepository(database_url).list_for_assessment(run["id"])
+    assert len(revisions) == 2
+    assert all(item.revision.follow_up is not None for item in revisions)
+    assert all(item.revision.follow_up and item.revision.follow_up.executed for item in revisions)
+    assert all(item.revision.measurements.generation_model_calls == 2 for item in revisions)
+    assert all(item.revision.measurements.tool_calls == 3 for item in revisions)
+    assert all(item.revision.measurements.graph_transitions == 11 for item in revisions)
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            """
+            SELECT count(*) FROM policy_decisions
+            WHERE assessment_run_id = %s
+              AND enforcement_point = 'tool_call'
+              AND target_scope LIKE 'exposure:%%'
+            """,
+            (run["id"],),
+        ).fetchone() == (2,)

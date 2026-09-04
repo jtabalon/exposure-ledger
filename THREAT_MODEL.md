@@ -50,6 +50,7 @@ The first release performs live, read-only exposure investigation over arbitrary
 | Incompatible or poisoned semantic representations | Versioned Embedding Spaces, pinned model artifacts and retrieval instructions, no cross-space comparison, retrieval evaluation before promotion | A compromised or weak embedding model may still degrade recall within one space |
 | Hallucinated or unsupported Claims | Atomic Claims, evidence relationships, deterministic citation validation, `Needs Evidence` on failure | Semantic entailment checks can produce false decisions |
 | Multi-step policy bypass or excessive agency | Classify requests, tool calls, retrieved content, and output; bounded graph transitions and tool calls; no general shell, SQL, HTTP, or filesystem tools | Novel compositions may evade semantic classifiers |
+| Evidence Gap follow-up expands its target, capability, or instructions | Permit at most one metadata-filtered search over evidence already captured for the same Exposure; validate the exact tool, target, Source, evidence type, C1/A1 classification, and remaining budgets before execution; treat returned passages as untrusted data | Poisoned captured evidence can still influence model output, which remains subject to citation and structured-output validation |
 | Credential disclosure through prompts, logs, or repository access | Keep reusable secrets outside model-visible state, redact telemetry, minimum source-provider scopes, no access to unrelated files | Future hosted-model use introduces provider-side retention risk |
 | Disclosure of model reasoning or sensitive intermediate context | Do not persist or display chain-of-thought; retain only auditable prompts, evidence references, validated outputs, and operational measurements; keep telemetry local by default | Validated outputs may still reproduce sensitive retrieved content |
 | Tampering with Investigation history or safety policy | Immutable revisions, database constraints, recorded prompt/model/policy versions, change-controlled migrations | A fully compromised database administrator can alter records |
@@ -65,6 +66,7 @@ The first release performs live, read-only exposure investigation over arbitrary
 - Demonstrate that no analyzed repository content is executed, imported, installed, or built.
 - Exercise every Assistance Class and Action Level, including multi-step escalation.
 - Verify graph, tool, time, and monetary ceilings fail closed with a visible incomplete Revision.
+- Verify an Evidence Gap follow-up cannot add a tool, Source, evidence type, target, instruction, or second step, and that every follow-up budget ceiling fails closed.
 - Verify every material Claim has valid supporting Evidence Records or is explicitly labeled as an inference.
 - Verify secrets and authorization headers are absent from model context, logs, events, and traces.
 - Verify retries are idempotent and cannot mutate prior Evidence Records or Investigation Revisions.

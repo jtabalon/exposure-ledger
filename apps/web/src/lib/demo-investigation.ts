@@ -34,6 +34,27 @@ export type InvestigationStage = {
 }
 
 export type DemoInvestigation = {
+  stoppingReason?: string
+  evidenceGap?: {
+    identity: string
+    kind: string
+    description: string
+  }
+  followUp?: {
+    tool: string
+    target: string
+    sourceIdentity: string
+    evidenceType: string
+    proposedAssistanceClass: string
+    proposedActionLevel: string
+    authorized: boolean
+    executed: boolean
+    reason: string
+    issues: string[]
+    policyAssistanceClass: string
+    policyActionLevel: string
+    policyResult: string
+  }
   meta: {
     mode: "live" | "precomputed"
     status: "complete" | "incomplete"

@@ -52,7 +52,10 @@ These seams were agreed during design and are the only initial surfaces tested d
 8. **Retrieval:** an Exposure-scoped, metadata-filtered query and one explicit Embedding Space
    produce deterministic full-text, vector, and fused ranks, or a typed unavailable result. Known
    answers report recall@k without changing rank order.
-9. **Investigation history:** the HTTP and persistence contracts append and load immutable
+9. **Investigation orchestration:** `InvestigationRunner.run` either completes without a follow-up,
+   follows one independently authorized captured-evidence search, or returns a visible incomplete
+   Investigation Revision without executing an invalid, blocked, unavailable, or over-budget proposal.
+10. **Investigation history:** the HTTP and persistence contracts append and load immutable
    Investigation Revisions and human Dispositions. Database integration tests may exercise the
    append-only and scope constraints directly because those constraints are part of the public
    PostgreSQL persistence boundary.

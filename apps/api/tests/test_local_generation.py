@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
 import pytest
 from exposure_ledger import (
+    AvailableEvidence,
     EmbeddingSpace,
     GenerationModel,
     InvestigationConfiguration,
@@ -30,7 +32,7 @@ def _configuration() -> InvestigationConfiguration:
     return InvestigationConfiguration(
         application_release="0.1.0",
         graph_version="bounded-investigation-v1",
-        prompt_version="claims-recommendation-v1",
+        prompt_version="claims-recommendation-follow-up-v2",
         policy_version="0.1",
         parser_version="uv-lock-v1",
         retrieval_configuration_version="postgres-hybrid-rrf-v1",
@@ -254,6 +256,102 @@ def test_invalid_structured_output_fails_closed() -> None:
         provider.generate(_exposure(), _evidence(), _configuration())
 
     assert caught.value.readiness.code == "generation_invalid_structured_output"
+
+
+def test_generation_parses_one_enumerated_evidence_gap_follow_up() -> None:
+    structured = {
+        "operation": "produce_exposure_recommendation",
+        "claims": [
+            {
+                "identity": "claim-affected",
+                "kind": "fact",
+                "text": "Feature-lib 5.1.0 may be inside the affected range.",
+                "material": True,
+                "limitation": None,
+                "citations": [
+                    {
+                        "evidenceRecordId": str(EVIDENCE_ID),
+                        "passageIdentities": ["osv:affected"],
+                        "relationship": "contextual",
+                    }
+                ],
+            }
+        ],
+        "recommendation": "more_evidence_required",
+        "recommendationSummary": "Retrieve a focused affected-range passage.",
+        "recommendationReasons": ["Affected-range support is insufficient."],
+        "recommendationLimitations": [],
+        "evidenceGap": {
+            "identity": "gap-affected-range",
+            "kind": "insufficient",
+            "description": "The affected range needs focused support.",
+        },
+        "followUp": {
+            "tool": "search_captured_exposure_evidence",
+            "target": "exposure:00000000-0000-0000-0000-000000000042",
+            "arguments": {"sourceIdentity": "osv", "evidenceType": "affected"},
+            "assistanceClass": "C1",
+            "actionLevel": "A1",
+        },
+    }
+    chat_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": MODEL, "digest": DIGEST}]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json=_show_response())
+        chat_payloads.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"message": {"role": "assistant", "content": json.dumps(structured)}},
+        )
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+    exposure = replace(
+        _exposure(),
+        evidence=(
+            AvailableEvidence(
+                record_id=EVIDENCE_ID,
+                record_identity="sha256:evidence",
+                content_digest="sha256:" + "c" * 64,
+                source_identity="osv",
+                source_adapter_version="osv-v1",
+                passage_identities=("osv:affected",),
+            ),
+        ),
+    )
+
+    draft = provider.generate(exposure, _evidence(), _configuration())
+
+    assert draft.evidence_gap is not None
+    assert draft.evidence_gap.kind == "insufficient"
+    assert draft.follow_up is not None
+    assert draft.follow_up.tool == "search_captured_exposure_evidence"
+    messages = chat_payloads[0]["messages"]
+    assert isinstance(messages, list)
+    user_payload = json.loads(messages[1]["content"])
+    assert user_payload["allowedFollowUp"] == {
+        "actionLevel": "A1",
+        "assistanceClass": "C1",
+        "evidenceGapKinds": ["missing", "insufficient", "stale", "conflicting"],
+        "evidenceTypes": [
+            "affected",
+            "affected_guidance",
+            "epss_score",
+            "known_exploited_vulnerability",
+            "publication",
+            "query_result",
+        ],
+        "maximumProposals": 1,
+        "sourceIdentities": ["osv"],
+        "target": "exposure:00000000-0000-0000-0000-000000000042",
+        "tool": "search_captured_exposure_evidence",
+    }
 
 
 @pytest.mark.parametrize(

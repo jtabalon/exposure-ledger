@@ -78,7 +78,7 @@ def test_installed_local_generation_model_satisfies_structured_claim_contract() 
     configuration = InvestigationConfiguration(
         application_release="0.1.0",
         graph_version="bounded-investigation-v1",
-        prompt_version="claims-recommendation-v1",
+        prompt_version="claims-recommendation-follow-up-v2",
         policy_version="0.1",
         parser_version="uv-lock-v1",
         retrieval_configuration_version="postgres-hybrid-rrf-v1",

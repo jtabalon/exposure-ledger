@@ -43,9 +43,16 @@ Each module is deep: callers cross a small interface while the volatile source, 
 3. Exposure discovery normalizes PyPI identities, queries OSV, coalesces vulnerability aliases, and deterministically ranks package-specific Exposures.
 4. The top five Exposures receive Investigations. Evidence acquisition captures first-party and public-source material with timestamps and digests.
 5. Retrieval constructs source-aware passages and performs metadata-filtered full-text and vector retrieval within one Embedding Space.
-6. The model synthesizes atomic facts or labeled inferences, each linked to Evidence Records.
-7. Citation and cyber-policy validation either accepts the allowed Recommendation or downgrades it to `More Evidence Required`.
-8. The worker appends an immutable complete or incomplete Investigation Revision and emits persisted progress events for SSE clients.
+6. The model synthesizes atomic facts or labeled inferences, each linked to Evidence Records, and may
+   identify one Evidence Gap with one proposal from the enumerated captured-evidence search vocabulary.
+7. A deterministic controller independently validates the proposal's exact Exposure target, Source
+   and evidence-type arguments, C1/A1 classification, and remaining call, transition, and wall-time
+   budgets before executing at most one follow-up.
+8. Follow-up output is treated as untrusted data during one final synthesis; another proposal cannot
+   execute. Citation and cyber-policy validation either accepts the allowed Recommendation or
+   downgrades it to `More Evidence Required`.
+9. The worker appends an immutable complete or incomplete Investigation Revision, including the
+   Evidence Gap, proposal, authorization, stopping reason, and progress events.
 
 ## Reliability invariants
 

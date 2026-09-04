@@ -1,13 +1,24 @@
+from dataclasses import replace
 from uuid import UUID
 
 import pytest
 from exposure_ledger import (
+    ActionLevel,
+    AssistanceClass,
     AvailableEvidence,
     ClaimDraft,
     ClaimEvidenceCitation,
     ClaimKind,
     ClaimValidator,
+    EvidenceFollowUpArguments,
+    EvidenceFollowUpProposal,
+    EvidenceFollowUpTool,
+    EvidenceGap,
+    EvidenceGapKind,
     EvidenceRelationship,
+    EvidenceType,
+    FollowUpAuthorizationContext,
+    FollowUpValidator,
     InvestigationBudget,
     InvestigationStoppingCondition,
 )
@@ -23,6 +34,152 @@ def test_stopping_conditions_use_a_closed_vocabulary() -> None:
 def test_wall_time_budget_rejects_subsecond_limits() -> None:
     with pytest.raises(ValueError, match="at least 1s"):
         InvestigationBudget(wall_time_seconds=0.5)
+
+
+def test_default_revision_limits_match_the_documented_safety_ceilings() -> None:
+    budget = InvestigationBudget()
+
+    assert budget.max_generation_model_calls == 5
+    assert budget.max_tool_calls == 15
+    assert budget.max_graph_transitions == 12
+    assert budget.wall_time_seconds == 120
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        InvestigationBudget(max_generation_model_calls=5),
+        InvestigationBudget(max_tool_calls=15),
+        InvestigationBudget(max_graph_transitions=12),
+        InvestigationBudget(wall_time_seconds=120),
+    ],
+)
+def test_documented_safety_ceilings_are_accepted(budget: InvestigationBudget) -> None:
+    assert budget
+
+
+@pytest.mark.parametrize(
+    "budget_arguments",
+    [
+        {"max_generation_model_calls": 6},
+        {"max_tool_calls": 16},
+        {"max_graph_transitions": 13},
+        {"wall_time_seconds": 121},
+    ],
+)
+def test_revision_limits_cannot_exceed_documented_safety_ceilings(
+    budget_arguments: dict[str, int],
+) -> None:
+    with pytest.raises(ValueError, match="cannot exceed"):
+        InvestigationBudget(**budget_arguments)
+
+
+def test_one_scoped_c1_a1_evidence_search_is_authorized() -> None:
+    exposure_id = UUID("00000000-0000-0000-0000-000000000042")
+    proposal = EvidenceFollowUpProposal(
+        tool=EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE,
+        target=f"exposure:{exposure_id}",
+        arguments=EvidenceFollowUpArguments(
+            source_identity="osv",
+            evidence_type=EvidenceType.AFFECTED,
+        ),
+        assistance_class=AssistanceClass.C1,
+        action_level=ActionLevel.A1,
+    )
+
+    authorization = FollowUpValidator.authorize(
+        gap=EvidenceGap(
+            identity="gap-fixed-version",
+            kind=EvidenceGapKind.INSUFFICIENT,
+            description="The first fixed version is not supported by the retrieved passages.",
+        ),
+        proposal=proposal,
+        context=FollowUpAuthorizationContext(
+            exposure_id=exposure_id,
+            allowed_source_identities=("osv",),
+            generation_model_calls=1,
+            tool_calls=2,
+            graph_transitions=5,
+            remaining_wall_time_seconds=90,
+            budget=InvestigationBudget(),
+        ),
+    )
+
+    assert authorization.authorized is True
+    assert authorization.executed is False
+    assert authorization.reason == "follow_up_authorized"
+    assert authorization.policy_decision.assistance_class is AssistanceClass.C1
+    assert authorization.policy_decision.action_level is ActionLevel.A1
+
+
+@pytest.mark.parametrize(
+    ("proposal_change", "expected_issue"),
+    [
+        (
+            {"target": "exposure:00000000-0000-0000-0000-000000000099"},
+            "follow_up_target_outside_exposure",
+        ),
+        ({"assistance_class": AssistanceClass.C0}, "follow_up_assistance_class_mismatch"),
+        ({"action_level": ActionLevel.A0}, "follow_up_action_level_mismatch"),
+    ],
+)
+def test_follow_up_authorization_independently_rejects_scope_and_classification_changes(
+    proposal_change: dict[str, object], expected_issue: str
+) -> None:
+    exposure_id = UUID("00000000-0000-0000-0000-000000000042")
+    proposal = EvidenceFollowUpProposal(
+        tool=EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE,
+        target=f"exposure:{exposure_id}",
+        arguments=EvidenceFollowUpArguments("osv", EvidenceType.AFFECTED),
+        assistance_class=AssistanceClass.C1,
+        action_level=ActionLevel.A1,
+    )
+    authorization = FollowUpValidator.authorize(
+        gap=EvidenceGap("gap", EvidenceGapKind.MISSING, "More evidence is required."),
+        proposal=replace(proposal, **proposal_change),
+        context=FollowUpAuthorizationContext(
+            exposure_id=exposure_id,
+            allowed_source_identities=("osv",),
+            generation_model_calls=1,
+            tool_calls=2,
+            graph_transitions=5,
+            remaining_wall_time_seconds=90,
+            budget=InvestigationBudget(),
+        ),
+    )
+
+    assert authorization.authorized is False
+    assert expected_issue in authorization.issues
+
+
+def test_follow_up_authorization_rejects_unenumerated_arguments() -> None:
+    exposure_id = UUID("00000000-0000-0000-0000-000000000042")
+    authorization = FollowUpValidator.authorize(
+        gap=EvidenceGap("gap", "invented", "More evidence is required."),
+        proposal=EvidenceFollowUpProposal(
+            tool=EvidenceFollowUpTool.SEARCH_CAPTURED_EXPOSURE_EVIDENCE,
+            target=f"exposure:{exposure_id}",
+            arguments=EvidenceFollowUpArguments("attacker", "run_shell"),
+            assistance_class=AssistanceClass.C1,
+            action_level=ActionLevel.A1,
+        ),
+        context=FollowUpAuthorizationContext(
+            exposure_id=exposure_id,
+            allowed_source_identities=("osv",),
+            generation_model_calls=1,
+            tool_calls=2,
+            graph_transitions=5,
+            remaining_wall_time_seconds=90,
+            budget=InvestigationBudget(),
+        ),
+    )
+
+    assert authorization.authorized is False
+    assert authorization.issues == (
+        "evidence_gap_kind_invalid",
+        "follow_up_source_not_allowed",
+        "follow_up_evidence_type_invalid",
+    )
 
 
 def _evidence() -> tuple[AvailableEvidence, ...]:
