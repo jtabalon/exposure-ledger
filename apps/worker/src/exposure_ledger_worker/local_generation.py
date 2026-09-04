@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Callable
@@ -40,7 +41,18 @@ class GenerationProviderUnavailable(RuntimeError):
 class GenerationProvider(Protocol):
     def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness: ...
 
+    async def check_readiness_bounded(self, *, timeout_seconds: float) -> GenerationReadiness: ...
+
     def generate(
+        self,
+        exposure: InvestigationExposure,
+        evidence: RetrievedInvestigationEvidence,
+        configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
+    ) -> StructuredInvestigationDraft: ...
+
+    async def generate_bounded(
         self,
         exposure: InvestigationExposure,
         evidence: RetrievedInvestigationEvidence,
@@ -91,7 +103,7 @@ class OllamaGenerationProvider:
         *,
         base_url: str,
         model_artifact: str,
-        transport: httpx.BaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
         timeout_seconds: float = 120,
         monotonic: Callable[[], float] | None = None,
     ) -> None:
@@ -118,9 +130,18 @@ class OllamaGenerationProvider:
         return cast(dict[str, object], _StructuredOutput.model_json_schema(by_alias=True))
 
     def check_readiness(self, *, timeout_seconds: float | None = None) -> GenerationReadiness:
+        return asyncio.run(
+            self.check_readiness_bounded(
+                timeout_seconds=(
+                    timeout_seconds if timeout_seconds is not None else self._timeout_seconds
+                )
+            )
+        )
+
+    async def check_readiness_bounded(self, *, timeout_seconds: float) -> GenerationReadiness:
         deadline = self._deadline(timeout_seconds)
         try:
-            tags = self._request_json("GET", "/api/tags", deadline=deadline)
+            tags = await self._request_json("GET", "/api/tags", deadline=deadline)
             models = tags.get("models")
             if not isinstance(models, list):
                 return self._invalid_response("Ollama returned no model inventory.")
@@ -149,7 +170,7 @@ class OllamaGenerationProvider:
             digest = installed.get("digest")
             if not isinstance(digest, str) or _HEX_DIGEST.fullmatch(digest) is None:
                 return self._invalid_response("Ollama returned an invalid model artifact digest.")
-            details = self._request_json(
+            details = await self._request_json(
                 "POST",
                 "/api/show",
                 json={"model": self._model_artifact, "verbose": False},
@@ -176,8 +197,8 @@ class OllamaGenerationProvider:
                     artifact_digest=f"sha256:{digest.lower()}",
                 ),
             )
-        except (httpx.HTTPError, ValueError) as error:
-            if timeout_seconds is not None and isinstance(error, httpx.TimeoutException):
+        except (TimeoutError, httpx.HTTPError, ValueError) as error:
+            if isinstance(error, (TimeoutError, httpx.TimeoutException)):
                 return GenerationReadiness(
                     status="unavailable",
                     code="generation_wall_time_budget_exhausted",
@@ -207,8 +228,32 @@ class OllamaGenerationProvider:
         *,
         timeout_seconds: float | None = None,
     ) -> StructuredInvestigationDraft:
+        return asyncio.run(
+            self.generate_bounded(
+                exposure,
+                evidence,
+                configuration,
+                timeout_seconds=(
+                    timeout_seconds if timeout_seconds is not None else self._timeout_seconds
+                ),
+            )
+        )
+
+    async def generate_bounded(
+        self,
+        exposure: InvestigationExposure,
+        evidence: RetrievedInvestigationEvidence,
+        configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
+    ) -> StructuredInvestigationDraft:
         deadline = self._deadline(timeout_seconds)
-        current_model = self.require_model(timeout_seconds=self._remaining(deadline))
+        readiness = await self.check_readiness_bounded(
+            timeout_seconds=self._remaining_required(deadline)
+        )
+        if readiness.model is None:
+            raise GenerationProviderUnavailable(readiness)
+        current_model = readiness.model
         if current_model != configuration.generation_model:
             raise GenerationProviderUnavailable(
                 GenerationReadiness(
@@ -235,7 +280,7 @@ class OllamaGenerationProvider:
                 )
             )
         try:
-            response = self._request_json(
+            response = await self._request_json(
                 "POST",
                 "/api/chat",
                 json={
@@ -277,7 +322,12 @@ class OllamaGenerationProvider:
                 recommendation_reasons=tuple(parsed.recommendation_reasons),
                 recommendation_limitations=tuple(parsed.recommendation_limitations),
             )
-            final_model = self.require_model(timeout_seconds=self._remaining(deadline))
+            final_readiness = await self.check_readiness_bounded(
+                timeout_seconds=self._remaining_required(deadline)
+            )
+            if final_readiness.model is None:
+                raise GenerationProviderUnavailable(final_readiness)
+            final_model = final_readiness.model
             if final_model != current_model:
                 raise GenerationProviderUnavailable(
                     GenerationReadiness(
@@ -294,8 +344,14 @@ class OllamaGenerationProvider:
             return result
         except GenerationProviderUnavailable:
             raise
-        except (httpx.HTTPError, ValueError, ValidationError, json.JSONDecodeError) as error:
-            if timeout_seconds is not None and isinstance(error, httpx.TimeoutException):
+        except (
+            TimeoutError,
+            httpx.HTTPError,
+            ValueError,
+            ValidationError,
+            json.JSONDecodeError,
+        ) as error:
+            if isinstance(error, (TimeoutError, httpx.TimeoutException)):
                 raise GenerationProviderUnavailable(
                     GenerationReadiness(
                         status="unavailable",
@@ -364,7 +420,7 @@ class OllamaGenerationProvider:
             },
         ]
 
-    def _request_json(
+    async def _request_json(
         self,
         method: str,
         path: str,
@@ -377,13 +433,14 @@ class OllamaGenerationProvider:
             request_timeout = min(request_timeout, max(0.0, deadline - self._monotonic()))
             if request_timeout <= 0:
                 raise httpx.TimeoutException("Investigation wall-time budget exhausted")
-        with httpx.Client(
+        async with httpx.AsyncClient(
             base_url=self._base_url,
             transport=self._transport,
             timeout=request_timeout,
             follow_redirects=False,
         ) as client:
-            response = client.request(method, path, json=json)
+            async with asyncio.timeout(request_timeout):
+                response = await client.request(method, path, json=json)
             response.raise_for_status()
             payload = response.json()
         if not isinstance(payload, dict):
@@ -399,6 +456,12 @@ class OllamaGenerationProvider:
         if deadline is None:
             return None
         return max(0.0, deadline - self._monotonic())
+
+    def _remaining_required(self, deadline: float | None) -> float:
+        remaining = self._remaining(deadline)
+        if remaining is None or remaining <= 0:
+            raise TimeoutError("Investigation wall-time budget exhausted")
+        return remaining
 
     def _cloud_rejected(self) -> GenerationReadiness:
         return GenerationReadiness(

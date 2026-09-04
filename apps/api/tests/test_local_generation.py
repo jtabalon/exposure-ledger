@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from uuid import UUID
@@ -138,6 +139,29 @@ def test_generation_requests_use_the_remaining_investigation_timeout() -> None:
 
     assert readiness.code == "generation_model_not_installed"
     assert request_timeouts == [0.75]
+
+
+@pytest.mark.asyncio
+async def test_generation_readiness_cancels_at_the_absolute_wall_time() -> None:
+    cancelled = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.sleep(1)
+        finally:
+            cancelled.set()
+        return httpx.Response(200, json={"models": []})
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+
+    readiness = await provider.check_readiness_bounded(timeout_seconds=0.01)
+
+    assert readiness.code == "generation_wall_time_budget_exhausted"
+    assert cancelled.is_set()
 
 
 def test_generation_returns_only_validated_structured_output_without_reasoning() -> None:

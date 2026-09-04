@@ -67,6 +67,9 @@ class ControlledGenerationProvider:
             model=self.model,
         )
 
+    async def check_readiness_bounded(self, *, timeout_seconds: float) -> GenerationReadiness:
+        return self.check_readiness(timeout_seconds=timeout_seconds)
+
     def generate(  # type: ignore[no-untyped-def]
         self, exposure, evidence, configuration, *, timeout_seconds: float
     ):
@@ -97,6 +100,16 @@ class ControlledGenerationProvider:
             recommendation_summary="Review and apply the published fixed version.",
             recommendation_reasons=("The captured evidence supports package applicability.",),
             recommendation_limitations=("Static analysis does not prove runtime reachability.",),
+        )
+
+    async def generate_bounded(  # type: ignore[no-untyped-def]
+        self, exposure, evidence, configuration, *, timeout_seconds: float
+    ):
+        return self.generate(
+            exposure,
+            evidence,
+            configuration,
+            timeout_seconds=timeout_seconds,
         )
 
 
@@ -301,6 +314,16 @@ def test_revision_rejects_evidence_outside_the_exposure_scope(database_url: str)
 
     with pytest.raises(ValueError, match="Exposure evidence scope"):
         InvestigationRepository(database_url).append(replace(revision, claims=(invalid_claim,)))
+
+
+def test_revision_rejects_contradictory_status_and_stopping_condition(
+    database_url: str,
+) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+
+    with pytest.raises(ValueError, match="Complete Revision status"):
+        replace(revision, status=InvestigationRevisionStatus.INCOMPLETE)
 
 
 def test_revision_rejects_a_forged_supported_claim(database_url: str) -> None:

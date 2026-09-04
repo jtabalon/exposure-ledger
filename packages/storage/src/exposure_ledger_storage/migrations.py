@@ -862,6 +862,7 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                 'generation_prompt_not_current', 'generation_artifact_changed',
                 'generation_invalid_structured_output', 'structured_output_policy_blocked'
             )),
+            CHECK ((status = 'complete') = (stopping_condition = 'completed')),
             material_claims_supported boolean NOT NULL,
             authoritative_conflict boolean,
             validation_issues text[] NOT NULL,

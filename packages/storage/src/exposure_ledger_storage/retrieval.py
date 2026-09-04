@@ -435,7 +435,7 @@ class EvidenceRetriever:
         self, query: RetrievalQuery, *, deadline_monotonic: float | None = None
     ) -> RetrievalResult:
         self._validate_query(query)
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+        with _connect_with_deadline(self._database_url, deadline_monotonic) as connection:
             _set_statement_deadline(connection, deadline_monotonic)
             if not self._configuration_is_current(
                 connection, query.retrieval_configuration_version
@@ -454,7 +454,7 @@ class EvidenceRetriever:
             raise EmbeddingSpaceNotCurrent(
                 "Hybrid retrieval requires one explicit Embedding Space identity."
             )
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+        with _connect_with_deadline(self._database_url, deadline_monotonic) as connection:
             _set_statement_deadline(connection, deadline_monotonic)
             stored_space = self._stored_space_by_identity(
                 connection, query.embedding_space_identity
@@ -976,4 +976,19 @@ def _set_statement_deadline(
     connection.execute(
         "SELECT set_config('statement_timeout', %s, true)",
         (f"{remaining_ms}ms",),
+    )
+
+
+def _connect_with_deadline(
+    database_url: str, deadline_monotonic: float | None
+) -> psycopg.Connection[dict[str, Any]]:
+    if deadline_monotonic is None:
+        return psycopg.connect(database_url, row_factory=dict_row)
+    remaining_seconds = deadline_monotonic - monotonic()
+    if remaining_seconds < 1:
+        raise TimeoutError("Insufficient wall-time budget for a PostgreSQL connection")
+    return psycopg.connect(
+        database_url,
+        row_factory=dict_row,
+        connect_timeout=max(1, int(remaining_seconds)),
     )

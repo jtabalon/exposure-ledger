@@ -180,7 +180,11 @@ class InvestigationRepository:
             raise ValueError("Investigation command does not identify a selected Exposure")
         if exposure.asset_snapshot_id != command.asset_snapshot_id:
             raise ValueError("Pinned Asset Snapshot does not match the Exposure")
-        with psycopg.connect(self._database_url, row_factory=dict_row) as connection:
+        with psycopg.connect(
+            self._database_url,
+            row_factory=dict_row,
+            connect_timeout=_connect_timeout(deadline_monotonic),
+        ) as connection:
             try:
                 timeout_ms = _timeout_ms(deadline_monotonic - monotonic())
                 connection.execute(
@@ -1064,3 +1068,10 @@ def _timeout_ms(timeout_seconds: float) -> int:
     if timeout_seconds <= 0:
         raise TimeoutError("Investigation wall-time budget exhausted")
     return max(1, int(timeout_seconds * 1000))
+
+
+def _connect_timeout(deadline_monotonic: float) -> int:
+    remaining_seconds = deadline_monotonic - monotonic()
+    if remaining_seconds < 1:
+        raise TimeoutError("Insufficient wall-time budget for a PostgreSQL connection")
+    return max(1, int(remaining_seconds))

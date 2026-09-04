@@ -163,6 +163,9 @@ class ControlledGenerator:
             model=_generation_model(),
         )
 
+    async def check_readiness_bounded(self, *, timeout_seconds: float) -> GenerationReadiness:
+        return self.check_readiness(timeout_seconds=timeout_seconds)
+
     def generate(
         self,
         exposure: InvestigationExposure,
@@ -177,6 +180,21 @@ class ControlledGenerator:
         assert evidence.passages[0].evidence_record_id == EVIDENCE_ID
         assert configuration.generation_model == _generation_model()
         return self._draft
+
+    async def generate_bounded(
+        self,
+        exposure: InvestigationExposure,
+        evidence: RetrievedInvestigationEvidence,
+        configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
+    ) -> StructuredInvestigationDraft:
+        return self.generate(
+            exposure,
+            evidence,
+            configuration,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 class InMemoryRevisionHistory:

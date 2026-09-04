@@ -277,13 +277,15 @@ class BoundedInvestigationRunner:
             return updates
         return updates
 
-    def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
+    async def _synthesize_claims(self, state: _GraphState) -> dict[str, object]:
         updates = self._event(state, InvestigationStage.SYNTHESIZE_CLAIMS)
         if self._stopped(state, updates):
             return updates
         timeout_seconds = self._remaining_seconds(state)
         try:
-            readiness = self._generator.check_readiness(timeout_seconds=timeout_seconds)
+            readiness = await self._generator.check_readiness_bounded(
+                timeout_seconds=timeout_seconds
+            )
         except TimeoutError:
             updates.update(
                 status=InvestigationRevisionStatus.INCOMPLETE,
@@ -314,7 +316,7 @@ class BoundedInvestigationRunner:
         try:
             timeout_seconds = self._remaining_seconds(state)
             updates["generation_model_calls"] = state["generation_model_calls"] + 1
-            updates["draft"] = self._generator.generate(
+            updates["draft"] = await self._generator.generate_bounded(
                 state["exposure"],
                 state["retrieved"],
                 state["command"].configuration,

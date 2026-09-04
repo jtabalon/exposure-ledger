@@ -241,9 +241,11 @@ class InvestigationBudget:
                 self.max_graph_transitions,
             )
             <= 0
-            or self.wall_time_seconds <= 0
+            or self.wall_time_seconds < 1
         ):
-            raise ValueError("Investigation budgets must be positive")
+            raise ValueError(
+                "Investigation count budgets must be positive and wall time must be at least 1s"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,8 +400,13 @@ class InvestigationRevision:
     created_at: datetime
 
     def __post_init__(self) -> None:
+        stopping_condition = InvestigationStoppingCondition(self.stopping_condition)
         object.__setattr__(
             self,
             "stopping_condition",
-            InvestigationStoppingCondition(self.stopping_condition),
+            stopping_condition,
         )
+        if (self.status is InvestigationRevisionStatus.COMPLETE) != (
+            stopping_condition is InvestigationStoppingCondition.COMPLETED
+        ):
+            raise ValueError("Complete Revision status must exactly match completed stopping state")
