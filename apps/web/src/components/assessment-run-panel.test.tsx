@@ -128,4 +128,49 @@ describe("AssessmentRunPanel", () => {
     expect(html).toContain("requirement demo must pin exactly one version with ==")
     expect(html).toContain("Choose supported, fully pinned dependency data")
   })
+
+  it("shows that OSV evidence remains available when a first-party Source is unavailable", () => {
+    const policyDecision = {
+      id: "b6c40321-24f3-4c13-8913-d7788dfbeb7f",
+      assessmentRunId: "53451f9d-c0b6-4838-8155-0194e104f41d",
+      standardVersion: "0.1",
+      assistanceClass: "C1" as const,
+      actionLevel: "A1" as const,
+      targetScope: "https://github.com/example/project@0123456789abcdef",
+      authorizationScope: "local operator",
+      result: "allowed" as const,
+      ruleVersion: "assessment-request-v1",
+      reason: "Read-only public repository assessment is allowed.",
+      createdAt: "2026-09-04T20:00:00Z",
+      enforcementPoint: "request" as const,
+    }
+    const html = renderToStaticMarkup(
+      <AssessmentRunPanel
+        assessmentRuns={[
+          {
+            id: policyDecision.assessmentRunId,
+            mode: "repository",
+            scenario: "complete",
+            label: "example/project@0123456789ab",
+            synthetic: false,
+            status: "failed",
+            createdAt: "2026-09-04T20:00:00Z",
+            startedAt: "2026-09-04T20:00:01Z",
+            completedAt: "2026-09-04T20:00:02Z",
+            errorCode: "first_party_advisory_unavailable",
+            errorMessage: "The GitHub repository advisory source is unavailable.",
+            assetSnapshotId: null,
+            policyDecision,
+          },
+        ]}
+        error={null}
+        policyDecisions={[policyDecision]}
+        policyDecisionsError={null}
+      />,
+    )
+
+    expect(html).toContain("First-party advisory Source unavailable")
+    expect(html).toContain("Existing OSV Evidence Records remain available")
+    expect(html).not.toContain("Asset Snapshot rejected")
+  })
 })

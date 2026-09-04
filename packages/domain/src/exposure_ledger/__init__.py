@@ -1,5 +1,16 @@
 """Framework-independent domain policy for Exposure Ledger."""
 
+from exposure_ledger.advisories import (
+    FirstPartyAdvisoryCollector,
+    FirstPartyAdvisorySource,
+    GitHubAdvisoryResponseRejected,
+    GitHubAdvisorySourceUnavailable,
+    GitHubAdvisoryTarget,
+    GitHubAdvisoryTargetRejected,
+    GitHubRepositoryAdvisoryAdapter,
+    derive_assessment_advisory_targets,
+    derive_first_party_advisory_targets,
+)
 from exposure_ledger.asset_snapshots import (
     ASSET_SNAPSHOT_PARSER_VERSION,
     Architecture,
@@ -34,6 +45,7 @@ from exposure_ledger.evidence import (
     CapturedSourcePayload,
     EvidencePassage,
     EvidenceRecord,
+    EvidenceRelationship,
     Source,
     SourceAdapter,
     load_captured_json,
@@ -88,6 +100,14 @@ __all__ = [
     "ExposureEvidence",
     "ExposureRanking",
     "ExposureSeverity",
+    "EvidenceRelationship",
+    "FirstPartyAdvisoryCollector",
+    "FirstPartyAdvisorySource",
+    "GitHubAdvisoryResponseRejected",
+    "GitHubAdvisorySourceUnavailable",
+    "GitHubAdvisoryTarget",
+    "GitHubAdvisoryTargetRejected",
+    "GitHubRepositoryAdvisoryAdapter",
     "OsvBatchResponse",
     "OsvPackageQuery",
     "OsvResponseRejected",
@@ -109,6 +129,8 @@ __all__ = [
     "RepositoryArchiveUnavailable",
     "Source",
     "SourceAdapter",
+    "derive_assessment_advisory_targets",
+    "derive_first_party_advisory_targets",
     "validate_asset_snapshot_request",
     "load_captured_json",
     "VulnerabilityRecord",

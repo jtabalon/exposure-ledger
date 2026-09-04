@@ -37,6 +37,15 @@ function formatTimestamp(value: string): string {
 }
 
 function assessmentRunFailureGuidance(code: AssessmentRunErrorCode): string {
+  if (code === "first_party_advisory_unavailable") {
+    return "Verify the first-party Source is reachable, then create a new Assessment Run. Existing OSV Evidence Records remain available."
+  }
+  if (code === "invalid_first_party_advisory") {
+    return "The first-party Source response was rejected. Existing OSV Evidence Records remain available."
+  }
+  if (code === "first_party_advisory_policy_blocked") {
+    return "Review the recorded first-party advisory tool-call Policy Decision. Existing OSV Evidence Records remain available."
+  }
   if (code === "osv_unavailable") {
     return "Verify the OSV Source is reachable, then create a new Assessment Run. No evidence was substituted."
   }
@@ -91,6 +100,15 @@ function assessmentRunFailureGuidance(code: AssessmentRunErrorCode): string {
 }
 
 function failureHeading(code: AssessmentRunErrorCode): string {
+  if (code === "first_party_advisory_unavailable") {
+    return "First-party advisory Source unavailable"
+  }
+  if (code === "invalid_first_party_advisory") {
+    return "First-party advisory Source response rejected"
+  }
+  if (code === "first_party_advisory_policy_blocked") {
+    return "First-party advisory lookup blocked by Policy Decision"
+  }
   if (code === "osv_unavailable") return "OSV Source unavailable"
   if (code === "invalid_osv_response") return "OSV Source response rejected"
   if (code === "osv_lookup_policy_blocked") return "OSV lookup blocked by Policy Decision"

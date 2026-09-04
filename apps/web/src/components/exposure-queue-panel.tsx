@@ -1,5 +1,6 @@
-import { ArrowDownUp, PackageSearch, ShieldCheck } from "lucide-react"
+import { ArrowDownUp, PackageSearch, ShieldCheck, TriangleAlert } from "lucide-react"
 
+import { evidenceRelationshipLabels } from "../lib/evidence"
 import type { Exposure } from "../lib/exposures"
 import { Badge } from "./ui/badge"
 
@@ -7,6 +8,17 @@ function severityLabel(value: Exposure["ranking"]["severity"]): string {
   return value === "unknown"
     ? "Unknown OSV severity"
     : `${value.charAt(0).toUpperCase()}${value.slice(1)} OSV severity`
+}
+
+function passageLabel(kind: string): string {
+  return (
+    {
+      affected: "Affected-range passage",
+      affected_guidance: "Maintainer affected and fixed-version guidance",
+      publication: "Advisory publication identity",
+      query_result: "OSV query result",
+    }[kind] ?? "Evidence passage"
+  )
 }
 
 export function ExposureQueuePanel({
@@ -128,10 +140,25 @@ export function ExposureQueuePanel({
                   </div>
                 </div>
                 <div className="mt-4 border-t pt-4">
+                  {exposure.authoritativeConflict ? (
+                    <div
+                      role="status"
+                      className="mb-3 border-l-2 border-red-700 bg-red-700/7 p-3 text-xs leading-5 text-red-950"
+                    >
+                      <div className="flex items-center gap-2 font-semibold">
+                        <TriangleAlert className="size-3.5" aria-hidden="true" />
+                        Material conflict
+                      </div>
+                      <p className="mt-1">
+                        Authoritative Sources disagree on affected or fixed-version guidance. Both
+                        records remain available; no Source was selected as the winner.
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <h4 className="text-xs font-semibold">Evidence trace</h4>
                     <span className="font-mono text-[10px] text-muted-foreground">
-                      {exposure.evidenceRecords.length} immutable OSV record
+                      {exposure.evidenceRecords.length} immutable Evidence Record
                       {exposure.evidenceRecords.length === 1 ? "" : "s"}
                     </span>
                   </div>
@@ -158,9 +185,18 @@ export function ExposureQueuePanel({
                                 {evidence.source.location}
                               </a>
                             </div>
-                            <Badge variant="outline" className="font-mono text-[9px]">
-                              {evidence.payloadIdentity}
-                            </Badge>
+                            <div className="flex flex-wrap justify-end gap-1.5">
+                              <Badge
+                                variant="outline"
+                                aria-label={`Evidence relationship: ${evidenceRelationshipLabels[evidence.relationship]}`}
+                                className="text-[9px] tracking-wide uppercase"
+                              >
+                                {evidenceRelationshipLabels[evidence.relationship]}
+                              </Badge>
+                              <Badge variant="outline" className="font-mono text-[9px]">
+                                {evidence.payloadIdentity}
+                              </Badge>
+                            </div>
                           </div>
                           <dl className="mt-3 grid gap-2 text-[10px] sm:grid-cols-2">
                             <div>
@@ -187,10 +223,7 @@ export function ExposureQueuePanel({
                             {evidence.passages.map((passage) => (
                               <div key={passage.id}>
                                 <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-                                  {passage.kind === "affected"
-                                    ? "Affected-range passage"
-                                    : "OSV query result"}{" "}
-                                  · {passage.selector}
+                                  {passageLabel(passage.kind)} · {passage.selector}
                                 </div>
                                 <pre className="overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
                                   {passage.content}
@@ -200,7 +233,7 @@ export function ExposureQueuePanel({
                           </div>
                           <details className="mt-3">
                             <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground">
-                              Full captured OSV payload
+                              Full captured Source payload
                             </summary>
                             <pre className="mt-2 overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
                               {evidence.content}

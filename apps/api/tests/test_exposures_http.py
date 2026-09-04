@@ -12,6 +12,10 @@ import pytest
 from exposure_ledger import (
     AssessmentResult,
     CapturedSourcePayload,
+    EvidenceRecord,
+    GitHubAdvisorySourceUnavailable,
+    GitHubAdvisoryTarget,
+    GitHubRepositoryAdvisoryAdapter,
     OsvBatchResponse,
     OsvPackageQuery,
     OsvSourceUnavailable,
@@ -137,6 +141,104 @@ class CapturedOsvSource:
 class UnavailableOsvSource:
     def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
         raise OsvSourceUnavailable("The public OSV API is unavailable.")
+
+
+class AdvisoryLinkedOsvSource:
+    def query_batch(self, queries: tuple[OsvPackageQuery, ...]) -> OsvBatchResponse:
+        payload = {
+            "results": [
+                {
+                    "vulns": [
+                        {
+                            "id": "PYSEC-2026-40",
+                            "aliases": ["CVE-2026-4000", "GHSA-4444-5555-6666"],
+                            "database_specific": {"severity": "HIGH"},
+                            "affected": [
+                                {
+                                    "package": {
+                                        "ecosystem": "PyPI",
+                                        "name": "feature-lib",
+                                    },
+                                    "ranges": [
+                                        {
+                                            "type": "ECOSYSTEM",
+                                            "events": [
+                                                {"introduced": "5.0"},
+                                                {"fixed": "5.2"},
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                            "references": [
+                                {
+                                    "type": "ADVISORY",
+                                    "url": (
+                                        "https://github.com/acme/feature-lib/security/advisories/"
+                                        "GHSA-4444-5555-6666"
+                                    ),
+                                }
+                            ],
+                        }
+                    ]
+                },
+                {},
+                {},
+                {},
+            ]
+        }
+        vulnerability = payload["results"][0]["vulns"][0]  # type: ignore[index]
+        assert isinstance(vulnerability, dict)
+        return OsvBatchResponse.capture(
+            payload,
+            expected_results=len(queries),
+            captured_payloads={
+                "PYSEC-2026-40": CapturedSourcePayload(
+                    content=json.dumps(vulnerability, separators=(",", ":"), sort_keys=True),
+                    captured_at=datetime(2026, 9, 4, 10, 0, tzinfo=UTC),
+                )
+            },
+        )
+
+
+class ConflictingAdvisorySource:
+    def retrieve(self, targets: tuple[GitHubAdvisoryTarget, ...]) -> tuple[EvidenceRecord, ...]:
+        assert len(targets) == 1
+        target = targets[0]
+        payload = {
+            "ghsa_id": target.advisory_id,
+            "cve_id": "CVE-2026-4000",
+            "url": target.api_url,
+            "html_url": target.publication_url,
+            "summary": "Maintainer guidance for feature-lib.",
+            "description": "Upgrade feature-lib.",
+            "published_at": "2026-09-02T12:00:00Z",
+            "updated_at": "2026-09-04T09:00:00Z",
+            "withdrawn_at": None,
+            "vulnerabilities": [
+                {
+                    "package": {"ecosystem": "pip", "name": "feature-lib"},
+                    "vulnerable_version_range": ">= 5.0, < 5.1",
+                    "patched_versions": "5.1",
+                }
+            ],
+        }
+        return (
+            GitHubRepositoryAdvisoryAdapter(target).capture(
+                payload,
+                capture=CapturedSourcePayload(
+                    content=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    captured_at=datetime(2026, 9, 4, 10, 1, tzinfo=UTC),
+                ),
+            ),
+        )
+
+
+class UnavailableAdvisorySource:
+    def retrieve(self, targets: tuple[GitHubAdvisoryTarget, ...]) -> tuple[EvidenceRecord, ...]:
+        raise GitHubAdvisorySourceUnavailable(
+            "The GitHub repository advisory source is unavailable."
+        )
 
 
 def repository_payload() -> dict[str, object]:
@@ -300,3 +402,72 @@ def test_osv_unavailability_is_visible_without_fabricated_evidence(database_url:
     assert exposures == []
     with psycopg.connect(database_url) as connection:
         assert connection.execute("SELECT count(*) FROM evidence_records").fetchone() == (0,)
+
+
+def test_first_party_advisory_conflict_is_preserved_through_the_http_contract(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=AdvisoryLinkedOsvSource(),
+        advisory_source=ConflictingAdvisorySource(),
+    )
+
+    with TestClient(app) as client:
+        exposure = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"][0]
+        decisions = [
+            item
+            for item in client.get("/api/v1/policy-decisions").json()["items"]
+            if item["assessmentRunId"] == run["id"]
+        ]
+
+    assert exposure["authoritativeConflict"] is True
+    evidence_by_source = {item["source"]["identity"]: item for item in exposure["evidenceRecords"]}
+    assert evidence_by_source["osv"]["relationship"] == "supports"
+    advisory = evidence_by_source["github_repository_security_advisory"]
+    assert advisory["relationship"] == "contradicts"
+    assert advisory["source"]["authority"] == "Repository maintainer"
+    assert advisory["payloadIdentity"] == "GHSA-4444-5555-6666"
+    assert [item["kind"] for item in advisory["passages"]] == [
+        "publication",
+        "affected_guidance",
+    ]
+    assert '"patched_versions":"5.1"' in advisory["passages"][1]["content"]
+    assert {item["targetScope"] for item in decisions} == {
+        f"https://github.com/example/exposure-fixture@{COMMIT}",
+        "https://api.osv.dev/v1",
+        ("https://api.github.com/repos/acme/feature-lib/security-advisories/GHSA-4444-5555-6666"),
+    }
+
+
+def test_unavailable_first_party_source_keeps_osv_evidence_visible(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=AdvisoryLinkedOsvSource(),
+        advisory_source=UnavailableAdvisorySource(),
+    )
+
+    with TestClient(app) as client:
+        failed = client.get(f"/api/v1/assessment-runs/{run['id']}").json()
+        exposures = client.get(f"/api/v1/assessment-runs/{run['id']}/exposures").json()["items"]
+
+    assert failed["status"] == "failed"
+    assert failed["errorCode"] == "first_party_advisory_unavailable"
+    assert exposures[0]["evidenceRecords"][0]["source"]["identity"] == "osv"
+    assert all(
+        item["source"]["identity"] != "github_repository_security_advisory"
+        for exposure in exposures
+        for item in exposure["evidenceRecords"]
+    )

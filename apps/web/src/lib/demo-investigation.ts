@@ -1,5 +1,7 @@
+import type { EvidenceRelationship } from "./evidence"
+
 export type ClaimKind = "fact" | "inference"
-export type EvidenceRelationship = "supports" | "contradicts" | "contextual"
+export type { EvidenceRelationship } from "./evidence"
 
 export type InvestigationClaim = {
   id: string
@@ -46,6 +48,14 @@ export type DemoInvestigation = {
     installedVersion: string
     affectedRange: string
     fixedVersion: string
+    authoritativeConflict: boolean
+    advisoryGuidance: {
+      source: string
+      authority: string
+      affectedRange: string
+      fixedVersion: string
+      relationship: EvidenceRelationship
+    }[]
     dependencyType: string
     dependencyPath: string[]
     kev: boolean
@@ -84,6 +94,23 @@ export const demoInvestigation: DemoInvestigation = {
     installedVersion: "2.4.1",
     affectedRange: ">=2.1.0, <2.4.3",
     fixedVersion: "2.4.3",
+    authoritativeConflict: true,
+    advisoryGuidance: [
+      {
+        source: "Synthetic maintainer advisory",
+        authority: "Maintainer · Tier 1",
+        affectedRange: ">=2.1.0, <2.4.3",
+        fixedVersion: "2.4.3",
+        relationship: "supports",
+      },
+      {
+        source: "Synthetic public vulnerability record",
+        authority: "Public database · Tier 1",
+        affectedRange: ">=2.1.0, <2.4.2",
+        fixedVersion: "2.4.2",
+        relationship: "contradicts",
+      },
+    ],
     dependencyType: "Transitive",
     dependencyPath: ["harbor-api", "auth-gateway", "cipherleaf"],
     kev: true,
@@ -91,13 +118,13 @@ export const demoInvestigation: DemoInvestigation = {
     cvss: "8.1 · High",
   },
   recommendation: {
-    label: "Urgent Remediation",
+    label: "More Evidence Required",
     summary:
-      "Upgrade cipherleaf to 2.4.3 or later, then rerun the Assessment against the new lockfile.",
+      "Confirm the affected range and first patched release before choosing remediation.",
     reasons: [
       "The resolved version falls inside the affected range.",
-      "A fixed version is available without changing the direct dependency.",
-      "Synthetic exploitation evidence elevates review priority.",
+      "Authoritative Sources disagree on the first patched release.",
+      "No Source was selected as the winner; the conflict remains open.",
     ],
   },
   policy: {
@@ -167,6 +194,20 @@ export const demoInvestigation: DemoInvestigation = {
       digest: "sha256:21df…0c91",
     },
     {
+      id: "ev-osv",
+      source: "Synthetic public vulnerability record",
+      authority: "Public database · Tier 1",
+      capturedAt: "2026-08-28 16:41 UTC",
+      relationship: "contradicts",
+      claimIds: ["claim-version", "claim-fix"],
+      passage:
+        "The public record lists releases before 2.4.2 as affected and names 2.4.2 as fixed.",
+      fullTextRank: 3,
+      vectorRank: 2,
+      fusedRank: 3,
+      digest: "sha256:44ea…a1c2",
+    },
+    {
       id: "ev-cisa",
       source: "Synthetic KEV record",
       authority: "Government · Tier 1",
@@ -177,7 +218,7 @@ export const demoInvestigation: DemoInvestigation = {
         "This synthetic record exists only to demonstrate how known-exploitation evidence changes investigation priority.",
       fullTextRank: 1,
       vectorRank: 3,
-      fusedRank: 3,
+      fusedRank: 4,
       digest: "sha256:8aa1…9f13",
     },
     {
@@ -190,7 +231,7 @@ export const demoInvestigation: DemoInvestigation = {
       passage: "from cipherleaf.tokens import verify_session",
       fullTextRank: 1,
       vectorRank: 2,
-      fusedRank: 4,
+      fusedRank: 5,
       digest: "sha256:d10c…4b27",
     },
   ],

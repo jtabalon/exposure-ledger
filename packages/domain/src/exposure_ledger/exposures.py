@@ -20,6 +20,7 @@ from exposure_ledger.evidence import (
     CapturedSourcePayload,
     EvidencePassage,
     EvidenceRecord,
+    EvidenceRelationship,
     Source,
     SourceAdapter,
     load_captured_json,
@@ -64,6 +65,7 @@ class OsvAffectedPackage:
 class ExposureEvidence:
     record_identity: str
     passage_identities: tuple[str, ...]
+    relationship: EvidenceRelationship = EvidenceRelationship.SUPPORTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +287,7 @@ class Exposure:
     rank: int
     selected_for_investigation: bool
     evidence: tuple[ExposureEvidence, ...]
+    authoritative_conflict: bool = False
 
 
 @dataclass(frozen=True, slots=True)

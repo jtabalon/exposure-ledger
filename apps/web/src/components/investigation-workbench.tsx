@@ -36,7 +36,7 @@ import { ExposureQueuePanel } from "@/components/exposure-queue-panel"
 import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
 import type { AssetSnapshot } from "@/lib/asset-snapshots"
 import type { Exposure } from "@/lib/exposures"
-import { evidenceForClaim } from "@/lib/evidence"
+import { evidenceForClaim, evidenceRelationshipLabels } from "@/lib/evidence"
 import type {
   DemoInvestigation,
   EvidenceRelationship,
@@ -292,14 +292,20 @@ export function InvestigationWorkbench({
                   label="Affected range"
                   value={
                     <span className="font-mono text-xs">
-                      {investigation.exposure.affectedRange}
+                      {investigation.exposure.authoritativeConflict
+                        ? "Conflicting guidance — compare Sources"
+                        : investigation.exposure.affectedRange}
                     </span>
                   }
                 />
                 <FactRow
                   label="First fix"
                   value={
-                    <span className="font-mono">{investigation.exposure.fixedVersion}</span>
+                    <span className="font-mono">
+                      {investigation.exposure.authoritativeConflict
+                        ? "Unresolved"
+                        : investigation.exposure.fixedVersion}
+                    </span>
                   }
                 />
                 <FactRow label="Dependency" value={investigation.exposure.dependencyType} />
@@ -311,6 +317,33 @@ export function InvestigationWorkbench({
                 <FactRow label="CVSS" value={investigation.exposure.cvss} />
               </dl>
             </div>
+
+            {investigation.exposure.authoritativeConflict ? (
+              <div
+                role="status"
+                className="mt-4 border-l-2 border-red-700 bg-red-700/7 p-3 text-xs leading-5 text-red-950"
+              >
+                <div className="flex items-center gap-2 font-semibold">
+                  <TriangleAlert className="size-3.5" aria-hidden="true" />
+                  Material conflict
+                </div>
+                <p className="mt-1">
+                  Authoritative Sources disagree. No Source was selected as the winner.
+                </p>
+                <dl className="mt-3 space-y-2">
+                  {investigation.exposure.advisoryGuidance.map((guidance) => (
+                    <div key={`${guidance.source}-${guidance.fixedVersion}`} className="border-t pt-2">
+                      <dt className="font-semibold">{guidance.source}</dt>
+                      <dd className="text-red-950/75">{guidance.authority}</dd>
+                      <dd className="font-mono">
+                        {guidance.affectedRange} · first fix {guidance.fixedVersion} ·{" "}
+                        {evidenceRelationshipLabels[guidance.relationship]}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            ) : null}
 
             <div className="mt-6">
               <SectionLabel>
@@ -506,12 +539,13 @@ export function InvestigationWorkbench({
                         </div>
                         <Badge
                           variant="outline"
+                          aria-label={`Evidence relationship: ${evidenceRelationshipLabels[record.relationship]}`}
                           className={cn(
                             "shrink-0 text-[9px] tracking-[0.08em] uppercase",
                             relationshipStyles[record.relationship],
                           )}
                         >
-                          {record.relationship}
+                          {evidenceRelationshipLabels[record.relationship]}
                         </Badge>
                       </div>
 

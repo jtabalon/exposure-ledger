@@ -564,6 +564,17 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         FOR EACH ROW EXECUTE FUNCTION reject_evidence_mutation();
         """,
     ),
+    (
+        10,
+        """
+        ALTER TABLE assessment_run_exposures
+            ADD COLUMN authoritative_conflict boolean NOT NULL DEFAULT false;
+
+        ALTER TABLE assessment_run_exposure_evidence
+            ADD COLUMN relationship text NOT NULL DEFAULT 'supports'
+                CHECK (relationship IN ('supports', 'contradicts', 'contextual'));
+        """,
+    ),
 )
 
 
