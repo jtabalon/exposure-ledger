@@ -9,6 +9,41 @@ function severityLabel(value: Exposure["ranking"]["severity"]): string {
     : `${value.charAt(0).toUpperCase()}${value.slice(1)} OSV severity`
 }
 
+function stateLabel(
+  source: "KEV" | "EPSS",
+  state: Exposure["kev"]["state"],
+): string {
+  switch (state) {
+    case "available":
+      return "Current observation"
+    case "stale":
+      return "Stale observation"
+    case "missing":
+      return `${source} evidence missing`
+    case "malformed":
+      return `${source} response malformed`
+    case "unavailable":
+      return `${source} Source unavailable`
+    case "not_collected":
+      return `${source} not collected`
+  }
+}
+
+function ordinal(value: number): string {
+  const remainder = value % 100
+  if (remainder >= 11 && remainder <= 13) return `${value}th`
+  switch (value % 10) {
+    case 1:
+      return `${value}st`
+    case 2:
+      return `${value}nd`
+    case 3:
+      return `${value}rd`
+    default:
+      return `${value}th`
+  }
+}
+
 export function ExposureQueuePanel({
   exposures,
   error,
@@ -125,13 +160,76 @@ export function ExposureQueuePanel({
                             .join("; ")
                         : "Dependency paths unknown for this manifest"}
                     </div>
+                    <div
+                      className="mt-4 grid gap-2 sm:grid-cols-2"
+                      aria-label="Exploit evidence signals"
+                    >
+                      <div className="rounded border bg-muted/20 p-3">
+                        <div className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                          Known exploitation · CISA KEV
+                        </div>
+                        <div className="mt-1 text-sm font-semibold">
+                          {exposure.kev.listed === null
+                            ? stateLabel("KEV", exposure.kev.state)
+                            : exposure.kev.listed
+                              ? "Listed"
+                              : "Not listed"}
+                        </div>
+                        {exposure.kev.state === "stale" ? (
+                          <Badge variant="outline" className="mt-2 text-[9px] text-amber-800">
+                            Stale observation
+                          </Badge>
+                        ) : null}
+                        {exposure.kev.observedAt ? (
+                          <time
+                            dateTime={exposure.kev.observedAt}
+                            className="mt-2 block font-mono text-[10px] text-muted-foreground"
+                          >
+                            Observed {exposure.kev.observedAt}
+                          </time>
+                        ) : null}
+                        {exposure.kev.detail ? (
+                          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+                            {exposure.kev.detail}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="rounded border bg-muted/20 p-3">
+                        <div className="text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                          Exploit probability · FIRST EPSS
+                        </div>
+                        <div className="mt-1 text-sm font-semibold">
+                          {exposure.epss.score === null || exposure.epss.percentile === null
+                            ? stateLabel("EPSS", exposure.epss.state)
+                            : `${(exposure.epss.score * 100).toFixed(1)}% probability · ${ordinal(Math.round(exposure.epss.percentile * 100))} percentile`}
+                        </div>
+                        {exposure.epss.state === "stale" ? (
+                          <Badge variant="outline" className="mt-2 text-[9px] text-amber-800">
+                            Stale observation
+                          </Badge>
+                        ) : null}
+                        {exposure.epss.observedAt ? (
+                          <time
+                            dateTime={exposure.epss.observedAt}
+                            className="mt-2 block font-mono text-[10px] text-muted-foreground"
+                          >
+                            Observed {exposure.epss.observedAt}
+                          </time>
+                        ) : null}
+                        {exposure.epss.detail ? (
+                          <p className="mt-2 text-[10px] leading-4 text-muted-foreground">
+                            {exposure.epss.detail}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <div className="mt-4 border-t pt-4">
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <h4 className="text-xs font-semibold">Evidence trace</h4>
                     <span className="font-mono text-[10px] text-muted-foreground">
-                      {exposure.evidenceRecords.length} immutable OSV record
+                      {exposure.evidenceRecords.length} immutable Source record
                       {exposure.evidenceRecords.length === 1 ? "" : "s"}
                     </span>
                   </div>
@@ -189,7 +287,11 @@ export function ExposureQueuePanel({
                                 <div className="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
                                   {passage.kind === "affected"
                                     ? "Affected-range passage"
-                                    : "OSV query result"}{" "}
+                                    : passage.kind === "query_result"
+                                      ? "OSV query result"
+                                      : passage.kind === "known_exploited_vulnerability"
+                                        ? "KEV catalog entry"
+                                        : "EPSS score"}{" "}
                                   · {passage.selector}
                                 </div>
                                 <pre className="overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
@@ -200,7 +302,7 @@ export function ExposureQueuePanel({
                           </div>
                           <details className="mt-3">
                             <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground">
-                              Full captured OSV payload
+                              Full captured Source payload
                             </summary>
                             <pre className="mt-2 overflow-x-auto rounded border bg-card p-2 font-mono text-[10px] leading-4 whitespace-pre-wrap">
                               {evidence.content}

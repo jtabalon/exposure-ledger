@@ -9,7 +9,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
-from exposure_ledger import AssessmentResult, ExposureRanking, ExposureSeverity, VulnerabilityRecord
+from exposure_ledger import (
+    AssessmentResult,
+    EpssSignal,
+    ExposureRanking,
+    ExposureSeverity,
+    KevSignal,
+    SourceObservationState,
+    VulnerabilityRecord,
+)
 from exposure_ledger import EvidenceRecord as DomainEvidenceRecord
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -63,6 +71,8 @@ class ExposureRecord:
     ranking: ExposureRanking
     rank: int
     selected_for_investigation: bool
+    kev: KevSignal
+    epss: EpssSignal
     evidence_records: tuple[EvidenceRecordRecord, ...]
 
 
@@ -158,8 +168,13 @@ class ExposureRepository:
                     INSERT INTO assessment_run_exposures (
                         assessment_run_id, exposure_id, rank, selected_for_investigation,
                         severity, direct_dependency, dependency_depth,
-                        fixed_version_available, ranking_score
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        fixed_version_available, ranking_score,
+                        kev_state, kev_listed, kev_observed_at, kev_detail,
+                        epss_state, epss_score, epss_percentile, epss_observed_at, epss_detail
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
                     ON CONFLICT (assessment_run_id, exposure_id) DO NOTHING
                     """,
                     (
@@ -172,6 +187,15 @@ class ExposureRepository:
                         exposure.ranking.dependency_depth,
                         exposure.ranking.fixed_version_available,
                         exposure.ranking.score,
+                        exposure.kev.state,
+                        exposure.kev.listed,
+                        exposure.kev.observed_at,
+                        exposure.kev.detail,
+                        exposure.epss.state,
+                        exposure.epss.score,
+                        exposure.epss.percentile,
+                        exposure.epss.observed_at,
+                        exposure.epss.detail,
                     ),
                 )
                 for evidence_reference in exposure.evidence:
@@ -248,7 +272,16 @@ class ExposureRepository:
                        assessment_run_exposures.direct_dependency,
                        assessment_run_exposures.dependency_depth,
                        assessment_run_exposures.fixed_version_available,
-                       assessment_run_exposures.ranking_score
+                       assessment_run_exposures.ranking_score,
+                       assessment_run_exposures.kev_state,
+                       assessment_run_exposures.kev_listed,
+                       assessment_run_exposures.kev_observed_at,
+                       assessment_run_exposures.kev_detail,
+                       assessment_run_exposures.epss_state,
+                       assessment_run_exposures.epss_score,
+                       assessment_run_exposures.epss_percentile,
+                       assessment_run_exposures.epss_observed_at,
+                       assessment_run_exposures.epss_detail
                 FROM assessment_run_exposures
                 JOIN exposures ON exposures.id = assessment_run_exposures.exposure_id
                 JOIN package_instances
@@ -515,6 +548,19 @@ class ExposureRepository:
             ),
             rank=int(row["rank"]),
             selected_for_investigation=bool(row["selected_for_investigation"]),
+            kev=KevSignal(
+                state=SourceObservationState(str(row["kev_state"])),
+                listed=(bool(row["kev_listed"]) if row["kev_listed"] is not None else None),
+                observed_at=row["kev_observed_at"],
+                detail=(str(row["kev_detail"]) if row["kev_detail"] is not None else None),
+            ),
+            epss=EpssSignal(
+                state=SourceObservationState(str(row["epss_state"])),
+                score=row["epss_score"],
+                percentile=row["epss_percentile"],
+                observed_at=row["epss_observed_at"],
+                detail=(str(row["epss_detail"]) if row["epss_detail"] is not None else None),
+            ),
             evidence_records=evidence_records,
         )
 

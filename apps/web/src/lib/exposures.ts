@@ -39,6 +39,29 @@ export type ExposureRanking = {
   score: number
 }
 
+export type SourceObservationState =
+  | "available"
+  | "stale"
+  | "missing"
+  | "malformed"
+  | "unavailable"
+  | "not_collected"
+
+export type KevSignal = {
+  state: SourceObservationState
+  listed: boolean | null
+  observedAt: string | null
+  detail: string | null
+}
+
+export type EpssSignal = {
+  state: SourceObservationState
+  score: number | null
+  percentile: number | null
+  observedAt: string | null
+  detail: string | null
+}
+
 export type Exposure = {
   id: string
   assessmentRunId: string
@@ -48,6 +71,8 @@ export type Exposure = {
   ranking: ExposureRanking
   rank: number
   selectedForInvestigation: boolean
+  kev: KevSignal
+  epss: EpssSignal
   evidenceRecords: EvidenceRecord[]
 }
 
