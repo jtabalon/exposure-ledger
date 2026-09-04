@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -10,16 +11,11 @@ from exposure_ledger_worker.osv import OsvApiSource
 
 def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
     requests: list[httpx.Request] = []
-    full_record = {
-        "id": "PYSEC-2026-50",
-        "aliases": ["CVE-2026-5000"],
-        "affected": [
-            {
-                "package": {"ecosystem": "PyPI", "name": "demo-pkg"},
-                "versions": ["1.0"],
-            }
-        ],
-    }
+    full_record_content = (
+        '{\n  "id": "PYSEC-2026-50",\n  "aliases": ["CVE-2026-5000"],\n'
+        '  "affected": [{"package": {"ecosystem": "PyPI", "name": "demo-pkg"},'
+        ' "versions": ["1.0"]}]\n}'
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -37,9 +33,16 @@ def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
                 json={"results": [{"vulns": [{"id": "PYSEC-2026-50"}]}]},
             )
         assert request.url.path == "/v1/vulns/PYSEC-2026-50"
-        return httpx.Response(200, json=full_record)
+        return httpx.Response(
+            200,
+            content=full_record_content.encode(),
+            headers={"content-type": "application/json"},
+        )
 
-    source = OsvApiSource(transport=httpx.MockTransport(handler))
+    source = OsvApiSource(
+        transport=httpx.MockTransport(handler),
+        capture_clock=lambda: datetime(2026, 9, 3, 12, 30, tzinfo=UTC),
+    )
 
     response = source.query_batch((OsvPackageQuery(name="demo-pkg", version="1.0"),))
 
@@ -50,6 +53,29 @@ def test_osv_source_batch_queries_versions_and_hydrates_full_records() -> None:
     assert vulnerability.aliases == ("CVE-2026-5000",)
     assert vulnerability.affected[0].name == "demo-pkg"
     assert vulnerability.affected[0].versions == ("1.0",)
+    assert len(response.evidence_records) == 2
+    evidence = next(
+        record for record in response.evidence_records if record.payload_identity == "PYSEC-2026-50"
+    )
+    query_evidence = next(
+        record
+        for record in response.evidence_records
+        if record.source.location.endswith("/querybatch")
+    )
+    assert evidence.payload_identity == "PYSEC-2026-50"
+    assert evidence.captured_at == datetime(2026, 9, 3, 12, 30, tzinfo=UTC)
+    assert evidence.content_digest.startswith("sha256:")
+    assert evidence.content == full_record_content
+    assert evidence.passages[0].selector == "/affected/0"
+    assert evidence.passages[0].content == (
+        '{"package": {"ecosystem": "PyPI", "name": "demo-pkg"}, "versions": ["1.0"]}'
+    )
+    assert query_evidence.passages[0].selector == "/results/0"
+    assert query_evidence.passages[0].content == '{"vulns":[{"id":"PYSEC-2026-50"}]}'
+    assert vulnerability.query_evidence[0].record_identity == query_evidence.identity
+    assert vulnerability.query_evidence[0].passage_identities == (
+        query_evidence.passages[0].identity,
+    )
     assert [request.method for request in requests] == ["POST", "GET"]
     assert all(request.url.host == "api.osv.dev" for request in requests)
 
@@ -66,6 +92,44 @@ def test_osv_source_rejects_non_public_dns_resolution(
 
     with pytest.raises(OsvSourceUnavailable, match="non-public"):
         OsvApiSource().query_batch((OsvPackageQuery(name="demo-pkg", version="1.0"),))
+
+
+def test_osv_source_records_each_provider_response_capture_time() -> None:
+    captured_times = iter(
+        (
+            datetime(2026, 9, 3, 12, 30, tzinfo=UTC),
+            datetime(2026, 9, 3, 12, 31, tzinfo=UTC),
+            datetime(2026, 9, 3, 12, 32, tzinfo=UTC),
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/querybatch":
+            return httpx.Response(
+                200,
+                json={"results": [{"vulns": [{"id": "PYSEC-2026-50"}, {"id": "PYSEC-2026-51"}]}]},
+            )
+        identifier = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"id": identifier, "aliases": [], "affected": []})
+
+    response = OsvApiSource(
+        transport=httpx.MockTransport(handler),
+        capture_clock=lambda: next(captured_times),
+    ).query_batch((OsvPackageQuery(name="demo-pkg", version="1.0"),))
+
+    captured_by_payload = {
+        record.payload_identity: record.captured_at for record in response.evidence_records
+    }
+    query_payload_identity = next(
+        record.payload_identity
+        for record in response.evidence_records
+        if record.source.location.endswith("/querybatch")
+    )
+    assert captured_by_payload == {
+        query_payload_identity: datetime(2026, 9, 3, 12, 30, tzinfo=UTC),
+        "PYSEC-2026-50": datetime(2026, 9, 3, 12, 31, tzinfo=UTC),
+        "PYSEC-2026-51": datetime(2026, 9, 3, 12, 32, tzinfo=UTC),
+    }
 
 
 def test_osv_source_rejects_redirects() -> None:

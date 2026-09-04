@@ -34,6 +34,33 @@ describe("ExposureQueuePanel", () => {
               fixedVersionAvailable: true,
               score: 69,
             },
+            evidenceRecords: [
+              {
+                id: "54138e43-cb27-4d61-abdb-10e2c54bde64",
+                identity: "sha256:evidence-feature-lib",
+                source: {
+                  identity: "osv",
+                  authority: "Open Source Vulnerabilities",
+                  location: "https://api.osv.dev/v1/vulns/PYSEC-2026-40",
+                },
+                capturedAt: "2026-09-03T12:30:00Z",
+                contentDigest: "sha256:provider-payload",
+                attribution: "Open Source Vulnerabilities (OSV)",
+                aliases: ["CVE-2026-4000", "PYSEC-2026-40"],
+                payloadIdentity: "PYSEC-2026-40",
+                content: '{"id":"PYSEC-2026-40"}',
+                passages: [
+                  {
+                    id: "91126ae4-09df-4212-a5f0-e78bb02edee5",
+                    identity: "sha256:affected-feature-lib",
+                    kind: "affected",
+                    selector: "/affected/0",
+                    content:
+                      '{"package":{"ecosystem":"PyPI","name":"feature_lib"},"ranges":[{"events":[{"introduced":"5.0"},{"fixed":"5.2"}],"type":"ECOSYSTEM"}]}',
+                  },
+                ],
+              },
+            ],
           },
           {
             id: "3f607e81-1939-4491-a198-477ac131d9de",
@@ -56,6 +83,7 @@ describe("ExposureQueuePanel", () => {
               fixedVersionAvailable: false,
               score: 59,
             },
+            evidenceRecords: [],
           },
           {
             id: "5ee45be7-5a29-4f23-abce-179295b164b5",
@@ -81,6 +109,7 @@ describe("ExposureQueuePanel", () => {
               fixedVersionAvailable: false,
               score: 0,
             },
+            evidenceRecords: [],
           },
         ]}
       />,
@@ -101,5 +130,11 @@ describe("ExposureQueuePanel", () => {
     expect(html).toContain("Dependency provenance unknown")
     expect(html).toContain("Dependency depth unknown")
     expect(html).toContain("Dependency paths unknown for this manifest")
+    expect(html).toContain("Evidence trace")
+    expect(html).toContain("PYSEC-2026-40")
+    expect(html).toContain("sha256:provider-payload")
+    expect(html).toContain("Open Source Vulnerabilities (OSV)")
+    expect(html).toContain("Affected-range passage")
+    expect(html).toContain("introduced")
   })
 })

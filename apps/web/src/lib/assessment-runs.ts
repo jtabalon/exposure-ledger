@@ -39,6 +39,9 @@ export type AssetSnapshotRejectionCode =
 export type AssessmentRunErrorCode =
   | AssetSnapshotRejectionCode
   | "policy_gate_unavailable"
+  | "invalid_osv_response"
+  | "osv_lookup_policy_blocked"
+  | "osv_unavailable"
   | "repository_fetch_policy_blocked"
   | "synthetic_worker_failure"
   | "worker_execution_failed"

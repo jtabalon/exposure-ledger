@@ -36,7 +36,16 @@ function formatTimestamp(value: string): string {
   return `${utcTimestamp.format(new Date(value))} UTC`
 }
 
-function assetSnapshotFailureGuidance(code: AssessmentRunErrorCode): string {
+function assessmentRunFailureGuidance(code: AssessmentRunErrorCode): string {
+  if (code === "osv_unavailable") {
+    return "Verify the OSV Source is reachable, then create a new Assessment Run. No evidence was substituted."
+  }
+  if (code === "invalid_osv_response") {
+    return "The OSV Source response was rejected. Retry later; do not treat this run as evidence-bearing."
+  }
+  if (code === "osv_lookup_policy_blocked") {
+    return "Review the recorded OSV tool-call Policy Decision before creating a new Assessment Run."
+  }
   if (
     code === "archive_too_large" ||
     code === "archive_too_many_files" ||
@@ -79,6 +88,13 @@ function assetSnapshotFailureGuidance(code: AssessmentRunErrorCode): string {
     return "Verify public GitHub is reachable, then create a new Assessment Run."
   }
   return "Review the rejection details, correct the request, and create a new Assessment Run."
+}
+
+function failureHeading(code: AssessmentRunErrorCode): string {
+  if (code === "osv_unavailable") return "OSV Source unavailable"
+  if (code === "invalid_osv_response") return "OSV Source response rejected"
+  if (code === "osv_lookup_policy_blocked") return "OSV lookup blocked by Policy Decision"
+  return "Asset Snapshot rejected"
 }
 
 function DetailRow({ label, value }: { label: string; value: ReactNode }) {
@@ -235,10 +251,10 @@ export function AssessmentRunPanel({
                   role="alert"
                   className="mt-3 border-l-2 border-red-600 bg-red-600/7 p-3 text-xs leading-5 text-red-900"
                 >
-                  <div className="font-semibold">Asset Snapshot rejected</div>
+                  <div className="font-semibold">{failureHeading(selected.errorCode)}</div>
                   <div className="mt-1 font-mono text-[10px]">{selected.errorCode}</div>
                   {selected.errorMessage ? <p className="mt-1">{selected.errorMessage}</p> : null}
-                  <p className="mt-2">{assetSnapshotFailureGuidance(selected.errorCode)}</p>
+                  <p className="mt-2">{assessmentRunFailureGuidance(selected.errorCode)}</p>
                 </div>
               ) : selected.errorMessage ? (
                 <p className="mt-3 text-xs text-red-800">{selected.errorMessage}</p>

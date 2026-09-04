@@ -13,12 +13,14 @@ export default async function Home() {
     loadAssetSnapshots(),
     loadPolicyDecisions(),
   ])
-  const latestRepositoryRun = assessmentRuns.items.find(
-    (run) => run.mode === "repository" && run.status === "completed",
-  )
+  const latestRepositoryRun = assessmentRuns.items.find((run) => run.mode === "repository")
   const exposures = latestRepositoryRun
     ? await loadAssessmentExposures(latestRepositoryRun.id)
     : { items: [], error: null }
+  const osvFailure =
+    latestRepositoryRun?.errorCode === "osv_unavailable"
+      ? `${latestRepositoryRun.errorMessage ?? "The OSV Source is unavailable."} No Source content is substituted or inferred.`
+      : null
 
   return (
     <InvestigationWorkbench
@@ -28,7 +30,7 @@ export default async function Home() {
       assetSnapshots={assetSnapshots.items}
       assetSnapshotsError={assetSnapshots.error}
       exposures={exposures.items}
-      exposuresError={exposures.error}
+      exposuresError={exposures.error ?? osvFailure}
       policyDecisions={policyDecisions.items}
       policyDecisionsError={policyDecisions.error}
     />

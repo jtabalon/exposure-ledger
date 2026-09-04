@@ -6,6 +6,31 @@ export type VulnerabilityRecord = {
   aliases: string[]
 }
 
+export type EvidencePassage = {
+  id: string
+  identity: string
+  kind: string
+  selector: string
+  content: string
+}
+
+export type EvidenceRecord = {
+  id: string
+  identity: string
+  source: {
+    identity: string
+    authority: string
+    location: string
+  }
+  capturedAt: string
+  contentDigest: string
+  attribution: string
+  aliases: string[]
+  payloadIdentity: string
+  content: string
+  passages: EvidencePassage[]
+}
+
 export type ExposureRanking = {
   severity: "critical" | "high" | "moderate" | "low" | "unknown"
   directDependency: boolean | null
@@ -23,6 +48,7 @@ export type Exposure = {
   ranking: ExposureRanking
   rank: number
   selectedForInvestigation: boolean
+  evidenceRecords: EvidenceRecord[]
 }
 
 export type ExposureCollection = {
