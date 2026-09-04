@@ -185,7 +185,12 @@ export function AssessmentRunPanel({
                 {selected.policyDecision.reason}
               </p>
               {selected.errorMessage ? (
-                <p className="mt-3 text-xs text-red-800">{selected.errorMessage}</p>
+                <p className="mt-3 text-xs text-red-800">
+                  {selected.errorCode ? (
+                    <code className="mr-2 font-mono font-semibold">{selected.errorCode}</code>
+                  ) : null}
+                  {selected.errorMessage}
+                </p>
               ) : null}
             </>
           ) : (

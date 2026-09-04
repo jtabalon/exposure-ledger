@@ -106,7 +106,7 @@ export function AssetSnapshotPanel({
                   <div>
                     <div className="mb-1 flex items-center gap-2 text-[10px] tracking-[0.1em] text-muted-foreground uppercase">
                       <LockKeyhole className="size-3" aria-hidden="true" />
-                      Selected lockfile
+                      Selected dependency data
                     </div>
                     <div className="font-mono text-xs">{selected.lockfilePath}</div>
                     <div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">
@@ -133,6 +133,12 @@ export function AssetSnapshotPanel({
                   <Boxes className="size-3" aria-hidden="true" />
                   {selected.packages.length} normalized packages · {selected.parserVersion}
                 </div>
+                {selected.parserVersion === "requirements-v1" ? (
+                  <p className="mt-2 border-l-2 border-amber-600 bg-amber-600/7 p-2 text-xs text-amber-900">
+                    Flat requirements do not encode Dependency Paths; package relationships remain
+                    unknown.
+                  </p>
+                ) : null}
                 <ul className="mt-2 divide-y" aria-label="Normalized dependencies">
                   {selected.packages.map((packageInstance) => {
                     const source = sourceLabel(packageInstance.source)
@@ -144,14 +150,22 @@ export function AssetSnapshotPanel({
                       <span className="font-mono font-semibold">
                         {packageInstance.name} {packageInstance.version}
                       </span>
-                      <span>{packageInstance.direct ? "Direct" : "Transitive"}</span>
+                      <span>
+                        {packageInstance.direct === null
+                          ? "Relationship unknown"
+                          : packageInstance.direct
+                            ? "Direct"
+                            : "Transitive"}
+                      </span>
                       <span className="truncate font-mono text-[10px] text-muted-foreground">
                         {source}
                       </span>
                       <span className="font-mono text-[10px] text-muted-foreground">
-                        {packageInstance.dependencyPaths
-                          .map((path) => path.join(" → "))
-                          .join("; ")}
+                        {packageInstance.dependencyPaths === null
+                          ? "Dependency Path unknown"
+                          : packageInstance.dependencyPaths
+                              .map((path) => path.join(" → "))
+                              .join("; ")}
                       </span>
                     </li>
                     )

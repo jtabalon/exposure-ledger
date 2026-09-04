@@ -58,4 +58,43 @@ describe("AssetSnapshotPanel", () => {
     expect(html).toContain("demo-app → http-x → leaf-lib")
     expect(html).toContain("Transitive")
   })
+
+  it("makes flat requirements relationship limitations explicit", () => {
+    const html = renderToStaticMarkup(
+      <AssetSnapshotPanel
+        error={null}
+        snapshots={[
+          {
+            id: "d9583057-9338-49b9-bd28-a10a69e27084",
+            repository: "https://github.com/example/requirements-fixture",
+            commit: "0123456789abcdef0123456789abcdef01234567",
+            projectRoot: ".",
+            lockfilePath: "requirements.txt",
+            lockfileDigest: "sha256:fixture",
+            environmentProfile: {
+              pythonVersion: "3.12.2",
+              operatingSystem: "linux",
+              architecture: "x86_64",
+              selectedExtras: [],
+            },
+            packages: [
+              {
+                name: "http-x",
+                version: "2.3.0",
+                direct: null,
+                source: { manifest: "requirements.txt" },
+                dependencyPaths: null,
+              },
+            ],
+            parserVersion: "requirements-v1",
+            capturedAt: "2026-09-03T20:00:00Z",
+          },
+        ]}
+      />,
+    )
+
+    expect(html).toContain("Flat requirements do not encode Dependency Paths")
+    expect(html).toContain("Relationship unknown")
+    expect(html).toContain("Dependency Path unknown")
+  })
 })

@@ -75,6 +75,233 @@ def capture_lock(lockfile: str) -> tuple[tuple[str, str, tuple[tuple[str, ...], 
     )
 
 
+def test_supported_poetry_repository_preserves_dependency_paths_and_environment_markers() -> None:
+    content = archive_bytes(
+        {
+            "project-root/services/api/pyproject.toml": """
+[tool.poetry]
+name = "demo-app"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+http-x = "^2.3"
+platform-only = { version = "^4", markers = "sys_platform == 'linux'" }
+windows-only = { version = "^9", markers = "sys_platform == 'win32'" }
+feature-lib = { version = "^5", optional = true }
+
+[tool.poetry.extras]
+security = ["feature-lib"]
+""",
+            "project-root/services/api/poetry.lock": """
+[[package]]
+name = "feature-lib"
+version = "5.1.0"
+python-versions = ">=3.10"
+
+[[package]]
+name = "http-x"
+version = "2.3.0"
+python-versions = ">=3.9"
+
+[package.dependencies]
+leaf-lib = ">=1,<2"
+
+[[package]]
+name = "leaf-lib"
+version = "1.0.0"
+python-versions = ">=3.9"
+
+[[package]]
+name = "platform-only"
+version = "4.0.0"
+python-versions = ">=3.8"
+
+[[package]]
+name = "windows-only"
+version = "9.0.0"
+python-versions = ">=3.8"
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.11,<3.13"
+content-hash = "fixture"
+""",
+        }
+    )
+    request = CaptureAssetSnapshot(
+        repository="https://github.com/example/project",
+        commit="0123456789abcdef0123456789abcdef01234567",
+        project_root="services/api",
+        lockfile_path="services/api/poetry.lock",
+        environment_profile=EnvironmentProfile(
+            python_version="3.12.2",
+            operating_system=OperatingSystem.LINUX,
+            architecture=Architecture.X86_64,
+            selected_extras=("security",),
+        ),
+    )
+
+    snapshot = AssetSnapshotCapture(BytesArchiveSource(content)).capture(request)
+
+    assert snapshot.parser_version == "poetry-lock-v1"
+    assert snapshot.project_file_path == "services/api/pyproject.toml"
+    assert snapshot.project_file_content is not None
+    assert 'name = "demo-app"' in snapshot.project_file_content
+    assert [
+        (package.name, package.version, package.direct, package.dependency_paths)
+        for package in snapshot.packages
+    ] == [
+        ("feature-lib", "5.1.0", True, (("demo-app", "feature-lib"),)),
+        ("http-x", "2.3.0", True, (("demo-app", "http-x"),)),
+        ("leaf-lib", "1.0.0", False, (("demo-app", "http-x", "leaf-lib"),)),
+        ("platform-only", "4.0.0", True, (("demo-app", "platform-only"),)),
+    ]
+
+
+def test_fully_pinned_requirements_preserve_unknown_dependency_relationships() -> None:
+    content = archive_bytes(
+        {
+            "project-root/requirements.txt": """
+# Generated flat dependency data. Package provenance is not encoded.
+http-x==2.3.0 \\
+    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+leaf-lib==1.0.0
+platform-only==4.0.0 ; sys_platform == "linux"
+windows-only==9.0.0 ; sys_platform == "win32"
+"""
+        }
+    )
+
+    snapshot = AssetSnapshotCapture(BytesArchiveSource(content)).capture(
+        capture_request(lockfile_path="requirements.txt")
+    )
+
+    assert snapshot.parser_version == "requirements-v1"
+    assert [
+        (
+            package.name,
+            package.version,
+            package.direct,
+            package.source.as_dict(),
+            package.dependency_paths,
+        )
+        for package in snapshot.packages
+    ] == [
+        ("http-x", "2.3.0", None, {"manifest": "requirements.txt"}, None),
+        ("leaf-lib", "1.0.0", None, {"manifest": "requirements.txt"}, None),
+        ("platform-only", "4.0.0", None, {"manifest": "requirements.txt"}, None),
+    ]
+
+
+def test_poetry_pep_621_project_and_optional_dependencies_select_one_environment() -> None:
+    content = archive_bytes(
+        {
+            "project-root/pyproject.toml": """
+[project]
+name = "modern-app"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "base-lib>=1,<2",
+    "linux-lib>=2,<3 ; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+security = ["security-lib>=3,<4"]
+""",
+            "project-root/poetry.lock": """
+[[package]]
+name = "base-lib"
+version = "1.5.0"
+python-versions = ">=3.12"
+groups = ["main"]
+
+[[package]]
+name = "linux-lib"
+version = "2.2.0"
+python-versions = ">=3.12"
+groups = ["main"]
+markers = "sys_platform == 'linux'"
+
+[[package]]
+name = "security-lib"
+version = "3.4.0"
+python-versions = ">=3.12"
+groups = ["main"]
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.12,<3.13"
+content-hash = "fixture"
+""",
+        }
+    )
+    request = CaptureAssetSnapshot(
+        repository="https://github.com/example/project",
+        commit="0123456789abcdef0123456789abcdef01234567",
+        project_root=".",
+        lockfile_path="poetry.lock",
+        environment_profile=EnvironmentProfile(
+            python_version="3.12.2",
+            operating_system=OperatingSystem.LINUX,
+            architecture=Architecture.ARM64,
+            selected_extras=("security",),
+        ),
+    )
+
+    snapshot = AssetSnapshotCapture(BytesArchiveSource(content)).capture(request)
+
+    assert [(package.name, package.dependency_paths) for package in snapshot.packages] == [
+        ("base-lib", (("modern-app", "base-lib"),)),
+        ("linux-lib", (("modern-app", "linux-lib"),)),
+        ("security-lib", (("modern-app", "security-lib"),)),
+    ]
+
+
+def test_poetry_selects_one_locked_package_variant_for_the_environment_profile() -> None:
+    content = archive_bytes(
+        {
+            "project-root/pyproject.toml": """
+[tool.poetry]
+name = "variant-app"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+variant-lib = [
+    { version = "^1", python = "<3.12" },
+    { version = "^2", python = ">=3.12" },
+]
+""",
+            "project-root/poetry.lock": """
+[[package]]
+name = "variant-lib"
+version = "1.5.0"
+python-versions = "<3.12"
+
+[[package]]
+name = "variant-lib"
+version = "2.5.0"
+python-versions = ">=3.12"
+
+[metadata]
+lock-version = "2.1"
+python-versions = ">=3.11,<3.13"
+content-hash = "fixture"
+""",
+        }
+    )
+
+    snapshot = AssetSnapshotCapture(BytesArchiveSource(content)).capture(
+        capture_request(lockfile_path="poetry.lock")
+    )
+
+    assert [(package.name, package.version) for package in snapshot.packages] == [
+        ("variant-lib", "2.5.0")
+    ]
+
+
 def test_supported_uv_repository_produces_a_normalized_asset_snapshot_without_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
