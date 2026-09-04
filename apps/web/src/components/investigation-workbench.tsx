@@ -31,7 +31,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { AssessmentRunPanel } from "@/components/assessment-run-panel"
-import type { AssessmentRun } from "@/lib/assessment-runs"
+import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
 import { evidenceForClaim } from "@/lib/evidence"
 import type {
   DemoInvestigation,
@@ -74,10 +74,14 @@ export function InvestigationWorkbench({
   investigation,
   assessmentRuns,
   assessmentRunsError,
+  policyDecisions,
+  policyDecisionsError,
 }: {
   investigation: DemoInvestigation
   assessmentRuns: AssessmentRun[]
   assessmentRunsError: string | null
+  policyDecisions: PolicyDecision[]
+  policyDecisionsError: string | null
 }) {
   const [selectedClaimId, setSelectedClaimId] = useState(investigation.claims[0].id)
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null)
@@ -181,7 +185,12 @@ export function InvestigationWorkbench({
           </div>
         </div>
 
-        <AssessmentRunPanel assessmentRuns={assessmentRuns} error={assessmentRunsError} />
+      <AssessmentRunPanel
+        assessmentRuns={assessmentRuns}
+        error={assessmentRunsError}
+        policyDecisions={policyDecisions}
+        policyDecisionsError={policyDecisionsError}
+      />
 
         <div className="hairline-grid border-b bg-card/55 px-4 py-6 sm:px-6 lg:px-8 lg:py-7">
           <div className="mx-auto max-w-[1600px]">

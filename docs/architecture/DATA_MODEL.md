@@ -6,6 +6,7 @@ erDiagram
     ASSET_SNAPSHOT ||--o{ PACKAGE_INSTANCE : contains
     PACKAGE_INSTANCE ||--o{ DEPENDENCY_PATH : explains
     ASSET_SNAPSHOT ||--o{ ASSESSMENT_RUN : examined_by
+    ASSESSMENT_RUN |o--|| POLICY_DECISION : authorized_by
     ASSESSMENT_RUN ||--o{ EXPOSURE : discovers
     VULNERABILITY_RECORD ||--o{ EXPOSURE : identifies
     PACKAGE_INSTANCE ||--o{ EXPOSURE : affects
@@ -29,6 +30,10 @@ erDiagram
 - An Investigation belongs to one Exposure. Reassessment of unchanged code appends an Investigation Revision.
 - A new commit or Environment Profile creates a new Asset Snapshot and new Investigations.
 - Evidence Records, Investigation Revisions, Policy Decisions, and Dispositions are append-only.
+- Every allowed Assessment Run has a request-gate Policy Decision. Restricted and blocked request
+  decisions are retained without an Assessment Run, so denial is auditable without creating work.
+- Assessment Runs created before the request gate are linked to an explicit blocked legacy decision;
+  unfinished legacy work is failed closed during migration and cannot be claimed by a worker.
 - A human Disposition never carries forward automatically to a new Asset Snapshot.
 
 ## Evidence relationships

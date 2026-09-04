@@ -4,10 +4,20 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
+from exposure_ledger import (
+    ActionLevel,
+    AssessmentOperation,
+    AssessmentRequest,
+    AssistanceClass,
+    AuthorizationStatus,
+    CyberPolicy,
+    PolicyResult,
+)
 from exposure_ledger_storage import (
     AssessmentEvent,
     AssessmentMode,
@@ -15,10 +25,11 @@ from exposure_ledger_storage import (
     AssessmentRunRepository,
     AssessmentScenario,
     AssessmentStatus,
+    PolicyDecisionRecord,
 )
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from exposure_ledger_api.settings import Settings
 
@@ -41,9 +52,36 @@ class HealthResponse(BaseModel):
     inference_mode: Literal["local"]
 
 
+class AssessmentPolicyContext(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_chain: list[str] = Field(default_factory=list)
+
+
 class CreateAssessmentRunRequest(ApiModel):
+    model_config = ConfigDict(extra="forbid")
+
     mode: Literal["synthetic"]
     scenario: AssessmentScenario = AssessmentScenario.COMPLETE
+    policy_context: AssessmentPolicyContext = Field(default_factory=AssessmentPolicyContext)
+
+
+class PolicyDecisionResponse(ApiModel):
+    id: UUID
+    assessment_run_id: UUID | None
+    standard_version: str
+    assistance_class: AssistanceClass
+    action_level: ActionLevel
+    target_scope: str | None
+    authorization_scope: str | None
+    result: PolicyResult
+    rule_version: str
+    reason: str
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, record: PolicyDecisionRecord) -> "PolicyDecisionResponse":
+        return cls.model_validate(record, from_attributes=True)
 
 
 class AssessmentRunResponse(ApiModel):
@@ -58,14 +96,28 @@ class AssessmentRunResponse(ApiModel):
     completed_at: datetime | None
     error_code: str | None
     error_message: str | None
+    policy_decision: PolicyDecisionResponse
 
     @classmethod
-    def from_record(cls, record: AssessmentRun) -> "AssessmentRunResponse":
-        return cls.model_validate(record, from_attributes=True)
+    def from_record(
+        cls,
+        record: AssessmentRun,
+        policy_decision: PolicyDecisionRecord,
+    ) -> "AssessmentRunResponse":
+        return cls.model_validate(
+            {
+                **asdict(record),
+                "policy_decision": PolicyDecisionResponse.from_record(policy_decision),
+            }
+        )
 
 
 class AssessmentRunListResponse(ApiModel):
     items: list[AssessmentRunResponse]
+
+
+class PolicyDecisionListResponse(ApiModel):
+    items: list[PolicyDecisionResponse]
 
 
 def _not_found(assessment_run_id: UUID) -> HTTPException:
@@ -76,6 +128,16 @@ def _not_found(assessment_run_id: UUID) -> HTTPException:
             "message": f"Assessment Run {assessment_run_id} was not found.",
         },
     )
+
+
+def _assessment_response(
+    repository: AssessmentRunRepository,
+    assessment_run: AssessmentRun,
+) -> AssessmentRunResponse:
+    policy_decision = repository.get_policy_decision(assessment_run.id)
+    if policy_decision is None:
+        raise RuntimeError(f"Assessment Run {assessment_run.id} has no request Policy Decision.")
+    return AssessmentRunResponse.from_record(assessment_run, policy_decision)
 
 
 def _encode_sse(event: AssessmentEvent) -> str:
@@ -126,9 +188,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tags=["assessment-runs"],
     )
     def create_assessment_run(request: CreateAssessmentRunRequest) -> AssessmentRunResponse:
-        return AssessmentRunResponse.from_record(
-            repository.create_synthetic(scenario=request.scenario)
+        context = request.policy_context
+        decision = CyberPolicy.decide(
+            AssessmentRequest(
+                operation=AssessmentOperation.SYNTHETIC_EXPOSURE_ASSESSMENT,
+                target_scope="bundled synthetic fixture",
+                authorization_scope="local operator",
+                authorization_status=AuthorizationStatus.CONFIRMED,
+                operation_chain=tuple(context.operation_chain),
+            )
         )
+        if decision.result is not PolicyResult.ALLOWED:
+            policy_record = repository.record_policy_decision(decision)
+            response = PolicyDecisionResponse.from_record(policy_record)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": f"assessment_policy_{decision.result}",
+                    "message": decision.reason,
+                    "policyDecision": response.model_dump(mode="json", by_alias=True),
+                },
+            )
+        assessment_run = repository.create_synthetic(
+            scenario=request.scenario,
+            policy_decision=decision,
+        )
+        return _assessment_response(repository, assessment_run)
 
     @application.get(
         "/api/v1/assessment-runs",
@@ -138,7 +223,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     def list_assessment_runs() -> AssessmentRunListResponse:
         return AssessmentRunListResponse(
-            items=[AssessmentRunResponse.from_record(item) for item in repository.list_runs()]
+            items=[_assessment_response(repository, item) for item in repository.list_runs()]
+        )
+
+    @application.get(
+        "/api/v1/policy-decisions",
+        response_model=PolicyDecisionListResponse,
+        response_model_by_alias=True,
+        tags=["policy-decisions"],
+    )
+    def list_policy_decisions() -> PolicyDecisionListResponse:
+        return PolicyDecisionListResponse(
+            items=[
+                PolicyDecisionResponse.from_record(item)
+                for item in repository.list_policy_decisions()
+            ]
         )
 
     @application.get(
@@ -151,7 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         assessment_run = repository.get(assessment_run_id)
         if assessment_run is None:
             raise _not_found(assessment_run_id)
-        return AssessmentRunResponse.from_record(assessment_run)
+        return _assessment_response(repository, assessment_run)
 
     @application.get(
         "/api/v1/assessment-runs/{assessment_run_id}/events",

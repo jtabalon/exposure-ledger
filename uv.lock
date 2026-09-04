@@ -337,12 +337,14 @@ name = "exposure-ledger-storage"
 version = "0.1.0"
 source = { editable = "packages/storage" }
 dependencies = [
+    { name = "exposure-ledger-domain" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "exposure-ledger-domain", editable = "packages/domain" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic-settings", specifier = ">=2.8" },
 ]

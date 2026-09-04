@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
+from exposure_ledger import ActionLevel, AssistanceClass, PolicyDecision, PolicyResult
 from psycopg.rows import class_row, tuple_row
 from psycopg.types.json import Jsonb
 
@@ -14,6 +15,12 @@ _ASSESSMENT_RUN_SELECT = """
     SELECT id, mode, scenario, label, synthetic, status, created_at, started_at,
            completed_at, error_code, error_message, claimed_at, claim_id
     FROM assessment_runs
+"""
+
+_POLICY_DECISION_SELECT = """
+    SELECT id, assessment_run_id, standard_version, assistance_class, action_level,
+           target_scope, authorization_scope, result, rule_version, reason, created_at
+    FROM policy_decisions
 """
 
 
@@ -68,8 +75,23 @@ class AssessmentEvent:
     occurred_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyDecisionRecord:
+    id: UUID
+    assessment_run_id: UUID | None
+    standard_version: str
+    assistance_class: AssistanceClass
+    action_level: ActionLevel
+    target_scope: str | None
+    authorization_scope: str | None
+    result: PolicyResult
+    rule_version: str
+    reason: str
+    created_at: datetime
+
+
 class AssessmentRunRepository:
-    """Persist Assessment Runs and their event streams in PostgreSQL."""
+    """Persist Assessment request decisions, Runs, and event streams in PostgreSQL."""
 
     def __init__(self, database_url: str) -> None:
         self._database_url = database_url
@@ -77,7 +99,10 @@ class AssessmentRunRepository:
     def check_ready(self) -> None:
         try:
             with psycopg.connect(self._database_url) as connection:
-                connection.execute("SELECT 1 FROM assessment_runs LIMIT 1")
+                connection.execute(
+                    "SELECT EXISTS (SELECT 1 FROM assessment_runs), "
+                    "EXISTS (SELECT 1 FROM policy_decisions)"
+                )
         except psycopg.Error as error:
             raise RuntimeError(
                 "PostgreSQL is unavailable or not migrated. "
@@ -87,8 +112,11 @@ class AssessmentRunRepository:
     def create_synthetic(
         self,
         *,
+        policy_decision: PolicyDecision,
         scenario: AssessmentScenario = AssessmentScenario.COMPLETE,
     ) -> AssessmentRun:
+        if policy_decision.result is not PolicyResult.ALLOWED:
+            raise ValueError("Only an allowed Policy Decision can create an Assessment Run.")
         assessment_run = AssessmentRun(
             id=uuid4(),
             mode=AssessmentMode.SYNTHETIC,
@@ -132,7 +160,58 @@ class AssessmentRunRepository:
                 },
                 occurred_at=assessment_run.created_at,
             )
+            self._insert_policy_decision(
+                connection,
+                policy_decision,
+                assessment_run_id=assessment_run.id,
+                created_at=assessment_run.created_at,
+            )
         return assessment_run
+
+    def record_policy_decision(self, decision: PolicyDecision) -> PolicyDecisionRecord:
+        created_at = datetime.now(UTC)
+        with psycopg.connect(self._database_url) as connection, connection.transaction():
+            decision_id = self._insert_policy_decision(
+                connection,
+                decision,
+                assessment_run_id=None,
+                created_at=created_at,
+            )
+        return PolicyDecisionRecord(
+            id=decision_id,
+            assessment_run_id=None,
+            standard_version=decision.standard_version,
+            assistance_class=decision.assistance_class,
+            action_level=decision.action_level,
+            target_scope=decision.target_scope,
+            authorization_scope=decision.authorization_scope,
+            result=decision.result,
+            rule_version=decision.rule_version,
+            reason=decision.reason,
+            created_at=created_at,
+        )
+
+    def get_policy_decision(self, assessment_run_id: UUID) -> PolicyDecisionRecord | None:
+        with psycopg.connect(
+            self._database_url,
+            row_factory=class_row(PolicyDecisionRecord),
+        ) as connection:
+            return connection.execute(
+                f"{_POLICY_DECISION_SELECT} WHERE assessment_run_id = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (assessment_run_id,),
+            ).fetchone()
+
+    def list_policy_decisions(self) -> list[PolicyDecisionRecord]:
+        with psycopg.connect(
+            self._database_url,
+            row_factory=class_row(PolicyDecisionRecord),
+        ) as connection:
+            return list(
+                connection.execute(
+                    f"{_POLICY_DECISION_SELECT} ORDER BY created_at DESC, id DESC"
+                ).fetchall()
+            )
 
     def get(self, assessment_run_id: UUID) -> AssessmentRun | None:
         with psycopg.connect(
@@ -185,11 +264,19 @@ class AssessmentRunRepository:
             assessment_run = connection.execute(
                 f"""
                 {_ASSESSMENT_RUN_SELECT}
-                WHERE status = 'queued'
-                   OR (
-                       status = 'running'
-                       AND COALESCE(claimed_at, started_at) <= %s
-                   )
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM policy_decisions
+                    WHERE policy_decisions.assessment_run_id = assessment_runs.id
+                      AND policy_decisions.result = 'allowed'
+                )
+                  AND (
+                      status = 'queued'
+                      OR (
+                          status = 'running'
+                          AND COALESCE(claimed_at, started_at) <= %s
+                      )
+                  )
                 ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, created_at, id
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -331,6 +418,38 @@ class AssessmentRunRepository:
                 occurred_at=now,
             )
         return True
+
+    @staticmethod
+    def _insert_policy_decision(
+        connection: psycopg.Connection[Any],
+        decision: PolicyDecision,
+        *,
+        assessment_run_id: UUID | None,
+        created_at: datetime,
+    ) -> UUID:
+        decision_id = uuid4()
+        connection.execute(
+            """
+            INSERT INTO policy_decisions (
+                id, assessment_run_id, standard_version, assistance_class, action_level,
+                target_scope, authorization_scope, result, rule_version, reason, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                decision_id,
+                assessment_run_id,
+                decision.standard_version,
+                decision.assistance_class,
+                decision.action_level,
+                decision.target_scope,
+                decision.authorization_scope,
+                decision.result,
+                decision.rule_version,
+                decision.reason,
+                created_at,
+            ),
+        )
+        return decision_id
 
     @staticmethod
     def _owns_claim(

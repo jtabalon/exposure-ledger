@@ -71,9 +71,22 @@ curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
 
 curl -N http://localhost:8000/api/v1/assessment-runs/<assessment-run-id>/events
 curl -sS http://localhost:8000/api/v1/assessment-runs/<assessment-run-id>
+curl -sS http://localhost:8000/api/v1/policy-decisions
 ```
 
 SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench lists the same live runs and always labels this path `SYNTHETIC`.
+
+Every Assessment request is classified by application-owned rules before a run is queued. The
+response and workbench show its versioned Policy Decision, including the Assistance Class, Action
+Level, target and authorization scope, result, rule version, and reason. Restricted, blocked, or
+unrecognized operations return HTTP 403, remain visible in the Policy Decision ledger, and never
+create a worker task. For example, this safely records a restricted request:
+
+```bash
+curl -sS -X POST http://localhost:8000/api/v1/assessment-runs \
+  -H 'content-type: application/json' \
+  -d '{"mode":"synthetic","policyContext":{"operationChain":["draft_dependency_patch"]}}'
+```
 
 For the visible failure contract, synthetic runs may set `"scenario":"worker_failure"`. This produces a persisted `failed` state and `assessment.failed` event without invoking a real provider.
 

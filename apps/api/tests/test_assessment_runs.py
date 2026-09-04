@@ -1,5 +1,6 @@
 import os
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import psycopg
@@ -59,6 +60,19 @@ def test_synthetic_assessment_survives_restart_and_replays_progress(
         assert created["status"] == "queued"
         assert created["synthetic"] is True
         assert created["label"] == "Synthetic Assessment Run"
+        assert created["policyDecision"] == {
+            "id": created["policyDecision"]["id"],
+            "assessmentRunId": created["id"],
+            "standardVersion": "0.1",
+            "assistanceClass": "C1",
+            "actionLevel": "A1",
+            "targetScope": "bundled synthetic fixture",
+            "authorizationScope": "local operator",
+            "result": "allowed",
+            "ruleVersion": "assessment-request-v1",
+            "reason": "C1 assistance at A1 is permitted for the confirmed target scope.",
+            "createdAt": created["policyDecision"]["createdAt"],
+        }
 
     assert process_next_assessment(database_url=database_url) is True
 
@@ -173,3 +187,123 @@ def test_synthetic_assessment_survives_restart_and_replays_progress(
         assert resumed_events_response.status_code == 200
         assert "event: assessment.resumed" in resumed_events_response.text
         assert "event: assessment.completed" in resumed_events_response.text
+
+
+@pytest.mark.parametrize(
+    ("policy_context", "expected_result", "expected_reason"),
+    [
+        (
+            {"operationChain": ["draft_dependency_patch"]},
+            "restricted",
+            "A2 actions are restricted pending the approved human-review milestone.",
+        ),
+        (
+            {"operationChain": ["generate_exploit"]},
+            "blocked",
+            "C2 assistance is outside the first-release capability ceiling.",
+        ),
+        (
+            {"operationChain": ["unrecognized_operation"]},
+            "blocked",
+            (
+                "Assistance Class or Action Level is materially uncertain; the Assessment "
+                "request is conservatively classified C3/A4 and blocked."
+            ),
+        ),
+        (
+            {
+                "operationChain": ["scan_arbitrary_hosts"],
+            },
+            "blocked",
+            (
+                "C2 assistance and A4 action in the operation chain are outside the "
+                "first-release capability ceiling."
+            ),
+        ),
+    ],
+)
+def test_non_allowed_policy_decisions_are_visible_without_creating_worker_tasks(
+    database_url: str,
+    policy_context: dict[str, object],
+    expected_result: str,
+    expected_reason: str,
+) -> None:
+    settings = Settings(database_url=database_url)
+    payload = {
+        **policy_context,
+    }
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/assessment-runs",
+            json={"mode": "synthetic", "policyContext": payload},
+        )
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail["code"] == f"assessment_policy_{expected_result}"
+        assert detail["message"] == expected_reason
+        assert detail["policyDecision"]["result"] == expected_result
+        assert detail["policyDecision"]["assessmentRunId"] is None
+        if "unrecognized_operation" in payload.get("operationChain", []):
+            assert detail["policyDecision"]["assistanceClass"] == "C3"
+            assert detail["policyDecision"]["actionLevel"] == "A4"
+
+        runs_response = client.get("/api/v1/assessment-runs")
+        assert runs_response.status_code == 200
+        assert runs_response.json()["items"] == []
+
+        decisions_response = client.get("/api/v1/policy-decisions")
+        assert decisions_response.status_code == 200
+        assert decisions_response.json()["items"] == [detail["policyDecision"]]
+
+    assert process_next_assessment(database_url=database_url) is False
+
+
+def test_client_cannot_assert_its_own_authorization(database_url: str) -> None:
+    settings = Settings(database_url=database_url)
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/assessment-runs",
+            json={
+                "mode": "synthetic",
+                "policyContext": {"authorizationStatus": "confirmed"},
+            },
+        )
+
+        assert response.status_code == 422
+        assert client.get("/api/v1/assessment-runs").json()["items"] == []
+
+    assert process_next_assessment(database_url=database_url) is False
+
+
+def test_migration_fails_legacy_ungated_work_closed(database_url: str) -> None:
+    legacy_id = uuid4()
+    with psycopg.connect(database_url) as connection, connection.transaction():
+        connection.execute("DROP TABLE policy_decisions")
+        connection.execute("DROP FUNCTION reject_policy_decision_mutation")
+        connection.execute("DELETE FROM exposure_ledger_schema_migrations WHERE version = 4")
+        connection.execute(
+            """
+            INSERT INTO assessment_runs (
+                id, mode, scenario, label, synthetic, status, created_at
+            ) VALUES (%s, 'synthetic', 'complete', 'Synthetic Assessment Run', true,
+                      'queued', %s)
+            """,
+            (legacy_id, datetime.now(UTC)),
+        )
+
+    apply_migrations(database_url)
+
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        response = client.get(f"/api/v1/assessment-runs/{legacy_id}")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "failed"
+        assert response.json()["errorCode"] == "policy_gate_unavailable"
+        assert response.json()["policyDecision"]["result"] == "blocked"
+        assert response.json()["policyDecision"]["assistanceClass"] == "C3"
+        assert response.json()["policyDecision"]["actionLevel"] == "A4"
+
+    assert process_next_assessment(database_url=database_url) is False

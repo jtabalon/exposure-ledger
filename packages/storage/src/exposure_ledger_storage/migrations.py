@@ -54,6 +54,80 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
         WHERE status = 'running';
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE policy_decisions (
+            id uuid PRIMARY KEY,
+            assessment_run_id uuid UNIQUE REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            standard_version text NOT NULL,
+            assistance_class text NOT NULL CHECK (assistance_class IN ('C0', 'C1', 'C2', 'C3')),
+            action_level text NOT NULL CHECK (action_level IN ('A0', 'A1', 'A2', 'A3', 'A4')),
+            target_scope text,
+            authorization_scope text,
+            result text NOT NULL CHECK (result IN ('allowed', 'restricted', 'blocked')),
+            rule_version text NOT NULL,
+            reason text NOT NULL,
+            created_at timestamptz NOT NULL
+        );
+
+        CREATE INDEX policy_decisions_created_at_idx
+            ON policy_decisions (created_at DESC, id DESC);
+
+        INSERT INTO policy_decisions (
+            id, assessment_run_id, standard_version, assistance_class, action_level,
+            target_scope, authorization_scope, result, rule_version, reason, created_at
+        )
+        SELECT gen_random_uuid(), id, '0.1', 'C3', 'A4', NULL,
+               NULL, 'blocked', 'assessment-request-v1',
+               'Legacy Assessment Run predates request-gate classification; it is ' ||
+               'conservatively classified C3/A4 and blocked.',
+               now()
+        FROM assessment_runs;
+
+        INSERT INTO assessment_events (
+            assessment_run_id, sequence, event_type, payload, occurred_at
+        )
+        SELECT assessment_runs.id,
+               COALESCE(MAX(assessment_events.sequence), 0) + 1,
+               'assessment.failed',
+               jsonb_build_object(
+                   'status', 'failed',
+                   'code', 'policy_gate_unavailable',
+                   'message',
+                   'Legacy Assessment Run predates request-gate classification and cannot run.'
+               ),
+               now()
+        FROM assessment_runs
+        LEFT JOIN assessment_events
+          ON assessment_events.assessment_run_id = assessment_runs.id
+        WHERE assessment_runs.status IN ('queued', 'running')
+        GROUP BY assessment_runs.id;
+
+        UPDATE assessment_runs
+        SET status = 'failed',
+            completed_at = now(),
+            error_code = 'policy_gate_unavailable',
+            error_message =
+                'Legacy Assessment Run predates request-gate classification and cannot run.',
+            claimed_at = NULL,
+            claim_id = NULL
+        WHERE status IN ('queued', 'running');
+
+        CREATE FUNCTION reject_policy_decision_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'Policy Decisions are append-only';
+        END;
+        $$;
+
+        CREATE TRIGGER policy_decisions_are_append_only
+        BEFORE UPDATE OR DELETE ON policy_decisions
+        FOR EACH ROW EXECUTE FUNCTION reject_policy_decision_mutation();
+        """,
+    ),
 )
 
 
