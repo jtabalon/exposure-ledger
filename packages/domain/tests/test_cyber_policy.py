@@ -73,7 +73,10 @@ def test_decision_table_applies_the_first_release_capability_ceiling(
                 authorization_scope="local operator",
                 authorization_status=AuthorizationStatus.CONFIRMED,
             ),
-            "Assistance Class is materially uncertain; the Assessment request is blocked.",
+            (
+                "Assistance Class or Action Level is materially uncertain; the Assessment "
+                "request is conservatively classified C3/A4 and blocked."
+            ),
         ),
         (
             AssessmentRequest(
@@ -94,6 +97,12 @@ def test_material_uncertainty_fails_closed(
 
     assert decision.result is PolicyResult.BLOCKED
     assert decision.reason == reason
+    if policy_request.operation == "unrecognized_operation":
+        assert decision.assistance_class is AssistanceClass.C3
+        assert decision.action_level is ActionLevel.A4
+    else:
+        assert decision.assistance_class is AssistanceClass.C1
+        assert decision.action_level is ActionLevel.A1
 
 
 def test_multi_step_escalation_uses_the_strictest_classification() -> None:
