@@ -6,7 +6,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import Event, Thread
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from exposure_ledger import (
     CISA_KEV_CATALOG_URL,
@@ -33,6 +33,7 @@ from exposure_ledger import (
     GitHubAdvisorySourceUnavailable,
     InvestigationBudget,
     InvestigationConfiguration,
+    InvestigationEvent,
     KevSourceUnavailable,
     OsvResponseRejected,
     OsvSource,
@@ -46,6 +47,7 @@ from exposure_ledger import (
 )
 from exposure_ledger_storage import (
     DEFAULT_DATABASE_URL,
+    AssessmentClaimLost,
     AssessmentMode,
     AssessmentRunRepository,
     AssessmentScenario,
@@ -55,16 +57,23 @@ from exposure_ledger_storage import (
     EmbeddingProviderUnavailable,
     EvidenceRetriever,
     ExposureRepository,
+    InvalidInvestigationOperation,
+    InvestigationOperationStatus,
     InvestigationRepository,
     OllamaEmbeddingProvider,
     normalize_database_url,
 )
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from exposure_ledger_worker.enrichment import CisaKevApiSource, FirstEpssApiSource
 from exposure_ledger_worker.github_advisories import GitHubAdvisoryApiSource
-from exposure_ledger_worker.investigations import BoundedInvestigationRunner
+from exposure_ledger_worker.investigations import (
+    BoundedInvestigationRunner,
+    InvalidInvestigationCheckpoint,
+)
 from exposure_ledger_worker.local_generation import (
     GenerationProvider,
     OllamaGenerationProvider,
@@ -73,6 +82,85 @@ from exposure_ledger_worker.osv import OsvApiSource
 from exposure_ledger_worker.repository_archives import GitHubArchiveSource
 
 logger = logging.getLogger(__name__)
+
+_INVESTIGATION_CHECKPOINT_TYPES = (
+    [
+        ("exposure_ledger.cyber_policy", name)
+        for name in (
+            "ActionLevel",
+            "AssessmentOperation",
+            "AssistanceClass",
+            "PolicyDecision",
+            "PolicyResult",
+        )
+    ]
+    + [
+        ("exposure_ledger.embeddings", "EmbeddingSpace"),
+        ("exposure_ledger.evidence", "EvidenceRelationship"),
+        ("exposure_ledger.recommendations", "Recommendation"),
+    ]
+    + [
+        ("exposure_ledger.investigations", name)
+        for name in (
+            "AvailableEvidence",
+            "Claim",
+            "ClaimDraft",
+            "ClaimEvidenceCitation",
+            "ClaimEvidenceRelationship",
+            "ClaimKind",
+            "ClaimValidation",
+            "EvidenceFollowUpArguments",
+            "EvidenceFollowUpAuthorization",
+            "EvidenceFollowUpProposal",
+            "EvidenceFollowUpTool",
+            "EvidenceGap",
+            "EvidenceGapKind",
+            "EvidenceType",
+            "GenerationModel",
+            "InvestigationBudget",
+            "InvestigationConfiguration",
+            "InvestigationEvent",
+            "InvestigationEventMode",
+            "InvestigationEvidenceState",
+            "InvestigationExposure",
+            "InvestigationMeasurements",
+            "InvestigationRevision",
+            "InvestigationRevisionStatus",
+            "InvestigationStage",
+            "InvestigationStoppingCondition",
+            "RetrievedInvestigationEvidence",
+            "RetrievedInvestigationPassage",
+            "RevisionRecommendation",
+            "RunInvestigation",
+            "StructuredInvestigationDraft",
+        )
+    ]
+)
+
+
+class _InvestigationProgressHistory:
+    def __init__(
+        self,
+        repository: AssessmentRunRepository,
+        *,
+        claim_id: UUID,
+    ) -> None:
+        self._repository = repository
+        self._claim_id = claim_id
+
+    def record(self, command: RunInvestigation, event: InvestigationEvent) -> InvestigationEvent:
+        persisted = self._repository.record_investigation_progress(
+            command.assessment_run_id,
+            claim_id=self._claim_id,
+            operation_id=command.operation_id,
+            exposure_id=command.exposure_id,
+            event=event,
+        )
+        if persisted is None:
+            raise AssessmentClaimLost(
+                "Assessment claim was lost while recording Investigation progress"
+            )
+        return persisted
 
 
 class _PolicyGatedKevSource:
@@ -212,55 +300,128 @@ def _run_investigations_or_fail(
         detail = readiness.message
         if readiness.setup is not None:
             detail = f"{detail} {readiness.setup}"
+        code = readiness.code or "generation_provider_unavailable"
+        investigation_repository.fail_running_operations(
+            assessment_run_id,
+            code=code,
+            message=detail,
+        )
         repository.fail(
             assessment_run_id,
             claim_id=claim_id,
-            code=readiness.code or "generation_provider_unavailable",
+            code=code,
             message=detail,
         )
         return False
-    runner = BoundedInvestigationRunner(
-        evidence_acquirer=investigation_repository,
-        retriever=investigation_repository,
-        generator=generation_provider,
-        revision_history=investigation_repository,
-    )
     selected = [
         exposure
         for exposure in ExposureRepository(database_url).list_for_assessment(assessment_run_id)
         if exposure.selected_for_investigation
     ]
-    for exposure in selected:
-        asyncio.run(
-            runner.run(
-                RunInvestigation(
-                    assessment_run_id=assessment_run_id,
-                    exposure_id=exposure.id,
-                    asset_snapshot_id=exposure.asset_snapshot_id,
-                    configuration=InvestigationConfiguration(
-                        application_release="0.1.0",
-                        graph_version="bounded-investigation-v1",
-                        prompt_version="claims-recommendation-follow-up-v2",
-                        policy_version="0.1",
-                        parser_version=parser_version,
-                        retrieval_configuration_version="postgres-hybrid-rrf-v1",
-                        source_policy_version="explicit-source-allowlist-v1",
-                        source_adapter_versions=tuple(
-                            sorted(
-                                {
-                                    f"{evidence.source.identity}={evidence.source_adapter_version}"
-                                    for evidence in exposure.evidence_records
-                                }
-                            )
-                        ),
-                        generation_model=readiness.model,
-                        embedding_space=embedding_space,
-                    ),
-                    budget=InvestigationBudget(),
-                )
-            )
+    commands = tuple(
+        RunInvestigation(
+            operation_id=uuid5(
+                NAMESPACE_URL,
+                f"exposure-ledger:investigation:{assessment_run_id}:{exposure.id}",
+            ),
+            assessment_run_id=assessment_run_id,
+            exposure_id=exposure.id,
+            asset_snapshot_id=exposure.asset_snapshot_id,
+            configuration=InvestigationConfiguration(
+                application_release="0.1.0",
+                graph_version="bounded-investigation-v2",
+                prompt_version="claims-recommendation-follow-up-v2",
+                policy_version="0.1",
+                parser_version=parser_version,
+                retrieval_configuration_version="postgres-hybrid-rrf-v1",
+                source_policy_version="explicit-source-allowlist-v1",
+                source_adapter_versions=tuple(
+                    sorted(
+                        {
+                            f"{evidence.source.identity}={evidence.source_adapter_version}"
+                            for evidence in exposure.evidence_records
+                        }
+                    )
+                ),
+                generation_model=readiness.model,
+                embedding_space=embedding_space,
+            ),
+            budget=InvestigationBudget(),
         )
-    return True
+        for exposure in selected
+    )
+
+    async def run_commands() -> bool:
+        serializer = JsonPlusSerializer(
+            allowed_msgpack_modules=_INVESTIGATION_CHECKPOINT_TYPES,
+        )
+        async with AsyncPostgresSaver.from_conn_string(
+            database_url,
+            serde=serializer,
+        ) as checkpointer:
+            await checkpointer.setup()
+            runner = BoundedInvestigationRunner(
+                evidence_acquirer=investigation_repository,
+                retriever=investigation_repository,
+                generator=generation_provider,
+                revision_history=investigation_repository,
+                checkpointer=checkpointer,
+                progress_history=_InvestigationProgressHistory(
+                    repository,
+                    claim_id=claim_id,
+                ),
+            )
+            for command in commands:
+                try:
+                    operation = investigation_repository.begin_operation(command)
+                except InvalidInvestigationOperation as error:
+                    investigation_repository.fail_running_operations(
+                        assessment_run_id,
+                        code="invalid_investigation_checkpoint",
+                        message=str(error),
+                    )
+                    repository.fail(
+                        assessment_run_id,
+                        claim_id=claim_id,
+                        code="invalid_investigation_checkpoint",
+                        message=str(error),
+                    )
+                    return False
+                if operation.status is InvestigationOperationStatus.COMPLETED:
+                    continue
+                if operation.status is InvestigationOperationStatus.FAILED:
+                    repository.fail(
+                        assessment_run_id,
+                        claim_id=claim_id,
+                        code=operation.error_code or "invalid_investigation_checkpoint",
+                        message=(
+                            operation.error_message
+                            or "The Investigation operation cannot be resumed."
+                        ),
+                    )
+                    return False
+                try:
+                    revision = await runner.run(command)
+                except InvalidInvestigationCheckpoint as error:
+                    investigation_repository.fail_operation(
+                        command,
+                        code="invalid_investigation_checkpoint",
+                        message=str(error),
+                    )
+                    repository.fail(
+                        assessment_run_id,
+                        claim_id=claim_id,
+                        code="invalid_investigation_checkpoint",
+                        message=str(error),
+                    )
+                    return False
+                investigation_repository.complete_operation(
+                    command,
+                    revision_id=revision.id,
+                )
+        return True
+
+    return asyncio.run(run_commands())
 
 
 def _run_post_exposure_pipeline(
@@ -470,46 +631,65 @@ def process_next_assessment(
                 capture_request = repository.get_capture_request(assessment_run.id)
                 if capture_request is None:
                     raise RuntimeError("Repository Assessment Run has no capture request")
-                tool_decision = CyberPolicy.decide(
-                    AssessmentRequest(
-                        operation=AssessmentOperation.PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT,
-                        target_scope=(f"{capture_request.repository}@{capture_request.commit}"),
-                        authorization_scope="local operator",
-                        authorization_status=AuthorizationStatus.CONFIRMED,
-                    )
+                snapshot_repository = AssetSnapshotRepository(database_url)
+                snapshot = (
+                    snapshot_repository.get(assessment_run.asset_snapshot_id)
+                    if assessment_run.asset_snapshot_id is not None
+                    else None
                 )
-                repository.record_tool_policy_decision(assessment_run.id, tool_decision)
-                if tool_decision.result is not PolicyResult.ALLOWED:
-                    repository.fail(
-                        assessment_run.id,
-                        claim_id=assessment_run.claim_id,
-                        code="repository_fetch_policy_blocked",
-                        message=tool_decision.reason,
+                if assessment_run.asset_snapshot_id is not None and snapshot is None:
+                    raise RuntimeError("Persisted Assessment Asset Snapshot is unavailable")
+                if snapshot is None:
+                    tool_decision = CyberPolicy.decide(
+                        AssessmentRequest(
+                            operation=AssessmentOperation.PUBLIC_REPOSITORY_EXPOSURE_ASSESSMENT,
+                            target_scope=(f"{capture_request.repository}@{capture_request.commit}"),
+                            authorization_scope="local operator",
+                            authorization_status=AuthorizationStatus.CONFIRMED,
+                        )
                     )
-                    return True
-                limits = ArchiveLimits()
-                source = archive_source or GitHubArchiveSource(
-                    max_bytes=limits.max_compressed_bytes
-                )
-                try:
-                    captured = AssetSnapshotCapture(source, limits=limits).capture(capture_request)
-                    snapshot = AssetSnapshotRepository(database_url).create(captured)
-                except AssetSnapshotRejected as error:
-                    repository.fail(
-                        assessment_run.id,
-                        claim_id=assessment_run.claim_id,
-                        code=error.code,
-                        message=str(error),
+                    repository.record_tool_policy_decision(assessment_run.id, tool_decision)
+                    if tool_decision.result is not PolicyResult.ALLOWED:
+                        repository.fail(
+                            assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            code="repository_fetch_policy_blocked",
+                            message=tool_decision.reason,
+                        )
+                        return True
+                    limits = ArchiveLimits()
+                    source = archive_source or GitHubArchiveSource(
+                        max_bytes=limits.max_compressed_bytes
                     )
-                    return True
-                except RepositoryArchiveUnavailable as error:
-                    repository.fail(
-                        assessment_run.id,
-                        claim_id=assessment_run.claim_id,
-                        code=error.code,
-                        message=str(error),
-                    )
-                    return True
+                    try:
+                        captured = AssetSnapshotCapture(source, limits=limits).capture(
+                            capture_request
+                        )
+                        snapshot = snapshot_repository.create(captured)
+                        if not repository.record_asset_snapshot(
+                            assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            asset_snapshot_id=snapshot.id,
+                        ):
+                            raise AssessmentClaimLost(
+                                "Assessment claim was lost after Asset Snapshot capture"
+                            )
+                    except AssetSnapshotRejected as error:
+                        repository.fail(
+                            assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            code=error.code,
+                            message=str(error),
+                        )
+                        return True
+                    except RepositoryArchiveUnavailable as error:
+                        repository.fail(
+                            assessment_run.id,
+                            claim_id=assessment_run.claim_id,
+                            code=error.code,
+                            message=str(error),
+                        )
+                        return True
                 exposure_repository = ExposureRepository(database_url)
                 if exposure_repository.is_recorded(
                     assessment_run.id,

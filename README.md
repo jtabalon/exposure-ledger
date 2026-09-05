@@ -186,7 +186,13 @@ worker-generated `retrievalQuery`; hybrid callers submit that query with an expl
 `embeddingSpaceIdentity`. Its immutable query representation is loaded from the same space in
 PostgreSQL, so the public API never accepts untrusted vectors or invokes Ollama directly.
 
-SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Events and Assessment state are replayed from PostgreSQL, so API and worker restarts do not lose progress. The workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
+SSE clients can resume with `Last-Event-ID` or the `after` query parameter. Assessment state and
+idempotent Investigation-stage events are replayed from PostgreSQL, so reconnecting clients receive
+an ordered, gap-free view after API or worker restarts. The worker also records a stable operation
+identity and synchronous PostgreSQL graph checkpoints for each selected Exposure. Reclaimed work
+reuses the captured Asset Snapshot, resumes the same incomplete Revision, and does not repeat already
+committed source reads, model stages, Policy Decisions, Evidence Records, or progress events. The
+workbench distinguishes `REPOSITORY` and `SYNTHETIC` runs.
 
 Every Assessment request is classified by application-owned rules before a run is queued. The
 response and workbench show its versioned Policy Decision, including the Assistance Class, Action

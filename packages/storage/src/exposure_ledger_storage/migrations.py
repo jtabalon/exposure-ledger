@@ -1133,6 +1133,62 @@ MIGRATIONS: Sequence[tuple[int, str]] = (
                 );
         """,
     ),
+    (
+        18,
+        """
+        ALTER TABLE assessment_events ADD COLUMN idempotency_key text;
+
+        CREATE UNIQUE INDEX assessment_events_idempotency_idx
+            ON assessment_events (assessment_run_id, idempotency_key);
+
+        ALTER TABLE policy_decisions ADD COLUMN idempotency_key text;
+
+        CREATE UNIQUE INDEX policy_decisions_idempotency_idx
+            ON policy_decisions (assessment_run_id, idempotency_key);
+
+        CREATE TABLE investigation_operations (
+            id uuid PRIMARY KEY,
+            assessment_run_id uuid NOT NULL REFERENCES assessment_runs(id) ON DELETE RESTRICT,
+            exposure_id uuid NOT NULL REFERENCES exposures(id) ON DELETE RESTRICT,
+            asset_snapshot_id uuid NOT NULL REFERENCES asset_snapshots(id) ON DELETE RESTRICT,
+            command_digest text NOT NULL,
+            status text NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+            revision_id uuid UNIQUE REFERENCES investigation_revisions(id) ON DELETE RESTRICT,
+            started_at timestamptz NOT NULL,
+            completed_at timestamptz,
+            error_code text,
+            error_message text,
+            UNIQUE (assessment_run_id, exposure_id),
+            CHECK (
+                (status = 'running' AND revision_id IS NULL AND completed_at IS NULL
+                 AND error_code IS NULL AND error_message IS NULL)
+                OR
+                (status = 'completed' AND revision_id IS NOT NULL AND completed_at IS NOT NULL
+                 AND error_code IS NULL AND error_message IS NULL)
+                OR
+                (status = 'failed' AND revision_id IS NULL AND completed_at IS NOT NULL
+                 AND error_code IS NOT NULL AND error_message IS NOT NULL)
+            )
+        );
+
+        CREATE INDEX investigation_operations_assessment_idx
+            ON investigation_operations (assessment_run_id, status, started_at);
+        """,
+    ),
+    (
+        19,
+        """
+        ALTER TABLE investigation_operations
+            ADD COLUMN IF NOT EXISTS command_digest text;
+
+        UPDATE investigation_operations
+        SET command_digest = 'unrecoverable:legacy-unpinned'
+        WHERE command_digest IS NULL;
+
+        ALTER TABLE investigation_operations
+            ALTER COLUMN command_digest SET NOT NULL;
+        """,
+    ),
 )
 
 

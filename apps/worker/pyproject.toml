@@ -12,6 +12,7 @@ dependencies = [
   "httpcore>=1.0",
   "httpx>=0.28",
   "langgraph>=0.4",
+  "langgraph-checkpoint-postgres>=3.0",
   "psycopg[binary]>=3.2",
   "pydantic-settings>=2.8",
   "sqlalchemy>=2.0",

@@ -7,7 +7,11 @@ class InvestigationRunner(Protocol):
     async def run(self, command: RunInvestigation) -> InvestigationRevision: ...
 ```
 
-`RunInvestigation` identifies an existing Exposure, the evidence and execution budgets, and pinned configuration versions. The returned immutable revision contains the stopping condition, Claims, Evidence relationships, Recommendation, Policy Decisions, events, and operational measurements.
+`RunInvestigation` identifies one durable operation, an existing Exposure, the evidence and execution
+budgets, and pinned configuration versions. Reusing the operation identity resumes a valid PostgreSQL
+checkpoint or returns its already persisted Revision. The returned immutable revision contains the
+stopping condition, Claims, Evidence relationships, Recommendation, Policy Decisions, events, and
+operational measurements.
 
 This is the selected external seam because it gives API and worker callers one correct operation while hiding graph stages, retry mechanics, source adapters, model payloads, and validation.
 
@@ -59,6 +63,9 @@ These seams were agreed during design and are the only initial surfaces tested d
    Investigation Revisions and human Dispositions. Database integration tests may exercise the
    append-only and scope constraints directly because those constraints are part of the public
    PostgreSQL persistence boundary.
+11. **Interruption recovery:** restarting the worker and API around a controlled graph checkpoint
+   resumes one operation without repeating committed source or model effects, and SSE replay remains
+   ordered and idempotent.
 
 Tests cross these interfaces and avoid assertions against private graph nodes, SQL layout, or internal helper calls.
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -25,6 +25,7 @@ from exposure_ledger import (
     GenerationModel,
     InvestigationBudget,
     InvestigationConfiguration,
+    InvestigationEvent,
     InvestigationExposure,
     InvestigationRevision,
     InvestigationRevisionStatus,
@@ -35,13 +36,18 @@ from exposure_ledger import (
     RunInvestigation,
     StructuredInvestigationDraft,
 )
-from exposure_ledger_worker.investigations import BoundedInvestigationRunner
+from exposure_ledger_worker.investigations import (
+    BoundedInvestigationRunner,
+    InvalidInvestigationCheckpoint,
+)
 from exposure_ledger_worker.local_generation import GenerationReadiness
+from langgraph.checkpoint.memory import InMemorySaver
 
 ASSESSMENT_ID = UUID("00000000-0000-0000-0000-000000000013")
 EXPOSURE_ID = UUID("00000000-0000-0000-0000-000000000042")
 SNAPSHOT_ID = UUID("00000000-0000-0000-0000-000000000007")
 EVIDENCE_ID = UUID("00000000-0000-0000-0000-000000000081")
+OPERATION_ID = UUID("00000000-0000-0000-0000-000000000099")
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 
 
@@ -67,6 +73,7 @@ def _generation_model() -> GenerationModel:
 
 def _command() -> RunInvestigation:
     return RunInvestigation(
+        operation_id=OPERATION_ID,
         assessment_run_id=ASSESSMENT_ID,
         exposure_id=EXPOSURE_ID,
         asset_snapshot_id=SNAPSHOT_ID,
@@ -296,6 +303,19 @@ class SequencedGenerator(ControlledGenerator):
         return next(self._drafts)
 
 
+class InterruptedGenerator(ControlledGenerator):
+    def generate(
+        self,
+        exposure: InvestigationExposure,
+        evidence: RetrievedInvestigationEvidence,
+        configuration: InvestigationConfiguration,
+        *,
+        timeout_seconds: float,
+    ) -> StructuredInvestigationDraft:
+        super().generate(exposure, evidence, configuration, timeout_seconds=timeout_seconds)
+        raise RuntimeError("controlled worker interruption")
+
+
 class InMemoryRevisionHistory:
     def __init__(self) -> None:
         self.revisions: list[InvestigationRevision] = []
@@ -303,6 +323,31 @@ class InMemoryRevisionHistory:
     def append(self, revision: InvestigationRevision) -> InvestigationRevision:
         self.revisions.append(revision)
         return revision
+
+    def get(self, revision_id: UUID) -> InvestigationRevision | None:
+        return next((revision for revision in self.revisions if revision.id == revision_id), None)
+
+
+class InMemoryProgressHistory:
+    def __init__(self) -> None:
+        self.events: list[tuple[RunInvestigation, InvestigationEvent]] = []
+
+    def record(self, command: RunInvestigation, event: InvestigationEvent) -> InvestigationEvent:
+        self.events.append((command, event))
+        return event
+
+
+class InterruptAfterRevisionCommitHistory(InMemoryRevisionHistory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.append_calls = 0
+
+    def append(self, revision: InvestigationRevision) -> InvestigationRevision:
+        self.append_calls += 1
+        if self.append_calls > 1:
+            raise AssertionError("a committed Revision must not be appended again")
+        self.revisions.append(revision)
+        raise RuntimeError("controlled interruption after the Revision commit")
 
 
 def _supported_draft() -> StructuredInvestigationDraft:
@@ -367,6 +412,7 @@ async def test_runner_persists_one_complete_evidence_backed_revision() -> None:
 
     revision = await runner.run(_command())
 
+    assert revision.id == OPERATION_ID
     assert revision.status is InvestigationRevisionStatus.COMPLETE
     assert revision.stopping_condition == "completed"
     assert revision.exposure_id == EXPOSURE_ID
@@ -394,6 +440,136 @@ async def test_runner_persists_one_complete_evidence_backed_revision() -> None:
     assert revision.configuration == _command().configuration
     assert history.revisions == [revision]
     assert generator.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupted_investigation_resumes_without_repeating_committed_effects() -> None:
+    checkpointer = InMemorySaver()
+    acquirer = ControlledEvidenceAcquirer()
+    retriever = ControlledRetriever()
+    interrupted = BoundedInvestigationRunner(
+        evidence_acquirer=acquirer,
+        retriever=retriever,
+        generator=InterruptedGenerator(_supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(RuntimeError, match="controlled worker interruption"):
+        await interrupted.run(_command())
+
+    history = InMemoryRevisionHistory()
+    resumed_generator = ControlledGenerator(_supported_draft())
+    resumed = BoundedInvestigationRunner(
+        evidence_acquirer=acquirer,
+        retriever=retriever,
+        generator=resumed_generator,
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    revision = await resumed.run(_command())
+
+    assert revision.id == OPERATION_ID
+    assert acquirer.calls == 1
+    assert retriever.calls == 1
+    assert resumed_generator.calls == 1
+    assert history.revisions == [revision]
+
+
+@pytest.mark.asyncio
+async def test_runner_publishes_each_authoritative_progress_stage() -> None:
+    progress = InMemoryProgressHistory()
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        progress_history=progress,
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert [event.stage for _, event in progress.events] == [
+        event.stage for event in revision.events
+    ]
+    assert all(command.operation_id == OPERATION_ID for command, _ in progress.events)
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_a_checkpoint_reused_for_another_scope() -> None:
+    checkpointer = InMemorySaver()
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=InMemoryRevisionHistory(),
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+    await runner.run(_command())
+
+    with pytest.raises(InvalidInvestigationCheckpoint, match="does not match its scope"):
+        await runner.run(replace(_command(), exposure_id=UUID(int=123)))
+
+
+@pytest.mark.asyncio
+async def test_retry_after_final_checkpoint_returns_the_same_revision() -> None:
+    checkpointer = InMemorySaver()
+    first_history = InMemoryRevisionHistory()
+    first = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=first_history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+    revision = await first.run(_command())
+
+    retried = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=first_history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    assert await retried.run(_command()) == revision
+    assert first_history.revisions == [revision]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_revision_commit_before_checkpoint_reads_authoritative_revision() -> None:
+    checkpointer = InMemorySaver()
+    history = InterruptAfterRevisionCommitHistory()
+    first = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(RuntimeError, match="after the Revision commit"):
+        await first.run(_command())
+
+    retried = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(_supported_draft()),
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert await retried.run(_command()) == history.revisions[0]
+    assert history.append_calls == 1
 
 
 @pytest.mark.asyncio
@@ -688,15 +864,14 @@ async def test_unsafe_structured_operation_is_blocked_before_revision_completion
 
 @pytest.mark.asyncio
 async def test_wall_time_budget_stops_model_use_and_persists_incomplete_revision() -> None:
-    monotonic_values = iter((0.0, 2.0))
+    clock_values = iter((NOW, NOW + timedelta(seconds=2)))
     generator = ControlledGenerator(_supported_draft())
     runner = BoundedInvestigationRunner(
         evidence_acquirer=ControlledEvidenceAcquirer(),
         retriever=ControlledRetriever(),
         generator=generator,
         revision_history=InMemoryRevisionHistory(),
-        clock=lambda: NOW,
-        monotonic_clock=lambda: next(monotonic_values, 2.0),
+        clock=lambda: next(clock_values, NOW + timedelta(seconds=2)),
     )
     command = replace(_command(), budget=InvestigationBudget(wall_time_seconds=1))
 

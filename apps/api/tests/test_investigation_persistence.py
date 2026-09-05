@@ -32,6 +32,7 @@ from exposure_ledger import (
     EvidenceRelationship,
     EvidenceType,
     GenerationModel,
+    InvestigationBudget,
     InvestigationConfiguration,
     InvestigationEvent,
     InvestigationEvidenceState,
@@ -43,11 +44,18 @@ from exposure_ledger import (
     RetrievedInvestigationEvidence,
     RetrievedInvestigationPassage,
     RevisionRecommendation,
+    RunInvestigation,
     StructuredInvestigationDraft,
 )
 from exposure_ledger_api.main import create_app
 from exposure_ledger_api.settings import Settings
-from exposure_ledger_storage import ExposureRepository, InvestigationRepository, apply_migrations
+from exposure_ledger_storage import (
+    AssessmentRunRepository,
+    ExposureRepository,
+    InvalidInvestigationOperation,
+    InvestigationRepository,
+    apply_migrations,
+)
 from exposure_ledger_storage.postgres_deadline import connect_with_deadline
 from exposure_ledger_worker.local_generation import GenerationReadiness
 from exposure_ledger_worker.main import process_next_assessment
@@ -206,6 +214,30 @@ class ControlledFollowUpGenerationProvider(ControlledGenerationProvider):
                 action_level="A1",
             ),
         )
+
+
+class InterruptDuringFollowUpGenerationProvider(ControlledFollowUpGenerationProvider):
+    def generate(  # type: ignore[no-untyped-def]
+        self, exposure, evidence, configuration, *, timeout_seconds: float
+    ):
+        draft = super().generate(
+            exposure,
+            evidence,
+            configuration,
+            timeout_seconds=timeout_seconds,
+        )
+        if self._calls_by_exposure[exposure.exposure_id] == 2:
+            raise KeyboardInterrupt("simulated worker interruption at a graph checkpoint")
+        return draft
+
+
+class CountingArchiveSource(FixtureArchiveSource):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch(self, repository: str, commit: str):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        return super().fetch(repository, commit)
 
 
 def _seed_exposure(database_url: str):  # type: ignore[no-untyped-def]
@@ -398,6 +430,44 @@ def test_revision_history_appends_and_reloads_complete_immutable_revisions(
             ) VALUES (%s, %s, 'late-claim', 2, 'fact', 'Late mutation.', true, NULL, false)
             """,
             (uuid4(), first.id),
+        )
+
+
+def test_retrying_the_same_revision_is_idempotent(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    repository = InvestigationRepository(database_url)
+    revision = _revision(exposure)
+
+    first = repository.append(revision)
+    retried = repository.append(revision)
+
+    assert retried == first
+    assert [record.revision.id for record in repository.list_for_exposure(exposure.id)] == [
+        revision.id
+    ]
+
+
+def test_operation_identity_rejects_changed_pinned_configuration(database_url: str) -> None:
+    exposure = _seed_exposure(database_url)
+    revision = _revision(exposure)
+    command = RunInvestigation(
+        operation_id=uuid4(),
+        assessment_run_id=exposure.assessment_run_id,
+        exposure_id=exposure.id,
+        asset_snapshot_id=exposure.asset_snapshot_id,
+        configuration=revision.configuration,
+        budget=InvestigationBudget(),
+    )
+    repository = InvestigationRepository(database_url)
+
+    repository.begin_operation(command)
+
+    with pytest.raises(InvalidInvestigationOperation, match="configuration changed"):
+        repository.begin_operation(
+            replace(
+                command,
+                configuration=replace(command.configuration, prompt_version="changed-v2"),
+            )
         )
 
 
@@ -1090,3 +1160,112 @@ def test_controlled_adapters_execute_one_persisted_follow_up_per_exposure(
             """,
             (run["id"],),
         ).fetchone() == (2,)
+
+
+def test_worker_and_api_restart_resume_investigations_from_postgres_checkpoints(
+    database_url: str,
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    archive_source = CountingArchiveSource()
+    osv_source = CapturedOsvSource()
+    interrupted_provider = InterruptDuringFollowUpGenerationProvider()
+    with pytest.raises(
+        KeyboardInterrupt,
+        match="simulated worker interruption at a graph checkpoint",
+    ):
+        process_next_assessment(
+            database_url=database_url,
+            archive_source=archive_source,
+            osv_source=osv_source,
+            kev_source=CapturedKevSource(),
+            epss_source=CapturedEpssSource(),
+            embedding_provider=KnownAnswerEmbeddingProvider(),
+            generation_provider=interrupted_provider,
+        )
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute(
+            "UPDATE assessment_runs SET claimed_at = now() - interval '1 minute' WHERE id = %s",
+            (run["id"],),
+        )
+        connection.commit()
+
+    with TestClient(create_app(Settings(database_url=database_url))) as interrupted_client:
+        interrupted_events = interrupted_client.get(
+            f"/api/v1/assessment-runs/{run['id']}/events?follow=false"
+        )
+    interrupted_ids = [
+        int(line.removeprefix("id: "))
+        for line in interrupted_events.text.splitlines()
+        if line.startswith("id: ")
+    ]
+    assert interrupted_ids
+    reconnect_after = interrupted_ids[-1]
+
+    resumed_provider = ControlledFollowUpGenerationProvider()
+    assert process_next_assessment(
+        database_url=database_url,
+        stale_after_seconds=1,
+        archive_source=archive_source,
+        osv_source=osv_source,
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
+        embedding_provider=KnownAnswerEmbeddingProvider(),
+        generation_provider=resumed_provider,
+    )
+
+    with psycopg.connect(database_url) as connection:
+        operation_states = connection.execute(
+            "SELECT status, error_code, error_message FROM investigation_operations "
+            "WHERE assessment_run_id = %s ORDER BY exposure_id",
+            (run["id"],),
+        ).fetchall()
+    assert operation_states == [("completed", None, None), ("completed", None, None)]
+    assert archive_source.calls == 1
+    assert len(osv_source.batches) == 1
+    assert sorted(resumed_provider._calls_by_exposure.values()) == [1, 2]
+    revisions = InvestigationRepository(database_url).list_for_assessment(run["id"])
+    assert len(revisions) == 2
+    assert {record.revision.stopping_condition for record in revisions} == {
+        InvestigationStoppingCondition.COMPLETED,
+        InvestigationStoppingCondition.FOLLOW_UP_LIMIT_REACHED,
+    }
+    progress_events = [
+        event
+        for event in AssessmentRunRepository(database_url).list_events(UUID(run["id"]), after=0)
+        if event.event_type == "investigation.progress"
+    ]
+    assert len(progress_events) == sum(len(record.revision.events) for record in revisions)
+    progress_by_operation_and_stage = {
+        (event.payload["operationId"], event.payload["stage"]): event for event in progress_events
+    }
+    for record in revisions:
+        for event in record.revision.events:
+            persisted = progress_by_operation_and_stage[(str(record.revision.id), event.stage)]
+            assert persisted.occurred_at == event.occurred_at
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM investigation_operations WHERE assessment_run_id = %s "
+            "AND status = 'completed'",
+            (run["id"],),
+        ).fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM checkpoints").fetchone()[0] > 0
+
+    with TestClient(create_app(Settings(database_url=database_url))) as restarted_client:
+        response = restarted_client.get(
+            f"/api/v1/assessment-runs/{run['id']}/events?follow=false",
+            headers={"Last-Event-ID": str(reconnect_after)},
+        )
+
+    assert response.status_code == 200
+    resumed_ids = [
+        int(line.removeprefix("id: "))
+        for line in response.text.splitlines()
+        if line.startswith("id: ")
+    ]
+    assert resumed_ids
+    assert interrupted_ids + resumed_ids == list(range(1, resumed_ids[-1] + 1))
+    assert all(event_id > reconnect_after for event_id in resumed_ids)
