@@ -178,6 +178,72 @@ class ControlledGenerationProvider:
         )
 
 
+class InvalidCitationGenerationProvider(ControlledGenerationProvider):
+    def __init__(self, database_url: str, citation_case: str) -> None:
+        self.database_url = database_url
+        self.citation_case = citation_case
+        self.calls = 0
+
+    def generate(  # type: ignore[no-untyped-def]
+        self, exposure, evidence, configuration, *, timeout_seconds: float
+    ):
+        self.calls += 1
+        draft = super().generate(exposure, evidence, configuration, timeout_seconds=timeout_seconds)
+        citation = draft.claims[0].citations[0]
+        if self.citation_case in {"missing", "mixed"}:
+            citations = ()
+        elif self.citation_case == "nonexistent":
+            citations = (replace(citation, evidence_record_id=uuid4()),)
+        elif self.citation_case == "unknown_passage":
+            citations = (replace(citation, passage_identities=("not-a-captured-passage",)),)
+        elif self.citation_case == "foreign_passage":
+            with psycopg.connect(self.database_url) as connection:
+                foreign = connection.execute(
+                    """
+                    SELECT evidence_record_id, identity_key FROM evidence_passages
+                    WHERE evidence_record_id = ANY(%s) AND NOT EXISTS (
+                        SELECT 1 FROM assessment_run_exposure_passages scoped
+                        WHERE scoped.assessment_run_id = %s AND scoped.exposure_id = %s
+                          AND scoped.passage_id = evidence_passages.id
+                    )
+                    ORDER BY evidence_record_id, identity_key LIMIT 1
+                    """,
+                    (
+                        [item.record_id for item in exposure.evidence],
+                        exposure.assessment_run_id,
+                        exposure.exposure_id,
+                    ),
+                ).fetchone()
+            assert foreign is not None
+            citations = (
+                replace(citation, evidence_record_id=foreign[0], passage_identities=(foreign[1],)),
+            )
+        else:
+            assert self.citation_case == "foreign"
+            with psycopg.connect(self.database_url) as connection:
+                foreign = connection.execute(
+                    """
+                    SELECT evidence_record_id, identity_key FROM evidence_passages
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM assessment_run_exposure_evidence scoped
+                        WHERE scoped.assessment_run_id = %s AND scoped.exposure_id = %s
+                          AND scoped.evidence_record_id = evidence_passages.evidence_record_id
+                    )
+                    ORDER BY evidence_record_id, identity_key LIMIT 1
+                    """,
+                    (exposure.assessment_run_id, exposure.exposure_id),
+                ).fetchone()
+            assert foreign is not None
+            citations = (
+                replace(citation, evidence_record_id=foreign[0], passage_identities=(foreign[1],)),
+            )
+        rejected = replace(draft.claims[0], citations=citations)
+        if self.citation_case == "mixed":
+            rejected = replace(rejected, identity="claim-uncited", text="Uncited generated text.")
+            return replace(draft, claims=(*draft.claims, rejected))
+        return replace(draft, claims=(rejected,))
+
+
 class ControlledFollowUpGenerationProvider(ControlledGenerationProvider):
     def __init__(self) -> None:
         self._calls_by_exposure: dict[object, int] = {}
@@ -947,10 +1013,13 @@ def test_revision_rejects_contradictory_status_and_stopping_condition(
         replace(revision, status=InvestigationRevisionStatus.INCOMPLETE)
 
 
-def test_revision_rejects_a_forged_supported_claim(database_url: str) -> None:
+@pytest.mark.parametrize("supported", [True, False])
+def test_revision_rejects_uncited_claims_regardless_of_support_state(
+    database_url: str, supported: bool
+) -> None:
     exposure = _seed_exposure(database_url)
     revision = _revision(exposure)
-    forged = replace(revision.claims[0], citations=())
+    forged = replace(revision.claims[0], supported=supported, citations=())
 
     with pytest.raises(ValueError, match="support state is inconsistent"):
         InvestigationRepository(database_url).append(replace(revision, claims=(forged,)))
@@ -1123,6 +1192,225 @@ def test_controlled_adapters_exercise_the_complete_investigation_path(
     assert first["measurements"]["graphTransitions"] == 8
     assert "thinking" not in json.dumps(payload).lower()
     assert "chain-of-thought" not in json.dumps(payload).lower()
+
+
+@pytest.mark.parametrize("kind", [ClaimKind.FACT, ClaimKind.INFERENCE])
+def test_validly_cited_unsupported_claims_remain_auditable_through_http(
+    database_url: str, kind: ClaimKind
+) -> None:
+    class ContextualGenerationProvider(ControlledGenerationProvider):
+        def generate(  # type: ignore[no-untyped-def]
+            self, exposure, evidence, configuration, *, timeout_seconds: float
+        ):
+            draft = super().generate(
+                exposure, evidence, configuration, timeout_seconds=timeout_seconds
+            )
+            claim = draft.claims[0]
+            return replace(
+                draft,
+                claims=(
+                    replace(
+                        claim,
+                        kind=kind,
+                        citations=(
+                            replace(
+                                claim.citations[0], relationship=EvidenceRelationship.CONTEXTUAL
+                            ),
+                        ),
+                    ),
+                ),
+            )
+
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(),
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
+        embedding_provider=KnownAnswerEmbeddingProvider(),
+        generation_provider=ContextualGenerationProvider(),
+    )
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        response = client.get(f"/api/v1/assessment-runs/{run['id']}/investigation-revisions")
+    assert response.status_code == 200
+    revisions = response.json()["items"]
+    assert len(revisions) == 2
+    for revision in revisions:
+        assert revision["status"] == "complete"
+        assert revision["stoppingCondition"] == "completed"
+        assert revision["stoppingReason"] is None
+        assert revision["claims"][0]["supported"] is False
+        assert revision["claims"][0]["citations"][0]["relationship"] == "contextual"
+        assert revision["recommendation"]["value"] == "more_evidence_required"
+        assert revision["recommendation"]["accepted"] is False
+        assert revision["recommendation"]["reason"] == "material_claims_unsupported"
+
+
+@pytest.mark.parametrize(
+    "citation_case", ["missing", "nonexistent", "foreign", "unknown_passage", "foreign_passage"]
+)
+def test_invalid_citations_seal_safe_revisions_through_http(
+    database_url: str, citation_case: str
+) -> None:
+    app = create_app(Settings(database_url=database_url))
+    with TestClient(app) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+
+    assert process_next_assessment(
+        database_url=database_url,
+        archive_source=FixtureArchiveSource(),
+        osv_source=CapturedOsvSource(include_query_capture=True),
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
+        embedding_provider=KnownAnswerEmbeddingProvider(),
+        generation_provider=InvalidCitationGenerationProvider(database_url, citation_case),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/assessment-runs/{run['id']}/investigation-revisions")
+        outcome = client.get(f"/api/v1/assessment-runs/{run['id']}").json()
+
+    assert response.status_code == 200
+    assert outcome["status"] == "completed", outcome
+    revisions = response.json()["items"]
+    assert len(revisions) == 2
+    for revision in revisions:
+        assert revision["status"] == "incomplete"
+        assert revision["stoppingCondition"] == "generation_invalid_structured_output"
+        assert "citation" in revision["stoppingReason"]
+        assert revision["claims"] == []
+        assert revision["recommendation"]["value"] == "more_evidence_required"
+        assert revision["recommendation"]["accepted"] is False
+        assert (
+            "claim-affected:claim_evidence_required"
+            in (revision["evidenceState"]["validationIssues"])
+        )
+        assert (
+            "claim-affected:claim_rejected_no_valid_citations"
+            in (revision["evidenceState"]["validationIssues"])
+        )
+        assert revision["evidenceState"]["materialClaimsSupported"] is False
+        issues = revision["evidenceState"]["validationIssues"]
+        assert len(issues) == len(set(issues))
+        assert all(len(issue) <= 200 for issue in issues)
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM investigation_revisions WHERE assessment_run_id = %s AND sealed",
+            (run["id"],),
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT status, error_code FROM investigation_operations "
+            "WHERE assessment_run_id = %s ORDER BY exposure_id",
+            (run["id"],),
+        ).fetchall() == [("completed", None), ("completed", None)]
+
+
+@pytest.mark.parametrize("crash_window", ["before_revision", "after_revision", "after_operation"])
+def test_invalid_citation_outcome_recovers_once_across_durable_commit_windows(
+    database_url: str, monkeypatch: pytest.MonkeyPatch, crash_window: str
+) -> None:
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        run = client.post("/api/v1/assessment-runs", json=repository_payload()).json()
+    append = InvestigationRepository.append
+    complete_operation = InvestigationRepository.complete_operation
+
+    def interrupted_append(self, revision):  # type: ignore[no-untyped-def]
+        if crash_window == "before_revision":
+            raise KeyboardInterrupt("simulated Revision commit interruption")
+        append(self, revision)
+        raise KeyboardInterrupt("simulated Revision commit interruption")
+
+    def interrupted_complete(self, command, *, revision_id):  # type: ignore[no-untyped-def]
+        complete_operation(self, command, revision_id=revision_id)
+        raise KeyboardInterrupt("simulated Revision commit interruption")
+
+    provider = InvalidCitationGenerationProvider(database_url, "mixed")
+    archive_source = CountingArchiveSource()
+    osv_source = CapturedOsvSource()
+    with monkeypatch.context() as patch:
+        if crash_window == "after_operation":
+            patch.setattr(InvestigationRepository, "complete_operation", interrupted_complete)
+        else:
+            patch.setattr(InvestigationRepository, "append", interrupted_append)
+        with pytest.raises(KeyboardInterrupt, match="simulated Revision commit interruption"):
+            process_next_assessment(
+                database_url=database_url,
+                archive_source=archive_source,
+                osv_source=osv_source,
+                kev_source=CapturedKevSource(),
+                epss_source=CapturedEpssSource(),
+                embedding_provider=KnownAnswerEmbeddingProvider(),
+                generation_provider=provider,
+            )
+
+    repository = InvestigationRepository(database_url)
+    before = repository.list_for_assessment(run["id"])
+    assert len(before) == (0 if crash_window == "before_revision" else 1)
+    with psycopg.connect(database_url) as connection:
+        operation_id = connection.execute(
+            "SELECT id FROM investigation_operations WHERE assessment_run_id = %s",
+            (run["id"],),
+        ).fetchone()[0]
+        connection.execute(
+            "UPDATE assessment_runs SET claimed_at = now() - interval '1 minute' WHERE id = %s",
+            (run["id"],),
+        )
+
+    resumed_provider = InvalidCitationGenerationProvider(database_url, "mixed")
+    assert process_next_assessment(
+        database_url=database_url,
+        stale_after_seconds=1,
+        archive_source=archive_source,
+        osv_source=osv_source,
+        kev_source=CapturedKevSource(),
+        epss_source=CapturedEpssSource(),
+        embedding_provider=KnownAnswerEmbeddingProvider(),
+        generation_provider=resumed_provider,
+    )
+    assert provider.calls == resumed_provider.calls == 1
+    assert archive_source.calls == len(osv_source.batches) == 1
+    revisions = repository.list_for_assessment(run["id"])
+    assert len(revisions) == 2
+    assert operation_id in {item.revision.id for item in revisions}
+    for record in before:
+        assert repository.get(record.revision.id) == record.revision
+    for record in revisions:
+        revision = record.revision
+        assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+        assert revision.stopping_condition == "generation_invalid_structured_output"
+        assert [claim.identity for claim in revision.claims] == ["claim-affected"]
+        assert revision.evidence_state.material_claims_supported is True
+        assert "claim-uncited:claim_rejected_no_valid_citations" in (
+            revision.evidence_state.validation_issues
+        )
+        assert revision.recommendation.recommendation is Recommendation.MORE_EVIDENCE_REQUIRED
+        assert revision.recommendation.accepted is False
+        assert repository.append(revision) == revision
+
+    assessment_repository = AssessmentRunRepository(database_url)
+    events = assessment_repository.list_events(UUID(run["id"]), after=0)
+    progress = [event for event in events if event.event_type == "investigation.progress"]
+    assert len(progress) == sum(len(item.revision.events) for item in revisions)
+    assert len({(event.payload["operationId"], event.payload["stage"]) for event in progress}) == (
+        len(progress)
+    )
+    assert not process_next_assessment(database_url=database_url)
+    assert assessment_repository.list_events(UUID(run["id"]), after=0) == events
+    assert repository.list_for_assessment(run["id"]) == revisions
+    with TestClient(create_app(Settings(database_url=database_url))) as client:
+        response = client.get(f"/api/v1/assessment-runs/{run['id']}/investigation-revisions")
+        outcome = client.get(f"/api/v1/assessment-runs/{run['id']}").json()
+    assert outcome["status"] == "completed"
+    assert len(response.json()["items"]) == 2
+    assert "Uncited generated text." not in response.text
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute(
+            "SELECT status, revision_id = id, error_code FROM investigation_operations "
+            "WHERE assessment_run_id = %s ORDER BY exposure_id",
+            (run["id"],),
+        ).fetchall() == [("completed", True, None), ("completed", True, None)]
 
 
 def test_controlled_adapters_execute_one_persisted_follow_up_per_exposure(

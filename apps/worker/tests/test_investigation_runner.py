@@ -29,6 +29,7 @@ from exposure_ledger import (
     InvestigationExposure,
     InvestigationRevision,
     InvestigationRevisionStatus,
+    InvestigationStoppingCondition,
     PolicyResult,
     Recommendation,
     RetrievedInvestigationEvidence,
@@ -39,6 +40,7 @@ from exposure_ledger import (
 from exposure_ledger_worker.investigations import (
     BoundedInvestigationRunner,
     InvalidInvestigationCheckpoint,
+    _GraphState,
 )
 from exposure_ledger_worker.local_generation import GenerationReadiness
 from langgraph.checkpoint.memory import InMemorySaver
@@ -348,6 +350,35 @@ class InterruptAfterRevisionCommitHistory(InMemoryRevisionHistory):
             raise AssertionError("a committed Revision must not be appended again")
         self.revisions.append(revision)
         raise RuntimeError("controlled interruption after the Revision commit")
+
+
+class UnretrievedPassageEvidenceAcquirer(ControlledEvidenceAcquirer):
+    def acquire(
+        self, command: RunInvestigation, *, timeout_seconds: float
+    ) -> InvestigationExposure:
+        exposure = super().acquire(command, timeout_seconds=timeout_seconds)
+        return replace(
+            exposure,
+            evidence=(
+                replace(
+                    exposure.evidence[0],
+                    passage_identities=("osv:affected", "osv:not-retrieved"),
+                ),
+            ),
+        )
+
+
+class InterruptedLegacyValidationRunner(BoundedInvestigationRunner):
+    """Leave the pre-fix validated Claim state checkpointed before persistence."""
+
+    def _validate_claims(self, state: _GraphState) -> dict[str, object]:
+        updates = super()._validate_claims(state)
+        for key in ("status", "stopping_condition", "stopping_reason"):
+            updates.pop(key, None)
+        return updates
+
+    def _persist_revision(self, state: _GraphState) -> dict[str, object]:
+        raise RuntimeError("controlled interruption before legacy Revision persistence")
 
 
 def _supported_draft() -> StructuredInvestigationDraft:
@@ -786,6 +817,282 @@ async def test_unsupported_claim_is_preserved_and_recommendation_is_downgraded()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("citations", "kind", "material", "expected_issue"),
+    [
+        pytest.param((), ClaimKind.FACT, True, "claim_evidence_required", id="missing"),
+        pytest.param(
+            (), ClaimKind.FACT, False, "claim_evidence_required", id="nonmaterial-missing"
+        ),
+        pytest.param(
+            (), ClaimKind.INFERENCE, True, "inference_inputs_required", id="inference-missing"
+        ),
+        pytest.param(
+            (
+                ClaimEvidenceCitation(
+                    evidence_record_id=UUID(int=82),
+                    passage_identities=("osv:affected",),
+                    relationship=EvidenceRelationship.SUPPORTS,
+                ),
+            ),
+            ClaimKind.FACT,
+            True,
+            "unknown_evidence_record",
+            id="outside-exposure",
+        ),
+        *(
+            pytest.param(
+                (
+                    ClaimEvidenceCitation(
+                        evidence_record_id=EVIDENCE_ID,
+                        passage_identities=passages,
+                        relationship=EvidenceRelationship.SUPPORTS,
+                    ),
+                ),
+                ClaimKind.FACT,
+                True,
+                "unknown_evidence_passage",
+                id=case,
+            )
+            for case, passages in (
+                ("nonexistent-passage", ("osv:missing",)),
+                ("nonretrieved-passage", ("osv:not-retrieved",)),
+                ("empty-passages", ()),
+                ("partly-nonretrieved-passages", ("osv:affected", "osv:not-retrieved")),
+            )
+        ),
+    ],
+)
+async def test_claim_without_valid_citations_persists_an_explicit_incomplete_revision(
+    citations: tuple[ClaimEvidenceCitation, ...],
+    kind: ClaimKind,
+    material: bool,
+    expected_issue: str,
+) -> None:
+    draft = _supported_draft()
+    draft = replace(
+        draft,
+        claims=(
+            replace(
+                draft.claims[0],
+                kind=kind,
+                material=material,
+                limitation="Static evidence cannot establish runtime reachability.",
+                citations=citations,
+            ),
+        ),
+    )
+    history = InMemoryRevisionHistory()
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=UnretrievedPassageEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(draft),
+        revision_history=history,
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert history.revisions == [revision]
+    assert revision.id == OPERATION_ID
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "generation_invalid_structured_output"
+    assert revision.stopping_reason is not None
+    assert "citations" in revision.stopping_reason
+    assert revision.claims == ()
+    assert revision.evidence_state.material_claims_supported is False
+    assert f"claim-affected:{expected_issue}" in revision.evidence_state.validation_issues
+    assert (
+        "claim-affected:claim_rejected_no_valid_citations"
+        in revision.evidence_state.validation_issues
+    )
+    assert revision.recommendation.recommendation is Recommendation.MORE_EVIDENCE_REQUIRED
+    assert revision.recommendation.accepted is False
+    assert revision.recommendation.reason == "generation_invalid_structured_output"
+    assert "claim-affected:claim_rejected_no_valid_citations" in revision.recommendation.reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "relationship", [EvidenceRelationship.SUPPORTS, EvidenceRelationship.CONTEXTUAL]
+)
+async def test_mixed_cited_and_uncited_claims_preserve_only_the_cited_claim(
+    relationship: EvidenceRelationship,
+) -> None:
+    draft = _supported_draft()
+    cited_claim = replace(
+        draft.claims[0],
+        citations=(replace(draft.claims[0].citations[0], relationship=relationship),),
+    )
+    draft = replace(
+        draft,
+        claims=(
+            cited_claim,
+            replace(cited_claim, identity="claim-uncited", citations=()),
+        ),
+    )
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(draft),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "generation_invalid_structured_output"
+    assert [claim.identity for claim in revision.claims] == ["claim-affected"]
+    assert revision.claims[0].citations[0].relationship is relationship
+    assert revision.claims[0].supported is (relationship is EvidenceRelationship.SUPPORTS)
+    assert revision.evidence_state.material_claims_supported is revision.claims[0].supported
+    assert (
+        "claim-uncited:claim_rejected_no_valid_citations"
+        in revision.evidence_state.validation_issues
+    )
+    assert revision.recommendation.recommendation is Recommendation.MORE_EVIDENCE_REQUIRED
+    assert revision.recommendation.accepted is False
+
+
+@pytest.mark.asyncio
+async def test_valid_citation_is_retained_when_another_citation_on_the_claim_is_invalid() -> None:
+    draft = _supported_draft()
+    valid_citation = draft.claims[0].citations[0]
+    draft = replace(
+        draft,
+        claims=(
+            replace(
+                draft.claims[0],
+                citations=(
+                    valid_citation,
+                    replace(valid_citation, passage_identities=("osv:not-retrieved",)),
+                ),
+            ),
+        ),
+    )
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=UnretrievedPassageEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(draft),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert revision.status is InvestigationRevisionStatus.COMPLETE
+    assert len(revision.claims) == 1
+    assert revision.claims[0].supported is True
+    assert len(revision.claims[0].citations) == 1
+    assert revision.claims[0].citations[0].passage_identities == ("osv:affected",)
+    assert revision.evidence_state.validation_issues == ("claim-affected:unknown_evidence_passage",)
+    assert revision.recommendation.recommendation is Recommendation.PLANNED_REMEDIATION
+    assert revision.recommendation.accepted is True
+
+
+@pytest.mark.asyncio
+async def test_uncited_claim_revision_retry_returns_the_same_durable_safe_outcome() -> None:
+    draft = _supported_draft()
+    draft = replace(draft, claims=(replace(draft.claims[0], citations=()),))
+    checkpointer = InMemorySaver()
+    history = InMemoryRevisionHistory()
+    acquirer = ControlledEvidenceAcquirer()
+    retriever = ControlledRetriever()
+    generator = ControlledGenerator(draft)
+    first = BoundedInvestigationRunner(
+        evidence_acquirer=acquirer,
+        retriever=retriever,
+        generator=generator,
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    revision = await first.run(_command())
+    retried = BoundedInvestigationRunner(
+        evidence_acquirer=acquirer,
+        retriever=retriever,
+        generator=generator,
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    assert await retried.run(_command()) == revision
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.claims == ()
+    assert history.revisions == [revision]
+    assert acquirer.calls == retriever.calls == generator.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resume_delay", "stopping_condition", "reason_text"),
+    [
+        (1, "generation_invalid_structured_output", "citations"),
+        (121, "wall_time_budget_exhausted", "wall-time budget"),
+    ],
+)
+async def test_legacy_validated_checkpoint_recovers_without_persisting_uncited_claims(
+    resume_delay: int, stopping_condition: str, reason_text: str
+) -> None:
+    draft = _supported_draft()
+    draft = replace(draft, claims=(replace(draft.claims[0], citations=()),))
+    checkpointer = InMemorySaver()
+    history = InMemoryRevisionHistory()
+    acquirer = ControlledEvidenceAcquirer()
+    retriever = ControlledRetriever()
+    generator = ControlledGenerator(draft)
+    interrupted = InterruptedLegacyValidationRunner(
+        evidence_acquirer=acquirer,
+        retriever=retriever,
+        generator=generator,
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(RuntimeError, match="before legacy Revision persistence"):
+        await interrupted.run(_command())
+
+    checkpoint = await checkpointer.aget_tuple({"configurable": {"thread_id": str(OPERATION_ID)}})
+    assert checkpoint is not None
+    saved_state = checkpoint.checkpoint["channel_values"]
+    assert saved_state["status"] is InvestigationRevisionStatus.COMPLETE
+    assert saved_state["stopping_condition"] is InvestigationStoppingCondition.COMPLETED
+    assert not saved_state["validation"].claims[0].citations
+    assert history.revisions == []
+
+    resumed = BoundedInvestigationRunner(
+        evidence_acquirer=acquirer,
+        retriever=retriever,
+        generator=generator,
+        revision_history=history,
+        checkpointer=checkpointer,
+        clock=lambda: NOW + timedelta(seconds=resume_delay),
+    )
+    revision = await resumed.run(_command())
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == stopping_condition
+    assert revision.stopping_reason is not None
+    assert reason_text in revision.stopping_reason
+    assert revision.claims == ()
+    assert revision.recommendation.recommendation is Recommendation.MORE_EVIDENCE_REQUIRED
+    assert revision.recommendation.accepted is False
+    assert revision.recommendation.reason == stopping_condition
+    assert "claim-affected:claim_evidence_required" in revision.evidence_state.validation_issues
+    assert (
+        "claim-affected:claim_rejected_no_valid_citations"
+        in revision.evidence_state.validation_issues
+    )
+    assert await resumed.run(_command()) == revision
+    assert history.revisions == [revision]
+    assert acquirer.calls == retriever.calls == generator.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_evidence_gap_without_a_follow_up_remains_visible() -> None:
     draft = replace(
         _supported_draft(),
@@ -860,6 +1167,41 @@ async def test_unsafe_structured_operation_is_blocked_before_revision_completion
     assert revision.output_policy_decision.result is PolicyResult.BLOCKED
     assert revision.recommendation.recommendation is Recommendation.MORE_EVIDENCE_REQUIRED
     assert revision.recommendation.accepted is False
+
+
+@pytest.mark.asyncio
+async def test_policy_blocked_uncited_claim_keeps_the_primary_policy_explanation() -> None:
+    draft = _supported_draft()
+    draft = replace(
+        draft,
+        operation=AssessmentOperation.GENERATE_EXPLOIT,
+        claims=(replace(draft.claims[0], citations=()),),
+    )
+    runner = BoundedInvestigationRunner(
+        evidence_acquirer=ControlledEvidenceAcquirer(),
+        retriever=ControlledRetriever(),
+        generator=ControlledGenerator(draft),
+        revision_history=InMemoryRevisionHistory(),
+        clock=lambda: NOW,
+    )
+
+    revision = await runner.run(_command())
+
+    assert revision.status is InvestigationRevisionStatus.INCOMPLETE
+    assert revision.stopping_condition == "structured_output_policy_blocked"
+    assert revision.stopping_reason is not None
+    assert "Cyber Policy" in revision.stopping_reason
+    assert revision.output_policy_decision.result is PolicyResult.BLOCKED
+    assert revision.claims == ()
+    assert revision.recommendation.recommendation is Recommendation.MORE_EVIDENCE_REQUIRED
+    assert revision.recommendation.accepted is False
+    assert revision.recommendation.reason == "structured_output_policy_blocked"
+    assert "Cyber Policy" in revision.recommendation.summary
+    assert (
+        "claim-affected:claim_rejected_no_valid_citations"
+        in revision.evidence_state.validation_issues
+    )
+    assert "claim-affected:claim_rejected_no_valid_citations" in revision.recommendation.reasons
 
 
 @pytest.mark.asyncio

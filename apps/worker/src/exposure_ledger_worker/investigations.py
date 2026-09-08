@@ -594,13 +594,25 @@ class BoundedInvestigationRunner:
         available = _retrieved_evidence_scope(
             retrieved, exposure.evidence if exposure is not None else ()
         )
-        updates["validation"] = ClaimValidator.validate(
+        validation = ClaimValidator.validate(
             claims=draft.claims if draft is not None else (),
             available_evidence=available,
             authoritative_conflict=(
                 exposure.authoritative_conflict if exposure is not None else False
             ),
         )
+        updates["validation"] = validation
+        if (
+            validation.has_uncited_claims
+            and updates.get("status", state["status"]) is InvestigationRevisionStatus.COMPLETE
+        ):
+            updates.update(
+                status=InvestigationRevisionStatus.INCOMPLETE,
+                stopping_condition=(
+                    InvestigationStoppingCondition.GENERATION_INVALID_STRUCTURED_OUTPUT
+                ),
+                stopping_reason=_INVALID_CITATION_STOPPING_REASON,
+            )
         return updates
 
     def _recommend(self, state: _GraphState) -> dict[str, object]:
@@ -626,7 +638,7 @@ class BoundedInvestigationRunner:
         reasons = (
             draft.recommendation_reasons
             if draft is not None and accepted
-            else tuple(dict.fromkeys((reason, *validation.issues)))
+            else tuple(dict.fromkeys((reason, *validation.bounded_issues)))
         )
         updates["recommendation"] = RevisionRecommendation(
             recommendation=recommendation,
@@ -666,6 +678,9 @@ class BoundedInvestigationRunner:
             updates["stopping_condition"] = (
                 InvestigationStoppingCondition.STRUCTURED_OUTPUT_POLICY_BLOCKED
             )
+            updates["stopping_reason"] = _stopping_reason(
+                InvestigationStoppingCondition.STRUCTURED_OUTPUT_POLICY_BLOCKED
+            )
             updates["recommendation"] = replace(
                 state["recommendation"],
                 recommendation=Recommendation.MORE_EVIDENCE_REQUIRED,
@@ -702,7 +717,36 @@ class BoundedInvestigationRunner:
             InvestigationStoppingCondition,
             updates.get("stopping_condition", state["stopping_condition"]),
         )
+        stopping_reason = (
+            state.get("stopping_reason")
+            if stopping_condition == state["stopping_condition"]
+            else None
+        )
+        claims = validation.cited_claims
+        validation_issues = validation.bounded_issues
         recommendation = state["recommendation"]
+        # A restored checkpoint may have passed validation under an older worker.
+        # Enforce the same safe outcome at the immutable Revision boundary as well.
+        if validation.has_uncited_claims:
+            status = InvestigationRevisionStatus.INCOMPLETE
+            if stopping_condition is InvestigationStoppingCondition.COMPLETED:
+                stopping_condition = (
+                    InvestigationStoppingCondition.GENERATION_INVALID_STRUCTURED_OUTPUT
+                )
+                stopping_reason = _INVALID_CITATION_STOPPING_REASON
+            recommendation = replace(
+                recommendation,
+                recommendation=Recommendation.MORE_EVIDENCE_REQUIRED,
+                accepted=False,
+                reason=stopping_condition,
+                summary=(
+                    "More evidence is required because proposed Claims lacked valid citations."
+                    if stopping_condition
+                    is InvestigationStoppingCondition.GENERATION_INVALID_STRUCTURED_OUTPUT
+                    else recommendation.summary
+                ),
+                reasons=tuple(dict.fromkeys((stopping_condition, *validation_issues))),
+            )
         if status is InvestigationRevisionStatus.INCOMPLETE and recommendation.accepted:
             recommendation = replace(
                 recommendation,
@@ -725,13 +769,15 @@ class BoundedInvestigationRunner:
             evidence_state=InvestigationEvidenceState(
                 available=(state["exposure"].evidence if "exposure" in state else ()),
                 retrieved=state["retrieved"],
-                material_claims_supported=validation.material_claims_supported,
+                # This aggregate describes the retained Claims; the incomplete outcome
+                # separately prevents acceptance of a partially rejected model proposal.
+                material_claims_supported=bool(claims) and all(claim.supported for claim in claims),
                 authoritative_conflict=(
                     validation.authoritative_conflict if "exposure" in state else None
                 ),
-                validation_issues=validation.issues,
+                validation_issues=validation_issues,
             ),
-            claims=validation.claims,
+            claims=claims,
             recommendation=recommendation,
             output_policy_decision=state["policy_decision"],
             evidence_gap=state.get("evidence_gap"),
@@ -739,7 +785,7 @@ class BoundedInvestigationRunner:
             stopping_reason=(
                 None
                 if status is InvestigationRevisionStatus.COMPLETE
-                else state.get("stopping_reason") or _stopping_reason(stopping_condition)
+                else stopping_reason or _stopping_reason(stopping_condition)
             ),
             events=events,
             measurements=InvestigationMeasurements(
@@ -757,6 +803,13 @@ class BoundedInvestigationRunner:
         )
         persisted = self._revision_history.append(revision)
         return {**updates, "revision": persisted}
+
+
+_INVALID_CITATION_STOPPING_REASON = (
+    "One or more proposed Claims had no valid citations to retrieved Exposure evidence. "
+    "Those Claims were omitted; their identities and validation reasons remain in "
+    "the evidence state."
+)
 
 
 def _retrieved_evidence_scope(
@@ -857,6 +910,9 @@ def _stopping_reason(
         ),
         InvestigationStoppingCondition.FOLLOW_UP_INVALID: (
             "The proposed Evidence Gap follow-up failed deterministic validation."
+        ),
+        InvestigationStoppingCondition.STRUCTURED_OUTPUT_POLICY_BLOCKED: (
+            "Structured model output was blocked by the Cyber Policy."
         ),
         InvestigationStoppingCondition.FOLLOW_UP_POLICY_BLOCKED: (
             "The proposed Evidence Gap follow-up was blocked by the Cyber Policy."

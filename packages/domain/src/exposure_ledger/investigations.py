@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import Literal
 from uuid import UUID
 
@@ -24,6 +25,20 @@ from exposure_ledger.evidence import EvidenceRelationship
 from exposure_ledger.recommendations import Recommendation
 
 _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+_MAX_DIAGNOSTIC_CLAIMS = 20
+_MAX_DIAGNOSTIC_IDENTITY_LENGTH = 100
+_CLAIM_VALIDATION_ISSUE_CODES = frozenset(
+    {
+        "identity_not_unique",
+        "atomic_text_invalid",
+        "unknown_evidence_record",
+        "unknown_evidence_passage",
+        "inference_limitation_required",
+        "inference_inputs_required",
+        "claim_evidence_required",
+        "material_claim_missing_support",
+    }
+)
 
 
 class ClaimKind(StrEnum):
@@ -83,6 +98,52 @@ class ClaimValidation:
     material_claims_supported: bool
     authoritative_conflict: bool
     issues: tuple[str, ...]
+
+    @property
+    def cited_claims(self) -> tuple[Claim, ...]:
+        """Claims eligible for history, including cited but unsupported Claims."""
+        return tuple(claim for claim in self.claims if claim.citations)
+
+    @property
+    def has_uncited_claims(self) -> bool:
+        return any(not claim.citations for claim in self.claims)
+
+    @property
+    def bounded_issues(self) -> tuple[str, ...]:
+        """Bound diagnostics at sealing, including those restored from older checkpoints.
+
+        The generation contract permits 20 Claims with 100-character identities. Preserve
+        each such identity, at most one of each fixed reason per identity, and an explicit
+        rejection marker for uncited Claims. Invalid identity strings are represented by a
+        stable digest; Claim text and citation payloads never enter these diagnostics.
+        """
+        claims = self.claims[:_MAX_DIAGNOSTIC_CLAIMS]
+        by_identity: dict[str, dict[str, None]] = {
+            claim.identity or "<blank>": {} for claim in claims
+        }
+        omitted = len(self.claims) > _MAX_DIAGNOSTIC_CLAIMS
+        for issue in self.issues:
+            identity, separator, reason = issue.rpartition(":")
+            reasons = by_identity.get(identity)
+            if not separator or reasons is None or reason not in _CLAIM_VALIDATION_ISSUE_CODES:
+                omitted = True
+                continue
+            reasons[reason] = None
+        for claim in claims:
+            if not claim.citations:
+                by_identity[claim.identity or "<blank>"]["claim_rejected_no_valid_citations"] = None
+        diagnostics = tuple(
+            f"{_diagnostic_claim_identity(identity)}:{reason}"
+            for identity, reasons in by_identity.items()
+            for reason in reasons
+        )
+        return (*diagnostics, "claim_validation_diagnostics_truncated") if omitted else diagnostics
+
+
+def _diagnostic_claim_identity(identity: str) -> str:
+    if len(identity) <= _MAX_DIAGNOSTIC_IDENTITY_LENGTH and identity.isprintable():
+        return identity
+    return "sha256:" + sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 class ClaimValidator:
