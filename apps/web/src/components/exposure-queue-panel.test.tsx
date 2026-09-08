@@ -1,9 +1,159 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
+import type { Exposure, SourceObservationState } from "../lib/exposures"
 import { ExposureQueuePanel } from "./exposure-queue-panel"
 
+function exposureWith(overrides: Partial<Exposure> = {}): Exposure {
+  return {
+    id: "exposure-1",
+    assessmentRunId: "assessment-1",
+    assetSnapshotId: "snapshot-1",
+    vulnerabilityRecord: { id: "vulnerability-1", aliases: ["CVE-2026-4000"] },
+    package: {
+      name: "example-package",
+      version: "1.0.0",
+      direct: null,
+      source: { manifest: "requirements.txt" },
+      dependencyPaths: null,
+    },
+    rank: 6,
+    selectedForInvestigation: false,
+    authoritativeConflict: false,
+    kev: { state: "not_collected", listed: null, observedAt: null, detail: null },
+    epss: {
+      state: "not_collected",
+      score: null,
+      percentile: null,
+      observedAt: null,
+      detail: null,
+    },
+    ranking: {
+      severity: "unknown",
+      directDependency: null,
+      dependencyDepth: null,
+      fixedVersionAvailable: false,
+      score: 0,
+    },
+    evidenceRecords: [],
+    ...overrides,
+  }
+}
+
+function renderExposure(overrides: Partial<Exposure> = {}): string {
+  return renderToStaticMarkup(
+    <ExposureQueuePanel error={null} exposures={[exposureWith(overrides)]} />,
+  )
+}
+
 describe("ExposureQueuePanel", () => {
+  it("does not imply that an unselected Exposure will be processed later", () => {
+    const html = renderExposure()
+
+    expect(html).toContain("Not selected for Investigation")
+    expect(html).not.toContain("Queued after top five")
+  })
+
+  it.each([null, [], [[]]])("keeps absent Dependency Paths unknown: %j", (dependencyPaths) => {
+    const html = renderExposure({
+      package: { ...exposureWith().package, dependencyPaths },
+    })
+
+    expect(html).toContain("Dependency paths unknown for this manifest")
+    expect(html).not.toContain("example-package →")
+  })
+
+  it.each<{ state: SourceObservationState; label: string }>([
+    { state: "available", label: "KEV value missing" },
+    { state: "stale", label: "Stale observation" },
+    { state: "missing", label: "KEV evidence missing" },
+    { state: "malformed", label: "KEV response malformed" },
+    { state: "unavailable", label: "KEV Source unavailable" },
+    { state: "not_collected", label: "KEV not collected" },
+  ])("shows unknown KEV with its $state state", ({ state, label }) => {
+    const html = renderExposure({
+      kev: { state, listed: null, observedAt: null, detail: "Source observation detail" },
+    })
+
+    expect(html).toContain(">Unknown</div>")
+    expect(html).toContain(label)
+    expect(html).toContain("Source observation detail")
+    expect(html).not.toContain("Not listed")
+    expect(html).not.toContain("Current observation")
+  })
+
+  it.each([true, false])("distinguishes current and stale KEV listed=%s", (listed) => {
+    const kev = {
+      listed,
+      observedAt: "2026-08-01T00:00:00Z",
+      detail: null,
+    }
+    const current = renderExposure({ kev: { ...kev, state: "available" } })
+    const stale = renderExposure({ kev: { ...kev, state: "stale" } })
+    const value = listed ? "Listed" : "Not listed"
+
+    expect(current).toContain(`>${value}</div>`)
+    expect(current).toContain("Current observation")
+    expect(current).not.toContain("Last observed:")
+    expect(stale).toContain(`Last observed: ${value}`)
+    expect(stale).toContain("Stale observation")
+    expect(stale).toContain("Observed 2026-08-01T00:00:00Z")
+    expect(stale).not.toContain("Current observation")
+  })
+
+  it("does not turn values attached to an unavailable Source into current observations", () => {
+    const html = renderExposure({
+      kev: { state: "unavailable", listed: false, observedAt: null, detail: null },
+      epss: {
+        state: "unavailable",
+        score: 0,
+        percentile: 0,
+        observedAt: null,
+        detail: null,
+      },
+    })
+
+    expect(html.match(/>Unknown<\/div>/g)).toHaveLength(2)
+    expect(html).toContain("KEV Source unavailable")
+    expect(html).toContain("EPSS Source unavailable")
+    expect(html).not.toContain("Not listed")
+    expect(html).not.toContain("0.0% probability")
+    expect(html).not.toContain("Current observation")
+  })
+
+  it.each([
+    { score: null, percentile: 0.97 },
+    { score: 0.42, percentile: null },
+    { score: null, percentile: null },
+  ])("keeps incomplete available EPSS unknown: %j", ({ score, percentile }) => {
+    const html = renderExposure({
+      epss: { state: "available", score, percentile, observedAt: null, detail: null },
+    })
+
+    expect(html).toContain(">Unknown</div>")
+    expect(html).toContain("EPSS value missing")
+    expect(html).not.toContain("% probability")
+    expect(html).not.toContain("Current observation")
+  })
+
+  it("preserves a current zero EPSS score and labels a stale score as last observed", () => {
+    const epss = {
+      score: 0,
+      percentile: 0,
+      observedAt: "2026-08-01T00:00:00Z",
+      detail: null,
+    }
+    const current = renderExposure({ epss: { ...epss, state: "available" } })
+    const stale = renderExposure({ epss: { ...epss, state: "stale" } })
+
+    expect(current).toContain(">0.0% probability · 0th percentile</div>")
+    expect(current).toContain("Current observation")
+    expect(stale).toContain("Last observed: 0.0% probability · 0th percentile")
+    expect(stale).toContain("Stale observation")
+    expect(stale).toContain("Observed 2026-08-01T00:00:00Z")
+    expect(stale).not.toContain("Current observation")
+  })
+
   it("explains deterministic package-specific ranks and Investigation selection", () => {
     const sharedVulnerability = {
       id: "a09718cb-dbc7-42ec-af07-47bca728617f",

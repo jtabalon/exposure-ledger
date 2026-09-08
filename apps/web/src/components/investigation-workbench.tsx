@@ -6,7 +6,6 @@ import {
   ArrowRight,
   BookOpenText,
   Bot,
-  Check,
   CheckCircle2,
   ChevronRight,
   CircleDot,
@@ -35,7 +34,12 @@ import { AssetSnapshotPanel } from "@/components/asset-snapshot-panel"
 import { ExposureQueuePanel } from "@/components/exposure-queue-panel"
 import type { AssessmentRun, PolicyDecision } from "@/lib/assessment-runs"
 import type { AssetSnapshot } from "@/lib/asset-snapshots"
-import type { Exposure } from "@/lib/exposures"
+import type { EpssSignal, Exposure, KevSignal } from "@/lib/exposures"
+import {
+  epssObservationValue,
+  kevObservationValue,
+  sourceObservationLabel,
+} from "@/lib/source-observations"
 import {
   claimsForEvidence,
   evidenceForClaim,
@@ -43,10 +47,11 @@ import {
   relationshipsForClaim,
 } from "@/lib/evidence"
 import type {
-  DemoInvestigation,
+  InvestigationConfiguration,
+  WorkbenchInvestigation,
   EvidenceRelationship,
   InvestigationStage,
-} from "@/lib/demo-investigation"
+} from "@/lib/workbench-investigation"
 import type {
   Disposition,
   DispositionActionState,
@@ -120,6 +125,63 @@ function FactRow({ label, value }: { label: string; value: ReactNode }) {
       <dt className="text-xs text-muted-foreground">{label}</dt>
       <dd className="text-sm leading-5 font-medium text-foreground">{value}</dd>
     </div>
+  )
+}
+
+function SourceObservation({ observation }: { observation: KevSignal | EpssSignal }) {
+  const isKev = "listed" in observation
+  const hasValue = isKev
+    ? observation.listed !== null
+    : observation.score !== null && observation.percentile !== null
+
+  return (
+    <div>
+      <span>{isKev ? kevObservationValue(observation) : epssObservationValue(observation)}</span>
+      <span className="mt-1 block text-xs text-muted-foreground">
+        {sourceObservationLabel(isKev ? "KEV" : "EPSS", observation.state, hasValue)}
+      </span>
+      {observation.observedAt ? (
+        <time dateTime={observation.observedAt} className="mt-1 block font-mono text-[10px]">
+          Observed {observation.observedAt}
+        </time>
+      ) : null}
+      {observation.detail ? (
+        <span className="mt-1 block text-xs text-muted-foreground">{observation.detail}</span>
+      ) : null}
+    </div>
+  )
+}
+
+function RevisionConfiguration({ configuration }: { configuration: InvestigationConfiguration }) {
+  const fields = [
+    ["Application", configuration.applicationRelease],
+    ["Graph", configuration.graphVersion],
+    ["Prompt", configuration.promptVersion],
+    ["Policy", configuration.policyVersion],
+    ["Parser", configuration.parserVersion],
+    ["Retrieval", configuration.retrievalConfigurationVersion],
+    ["Source policy", configuration.sourcePolicyVersion],
+    ["Source adapters", configuration.sourceAdapterVersions.join(", ") || "None recorded"],
+    ["Generation provider", configuration.generationModel.provider],
+    ["Generation artifact", configuration.generationModel.modelArtifact],
+    ["Generation digest", configuration.generationModel.artifactDigest],
+    ["Embedding Space", configuration.embeddingSpace.identity],
+  ]
+
+  return (
+    <details className="min-w-0" aria-label="Revision configuration">
+      <summary className="cursor-pointer font-medium text-foreground">
+        Revision configuration
+      </summary>
+      <dl className="mt-3 grid gap-x-4 gap-y-2 sm:grid-cols-[120px_1fr]">
+        {fields.map(([label, value]) => (
+          <div key={label} className="contents">
+            <dt>{label}</dt>
+            <dd className="break-all font-mono">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
   )
 }
 
@@ -411,7 +473,7 @@ export function InvestigationWorkbench({
   dispositionWritesEnabled,
   recordDispositionAction,
 }: {
-  investigation: DemoInvestigation
+  investigation: WorkbenchInvestigation
   assessmentRuns: AssessmentRun[]
   assessmentRunsError: string | null
   assetSnapshots: AssetSnapshot[]
@@ -517,7 +579,7 @@ export function InvestigationWorkbench({
               Local inference
             </div>
             <div className="space-y-1 font-mono text-[10px] leading-4 text-stone-500">
-              <div>gpt-oss:20b</div>
+              <div>{investigation.configuration.generationModel.modelArtifact}</div>
               <div>{investigation.retrieval.embeddingSpace.modelArtifact}</div>
               <div>PostgreSQL hybrid retrieval</div>
             </div>
@@ -568,6 +630,11 @@ export function InvestigationWorkbench({
                     <TriangleAlert className="size-3" aria-hidden="true" />
                     {investigation.recommendation.label}
                   </Badge>
+                  {!investigation.recommendation.accepted ? (
+                    <Badge variant="outline" className="border-red-700/30 bg-red-700/7 text-red-800">
+                      Recommendation not accepted
+                    </Badge>
+                  ) : null}
                   <Badge variant="outline" className="bg-card font-mono">
                     {investigation.exposure.vulnerability}
                   </Badge>
@@ -751,10 +818,13 @@ export function InvestigationWorkbench({
                   }
                 />
                 <FactRow label="Dependency" value={investigation.exposure.dependencyType} />
-                <FactRow label="KEV" value={investigation.exposure.kev ? "Listed" : "Not listed"} />
+                <FactRow
+                  label="KEV"
+                  value={<SourceObservation observation={investigation.exposure.kev} />}
+                />
                 <FactRow
                   label="EPSS"
-                  value={`${investigation.exposure.epssPercentile} percentile`}
+                  value={<SourceObservation observation={investigation.exposure.epss} />}
                 />
                 <FactRow label="CVSS" value={investigation.exposure.cvss} />
               </dl>
@@ -797,54 +867,87 @@ export function InvestigationWorkbench({
             <div className="mt-6">
               <SectionLabel>
                 <GitBranch className="size-3.5" aria-hidden="true" />
-                Dependency path
+                Dependency Paths
               </SectionLabel>
-              <ol className="space-y-0">
-                {investigation.exposure.dependencyPath.map((dependency, index) => (
-                  <li
-                    key={dependency}
-                    className="relative flex items-center gap-3 pb-3 last:pb-0"
-                  >
-                    {index < investigation.exposure.dependencyPath.length - 1 ? (
-                      <span
-                        className="absolute top-5 left-[7px] h-[calc(100%-12px)] w-px bg-border"
-                        aria-hidden="true"
-                      />
-                    ) : null}
-                    <span
-                      className="z-10 size-3.5 rounded-full border-2 border-card bg-primary/45"
-                      aria-hidden="true"
-                    />
-                    <span
-                      className={cn(
-                        "font-mono text-xs",
-                        index === investigation.exposure.dependencyPath.length - 1 &&
-                          "font-semibold text-primary",
-                      )}
-                    >
-                      {dependency}
-                    </span>
-                  </li>
-                ))}
-              </ol>
+              {investigation.exposure.dependencyPaths?.some((path) => path.length > 0) ? (
+                <div className="space-y-4">
+                  {investigation.exposure.dependencyPaths.map((path, pathIndex) => (
+                    <ol key={pathIndex} aria-label={`Dependency Path ${pathIndex + 1}`}>
+                      {path.map((dependency, index) => (
+                        <li
+                          key={`${index}-${dependency}`}
+                          className="relative flex items-center gap-3 pb-3 last:pb-0"
+                        >
+                          {index < path.length - 1 ? (
+                            <span
+                              className="absolute top-5 left-[7px] h-[calc(100%-12px)] w-px bg-border"
+                              aria-hidden="true"
+                            />
+                          ) : null}
+                          <span
+                            className="z-10 size-3.5 rounded-full border-2 border-card bg-primary/45"
+                            aria-hidden="true"
+                          />
+                          <span
+                            className={cn(
+                              "font-mono text-xs",
+                              index === path.length - 1 && "font-semibold text-primary",
+                            )}
+                          >
+                            {dependency}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">Dependency Paths unknown</p>
+              )}
             </div>
 
             <div className="mt-6 border-l-2 border-[var(--urgent)] bg-[var(--urgent-soft)] p-4">
               <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-[var(--urgent)]">
                 <ClipboardCheck className="size-4" aria-hidden="true" />
-                Recommended action
+                Effective Recommendation
+              </div>
+              <p className="mb-2 text-sm font-semibold">{investigation.recommendation.label}</p>
+              <div
+                role="status"
+                className={cn(
+                  "mb-3 border-l-2 p-3 text-xs leading-5",
+                  investigation.recommendation.accepted
+                    ? "border-primary/30 bg-primary/5"
+                    : "border-red-700 bg-red-700/7 text-red-950",
+                )}
+              >
+                <p className="font-semibold">
+                  {investigation.recommendation.accepted
+                    ? "Recommendation accepted by validation"
+                    : "Recommendation not accepted; effective value shown above"}
+                </p>
+                <p className="mt-1 break-words">{investigation.recommendation.reason}</p>
               </div>
               <p className="text-sm leading-6 text-[var(--ink-soft)]">
                 {investigation.recommendation.summary}
               </p>
               <ul className="mt-3 space-y-2">
                 {investigation.recommendation.reasons.map((reason) => (
-                  <li key={reason} className="flex gap-2 text-xs leading-5 text-muted-foreground">
-                    <Check className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden="true" />
+                  <li key={reason} className="text-xs leading-5 text-muted-foreground">
                     {reason}
                   </li>
                 ))}
               </ul>
+              {investigation.recommendation.limitations.length > 0 ? (
+                <div className="mt-3 border-t pt-3">
+                  <p className="text-xs font-semibold">Recommendation limitations</p>
+                  <ul className="mt-2 space-y-2 text-xs leading-5 text-muted-foreground">
+                    {investigation.recommendation.limitations.map((limitation) => (
+                      <li key={limitation}>{limitation}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
 
             <div className="mt-6 rounded-md border bg-muted/45 p-3">
@@ -871,7 +974,7 @@ export function InvestigationWorkbench({
                   Atomic claims
                 </SectionLabel>
                 <h2 id="claims-heading" className="text-lg font-semibold tracking-tight">
-                  What the evidence supports
+                  Claims and validation
                 </h2>
               </div>
               <span className="font-mono text-xs text-muted-foreground">
@@ -879,13 +982,31 @@ export function InvestigationWorkbench({
               </span>
             </div>
 
+            <div className="mb-4 space-y-2 text-xs leading-5 text-muted-foreground">
+              <p>
+                Support status is recorded by deterministic validation. It does not establish that
+                evidence entails a Claim or that a human verified it.
+              </p>
+              <p className="font-semibold text-foreground">
+                {investigation.validation.materialClaimsSupported
+                  ? "Claim support requirements satisfied"
+                  : "Claim support requirements not satisfied"}
+              </p>
+              {investigation.validation.validationIssues.length > 0 ? (
+                <ul aria-label="Claim validation diagnostics" className="space-y-1 text-red-800">
+                  {investigation.validation.validationIssues.map((issue, index) => (
+                    <li key={`${index}-${issue}`} className="break-words">{issue}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+
             <div className="space-y-2" aria-label="Investigation claims">
               {investigation.claims.length === 0 ? (
                 <div role="status" className="border-l-2 border-amber-600 bg-amber-600/8 p-4">
-                  <p className="text-sm font-semibold">No validated Claims were retained.</p>
+                  <p className="text-sm font-semibold">No Claims were retained.</p>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                    This incomplete Revision preserves the stopping condition and evidence state
-                    without inventing a conclusion.
+                    This Revision preserves its evidence state without inventing a conclusion.
                   </p>
                 </div>
               ) : null}
@@ -898,6 +1019,7 @@ export function InvestigationWorkbench({
                     key={claim.id}
                     type="button"
                     aria-pressed={selected}
+                    aria-controls="evidence-trace"
                     onClick={() => selectClaim(claim.id)}
                     className={cn(
                       "group w-full rounded-md border p-4 text-left transition-[background-color,border-color,transform] duration-150 ease-out focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
@@ -906,10 +1028,11 @@ export function InvestigationWorkbench({
                         : linkedToSelectedEvidence
                           ? "border-primary/30 bg-primary/5 ring-2 ring-primary/10"
                         : "bg-card hover:-translate-y-px hover:border-primary/20 hover:bg-muted/30",
+                      !claim.supported && "border-red-700/45 bg-red-700/5",
                     )}
                   >
                     <div className="mb-2 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span
                           className={cn(
                             "grid size-6 place-items-center rounded-sm font-mono text-[10px] font-bold",
@@ -930,6 +1053,24 @@ export function InvestigationWorkbench({
                         >
                           {claim.kind}
                         </Badge>
+                        <Badge
+                          variant="outline"
+                          aria-label={`Claim validation: ${claim.supported ? "Support requirements met" : "Unsupported Claim"}`}
+                          className={cn(
+                            "h-5 text-[9px]",
+                            claim.supported
+                              ? "border-primary/25 text-primary"
+                              : "border-red-700 bg-red-700 text-white",
+                          )}
+                        >
+                          {!claim.supported ? (
+                            <TriangleAlert className="size-3" aria-hidden="true" />
+                          ) : null}
+                          {claim.supported ? "Support requirements met" : "Unsupported Claim"}
+                        </Badge>
+                        <span className="text-[10px] text-muted-foreground">
+                          {claim.material ? "Material" : "Non-material"}
+                        </span>
                       </div>
                       <span className="font-mono text-[10px] text-muted-foreground">
                         {evidenceCount} evidence record{evidenceCount === 1 ? "" : "s"}
@@ -948,6 +1089,7 @@ export function InvestigationWorkbench({
           </section>
 
           <section
+            id="evidence-trace"
             aria-labelledby="evidence-heading"
             className="min-w-0 bg-[oklch(0.986_0.005_86)] p-5 lg:p-6"
           >
@@ -957,7 +1099,7 @@ export function InvestigationWorkbench({
                   <Database className="size-3.5" aria-hidden="true" />
                   Evidence trace
                 </SectionLabel>
-                <h2 id="evidence-heading" className="text-lg font-semibold tracking-tight">
+                <h2 id="evidence-heading" aria-live="polite" className="text-lg font-semibold tracking-tight">
                   {selectedClaim
                     ? `Evidence used by ${selectedClaim.label}`
                     : "Evidence available to this Revision"}
@@ -1122,6 +1264,9 @@ export function InvestigationWorkbench({
                               key={claimId}
                               type="button"
                               onClick={() => selectClaim(claimId)}
+                              aria-label={`Review ${claim.label}: ${claim.supported ? "Support requirements met" : "Unsupported Claim"}`}
+                              aria-controls="evidence-trace"
+                              aria-pressed={claimId === selectedClaimId}
                               className={cn(
                                 "rounded-sm border px-1.5 py-0.5 font-mono font-semibold transition-colors hover:border-primary/40 hover:text-primary",
                                 claimId === selectedClaimId &&
@@ -1146,16 +1291,13 @@ export function InvestigationWorkbench({
           </section>
         </div>
 
-        <footer className="mx-auto flex max-w-[1600px] flex-col gap-2 border-x border-b bg-card px-5 py-4 text-[10px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between lg:px-6">
+        <footer className="mx-auto flex max-w-[1600px] flex-col gap-3 border-x border-b bg-card px-5 py-4 text-[10px] text-muted-foreground lg:px-6">
           <span>
             {investigation.meta.mode === "live"
               ? "This Revision was generated by the local Investigation runner."
               : "This screen contains synthetic data for interface evaluation."}
           </span>
-          <span className="font-mono">
-            graph v0.1 · policy v0.1 · prompt demo-001 · retrieval{" "}
-            {investigation.retrieval.configurationVersion}
-          </span>
+          <RevisionConfiguration configuration={investigation.configuration} />
         </footer>
       </main>
     </div>

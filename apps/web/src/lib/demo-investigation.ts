@@ -1,124 +1,45 @@
-import type { EvidenceRelationship } from "./evidence"
+import type {
+  InvestigationConfiguration,
+  WorkbenchInvestigation,
+} from "./workbench-investigation"
 
-export type ClaimKind = "fact" | "inference"
-export type { EvidenceRelationship } from "./evidence"
+export type {
+  ClaimKind,
+  EvidenceRelationship,
+  InvestigationClaim,
+  InvestigationStage,
+  WorkbenchEvidenceRecord as DemoEvidenceRecord,
+  WorkbenchInvestigation as DemoInvestigation,
+} from "./workbench-investigation"
 
-export type InvestigationClaim = {
-  id: string
-  label: string
-  kind: ClaimKind
-  text: string
-  limitation?: string
+const demoConfiguration: InvestigationConfiguration = {
+  applicationRelease: "synthetic-demo",
+  graphVersion: "demo-graph-0.1",
+  promptVersion: "demo-001",
+  policyVersion: "demo-policy-0.1",
+  parserVersion: "demo-parser-001",
+  retrievalConfigurationVersion: "postgres-hybrid-rrf-v1",
+  sourcePolicyVersion: "explicit-source-allowlist-v1",
+  sourceAdapterVersions: ["synthetic-advisories-v1", "synthetic-kev-v1", "synthetic-epss-v1"],
+  generationModel: {
+    provider: "synthetic",
+    modelArtifact: "precomputed-demo",
+    artifactDigest: "not-applicable-precomputed",
+  },
+  embeddingSpace: {
+    identity: "sha256:7eb54bd7f75166528a13264eec28f37aba439cd090aec84bb9a7f1d12f4736c1",
+    provider: "ollama-local",
+    modelArtifact: "qwen3-embedding:0.6b",
+    artifactDigest:
+      "sha256:84a319513af54a65d1ad379f244411b221a26b3477055f823cfef7743bcf4f9e",
+    dimensions: 1024,
+    retrievalInstruction: "Represent this cybersecurity query for evidence passage retrieval: ",
+    normalizer: "l2-v1",
+    passageConstructionVersion: "source-aware-passage-v1",
+  },
 }
 
-export type DemoEvidenceRecord = {
-  id: string
-  source: string
-  authority: string
-  capturedAt: string
-  relationships: { claimId: string; relationship: EvidenceRelationship }[]
-  passage: string
-  fullTextRank: number | null
-  fullTextScore: number | null
-  vectorRank: number | null
-  vectorScore: number | null
-  fusedRank: number
-  fusedScore: number
-  digest: string
-}
-
-export type InvestigationStage = {
-  label: string
-  mode: "deterministic" | "retrieval" | "model" | "policy"
-  detail: string
-}
-
-export type DemoInvestigation = {
-  stoppingReason?: string
-  evidenceGap?: {
-    identity: string
-    kind: string
-    description: string
-  }
-  followUp?: {
-    tool: string
-    target: string
-    sourceIdentity: string
-    evidenceType: string
-    proposedAssistanceClass: string
-    proposedActionLevel: string
-    authorized: boolean
-    executed: boolean
-    reason: string
-    issues: string[]
-    policyAssistanceClass: string
-    policyActionLevel: string
-    policyResult: string
-  }
-  meta: {
-    mode: "live" | "precomputed"
-    status: "complete" | "incomplete"
-    repository: string
-    commit: string
-    projectRoot: string
-    environment: string
-    revision: string
-    capturedAt: string
-  }
-  exposure: {
-    id: string
-    vulnerability: string
-    aliases: string[]
-    packageName: string
-    installedVersion: string
-    affectedRange: string
-    fixedVersion: string
-    authoritativeConflict: boolean | null
-    advisoryGuidance: {
-      source: string
-      authority: string
-      affectedRange: string
-      fixedVersion: string
-      relationship: EvidenceRelationship
-    }[]
-    dependencyType: string
-    dependencyPath: string[]
-    kev: boolean
-    epssPercentile: string
-    cvss: string
-  }
-  recommendation: {
-    label: string
-    summary: string
-    reasons: string[]
-  }
-  policy: {
-    assistanceClass: string
-    actionLevel: string
-    decision: string
-  }
-  retrieval: {
-    query: string
-    configurationVersion: string
-    sourcePolicyVersion: string
-    evidenceTypes: string[]
-    embeddingSpace: {
-      identity: string
-      provider: string
-      modelArtifact: string
-      artifactDigest: string
-      dimensions: number
-      retrievalInstruction: string
-      normalizer: string
-      passageConstructionVersion: string
-    }
-  }
-  stages: InvestigationStage[]
-  claims: InvestigationClaim[]
-  evidence: DemoEvidenceRecord[]
-}
-
-export const demoInvestigation: DemoInvestigation = {
+export const demoInvestigation: WorkbenchInvestigation = {
   meta: {
     mode: "precomputed",
     status: "incomplete",
@@ -155,13 +76,30 @@ export const demoInvestigation: DemoInvestigation = {
       },
     ],
     dependencyType: "Transitive",
-    dependencyPath: ["harbor-api", "auth-gateway", "cipherleaf"],
-    kev: true,
-    epssPercentile: "96th",
+    dependencyPaths: [["harbor-api", "auth-gateway", "cipherleaf"]],
+    kev: {
+      state: "available",
+      listed: true,
+      observedAt: "2026-08-28T16:41:00Z",
+      detail: "Synthetic known-exploitation observation for the precomputed demonstration.",
+    },
+    epss: {
+      state: "available",
+      score: 0.72,
+      percentile: 0.96,
+      observedAt: "2026-08-28T16:41:00Z",
+      detail: "Synthetic EPSS observation for the precomputed demonstration.",
+    },
     cvss: "8.1 · High",
+  },
+  validation: {
+    materialClaimsSupported: false,
+    validationIssues: ["claim-fix:material_claim_missing_support"],
   },
   recommendation: {
     label: "More Evidence Required",
+    accepted: false,
+    reason: "authoritative_evidence_conflict",
     summary:
       "Confirm the affected range and first patched release before choosing remediation.",
     reasons: [
@@ -169,28 +107,23 @@ export const demoInvestigation: DemoInvestigation = {
       "Authoritative Sources disagree on the first patched release.",
       "No Source was selected as the winner; the conflict remains open.",
     ],
+    limitations: [
+      "The first patched release remains unresolved.",
+      "Static imports do not establish runtime reachability or exploitability.",
+    ],
   },
   policy: {
     assistanceClass: "C1 · Low-risk dual use",
     actionLevel: "A1 · Read",
     decision: "Allowed",
   },
+  configuration: demoConfiguration,
   retrieval: {
     query: "cipherleaf 2.4.1 affected fixed upgrade",
     configurationVersion: "postgres-hybrid-rrf-v1",
     sourcePolicyVersion: "explicit-source-allowlist-v1",
     evidenceTypes: ["dependency", "affected", "remediation", "exploitation", "usage"],
-    embeddingSpace: {
-      identity: "sha256:7eb54bd7f75166528a13264eec28f37aba439cd090aec84bb9a7f1d12f4736c1",
-      provider: "ollama-local",
-      modelArtifact: "qwen3-embedding:0.6b",
-      artifactDigest:
-        "sha256:84a319513af54a65d1ad379f244411b221a26b3477055f823cfef7743bcf4f9e",
-      dimensions: 1024,
-      retrievalInstruction: "Represent this cybersecurity query for evidence passage retrieval: ",
-      normalizer: "l2-v1",
-      passageConstructionVersion: "source-aware-passage-v1",
-    },
+    embeddingSpace: demoConfiguration.embeddingSpace,
   },
   stages: [
     { label: "Matched", mode: "deterministic", detail: "Version range and aliases normalized" },
@@ -200,31 +133,43 @@ export const demoInvestigation: DemoInvestigation = {
       detail: "PostgreSQL full-text + pgvector retrieval fused with deterministic RRF",
     },
     { label: "Interpreted", mode: "model", detail: "Claims synthesized locally" },
-    { label: "Validated", mode: "policy", detail: "Citations and safety policy passed" },
+    {
+      label: "Validated",
+      mode: "policy",
+      detail: "Claim support checked; an unsupported material Claim and authoritative conflict remain.",
+    },
   ],
   claims: [
     {
       id: "claim-version",
       label: "C1",
       kind: "fact",
+      material: true,
+      supported: true,
       text: "The Asset Snapshot resolves cipherleaf 2.4.1, which is inside the published affected range.",
     },
     {
       id: "claim-fix",
       label: "C2",
       kind: "fact",
+      material: true,
+      supported: false,
       text: "The maintainer identifies version 2.4.3 as the first patched release.",
     },
     {
       id: "claim-priority",
       label: "C3",
       kind: "fact",
+      material: true,
+      supported: true,
       text: "The demonstration vulnerability is marked as known exploited and has a high synthetic EPSS percentile.",
     },
     {
       id: "claim-usage",
       label: "C4",
       kind: "inference",
+      material: true,
+      supported: true,
       text: "Static imports suggest the affected package is loaded by the authentication path.",
       limitation: "Import presence is context, not proof of runtime reachability or exploitability.",
     },
