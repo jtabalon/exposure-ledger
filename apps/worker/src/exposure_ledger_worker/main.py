@@ -75,6 +75,7 @@ from exposure_ledger_worker.investigations import (
     InvalidInvestigationCheckpoint,
 )
 from exposure_ledger_worker.local_generation import (
+    GENERATION_PROMPT_VERSION,
     GenerationProvider,
     OllamaGenerationProvider,
 )
@@ -330,7 +331,7 @@ def _run_investigations_or_fail(
             configuration=InvestigationConfiguration(
                 application_release="0.1.0",
                 graph_version="bounded-investigation-v2",
-                prompt_version="claims-recommendation-follow-up-v2",
+                prompt_version=GENERATION_PROMPT_VERSION,
                 policy_version="0.1",
                 parser_version=parser_version,
                 retrieval_configuration_version="postgres-hybrid-rrf-v1",

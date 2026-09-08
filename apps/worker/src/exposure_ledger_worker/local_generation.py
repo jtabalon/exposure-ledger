@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Callable
 from time import monotonic as monotonic_time
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -36,7 +36,14 @@ from exposure_ledger import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 GENERATION_PROVIDER = "ollama-local"
-GENERATION_PROMPT_VERSION = "claims-recommendation-follow-up-v2"
+# The persisted prompt identity versions the complete request contract: messages, schema,
+# non-streaming output, and the fixed reasoning/sampling settings below. Bump it when any change.
+GENERATION_PROMPT_VERSION = "claims-recommendation-follow-up-v4-gptoss-low"
+# GPT-OSS ignores boolean think values; low is a candidate to measure, not a speed guarantee.
+# https://docs.ollama.com/capabilities/thinking
+GENERATION_THINK_LEVEL = "low"
+GENERATION_TEMPERATURE = 0
+GENERATION_SEED = 0
 _HEX_DIGEST = re.compile(r"[0-9a-fA-F]{64}")
 
 
@@ -114,7 +121,7 @@ class _FollowUpOutput(_OutputModel):
 
 
 class _StructuredOutput(_OutputModel):
-    operation: str
+    operation: Literal["produce_exposure_recommendation"]
     claims: list[_ClaimOutput] = Field(min_length=1, max_length=20)
     recommendation: Recommendation
     recommendation_summary: str = Field(min_length=1, max_length=1000)
@@ -277,47 +284,51 @@ class OllamaGenerationProvider:
         timeout_seconds: float,
     ) -> StructuredInvestigationDraft:
         deadline = self._deadline(timeout_seconds)
-        readiness = await self.check_readiness_bounded(
-            timeout_seconds=self._remaining_required(deadline)
-        )
-        if readiness.model is None:
-            raise GenerationProviderUnavailable(readiness)
-        current_model = readiness.model
-        if current_model != configuration.generation_model:
-            raise GenerationProviderUnavailable(
-                GenerationReadiness(
-                    status="unavailable",
-                    code="generation_model_not_current",
-                    message=(
-                        "The installed local artifact does not match the pinned generation model."
-                    ),
-                    setup=(
-                        f"Install {configuration.generation_model.model_artifact} at the pinned "
-                        "digest, or start a new Investigation Revision."
-                    ),
-                    model=None,
-                )
-            )
-        if configuration.prompt_version != GENERATION_PROMPT_VERSION:
-            raise GenerationProviderUnavailable(
-                GenerationReadiness(
-                    status="unavailable",
-                    code="generation_prompt_not_current",
-                    message="The requested generation prompt identity is not current.",
-                    setup="Start a new Investigation with the current prompt configuration.",
-                    model=None,
-                )
-            )
         try:
+            readiness = await self.check_readiness_bounded(
+                timeout_seconds=self._remaining_required(deadline)
+            )
+            if readiness.model is None:
+                raise GenerationProviderUnavailable(readiness)
+            current_model = readiness.model
+            if current_model != configuration.generation_model:
+                raise GenerationProviderUnavailable(
+                    GenerationReadiness(
+                        status="unavailable",
+                        code="generation_model_not_current",
+                        message=(
+                            "The installed local artifact does not match the pinned "
+                            "generation model."
+                        ),
+                        setup=(
+                            f"Install {configuration.generation_model.model_artifact} "
+                            "at the pinned digest, or start a new Investigation Revision."
+                        ),
+                        model=None,
+                    )
+                )
+            if configuration.prompt_version != GENERATION_PROMPT_VERSION:
+                raise GenerationProviderUnavailable(
+                    GenerationReadiness(
+                        status="unavailable",
+                        code="generation_prompt_not_current",
+                        message="The requested generation prompt identity is not current.",
+                        setup="Start a new Investigation with the current prompt configuration.",
+                        model=None,
+                    )
+                )
             response = await self._request_json(
                 "POST",
                 "/api/chat",
                 json={
                     "model": current_model.model_artifact,
                     "stream": False,
-                    "think": False,
+                    "think": GENERATION_THINK_LEVEL,
                     "format": self.output_schema(),
-                    "options": {"temperature": 0, "seed": 0},
+                    "options": {
+                        "temperature": GENERATION_TEMPERATURE,
+                        "seed": GENERATION_SEED,
+                    },
                     "messages": self._messages(exposure, evidence),
                 },
                 deadline=deadline,

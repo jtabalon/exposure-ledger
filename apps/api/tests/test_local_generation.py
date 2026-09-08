@@ -19,6 +19,7 @@ from exposure_ledger import (
     RetrievedInvestigationPassage,
 )
 from exposure_ledger_worker.local_generation import (
+    GENERATION_PROMPT_VERSION,
     GenerationProviderUnavailable,
     OllamaGenerationProvider,
 )
@@ -32,7 +33,7 @@ def _configuration() -> InvestigationConfiguration:
     return InvestigationConfiguration(
         application_release="0.1.0",
         graph_version="bounded-investigation-v1",
-        prompt_version="claims-recommendation-follow-up-v2",
+        prompt_version=GENERATION_PROMPT_VERSION,
         policy_version="0.1",
         parser_version="uv-lock-v1",
         retrieval_configuration_version="postgres-hybrid-rrf-v1",
@@ -102,6 +103,32 @@ def _show_response(digest: str = DIGEST) -> dict[str, object]:
     }
 
 
+def _structured_output(evidence_record_id: str = str(EVIDENCE_ID)) -> dict[str, object]:
+    return {
+        "operation": "produce_exposure_recommendation",
+        "claims": [
+            {
+                "identity": "claim-affected",
+                "kind": "fact",
+                "text": "Feature-lib 5.1.0 is within the published affected range.",
+                "material": True,
+                "limitation": None,
+                "citations": [
+                    {
+                        "evidenceRecordId": evidence_record_id,
+                        "passageIdentities": ["osv:affected"],
+                        "relationship": "supports",
+                    }
+                ],
+            }
+        ],
+        "recommendation": "planned_remediation",
+        "recommendationSummary": "Upgrade to the first published fixed version.",
+        "recommendationReasons": ["The installed package is in the affected range."],
+        "recommendationLimitations": ["Static analysis does not prove runtime reachability."],
+    }
+
+
 def test_generation_readiness_requires_an_explicitly_installed_local_artifact() -> None:
     requests: list[httpx.Request] = []
 
@@ -124,7 +151,13 @@ def test_generation_readiness_requires_an_explicitly_installed_local_artifact() 
 
 def test_generation_requests_use_the_remaining_investigation_timeout() -> None:
     request_timeouts: list[float] = []
-    ticks = iter((10.0, 10.25))
+    now = 10.0
+
+    def monotonic() -> float:
+        nonlocal now
+        current = now
+        now = 10.25
+        return current
 
     def handler(request: httpx.Request) -> httpx.Response:
         timeout = request.extensions["timeout"]
@@ -136,7 +169,7 @@ def test_generation_requests_use_the_remaining_investigation_timeout() -> None:
         base_url="http://localhost:11434",
         model_artifact=MODEL,
         transport=httpx.MockTransport(handler),
-        monotonic=lambda: next(ticks),
+        monotonic=monotonic,
     ).check_readiness(timeout_seconds=1)
 
     assert readiness.code == "generation_model_not_installed"
@@ -168,29 +201,7 @@ async def test_generation_readiness_cancels_at_the_absolute_wall_time() -> None:
 
 def test_generation_returns_only_validated_structured_output_without_reasoning() -> None:
     chat_requests: list[dict[str, object]] = []
-    structured = {
-        "operation": "produce_exposure_recommendation",
-        "claims": [
-            {
-                "identity": "claim-affected",
-                "kind": "fact",
-                "text": "Feature-lib 5.1.0 is within the published affected range.",
-                "material": True,
-                "limitation": None,
-                "citations": [
-                    {
-                        "evidenceRecordId": str(EVIDENCE_ID),
-                        "passageIdentities": ["osv:affected"],
-                        "relationship": "supports",
-                    }
-                ],
-            }
-        ],
-        "recommendation": "planned_remediation",
-        "recommendationSummary": "Upgrade to the first published fixed version.",
-        "recommendationReasons": ["The installed package is in the affected range."],
-        "recommendationLimitations": ["Static analysis does not prove runtime reachability."],
-    }
+    structured = _structured_output()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/tags":
@@ -227,7 +238,9 @@ def test_generation_returns_only_validated_structured_output_without_reasoning()
     request = chat_requests[0]
     assert request["model"] == MODEL
     assert request["stream"] is False
-    assert request["think"] is False
+    assert GENERATION_PROMPT_VERSION == "claims-recommendation-follow-up-v4-gptoss-low"
+    assert request["think"] == "low"
+    assert request["options"] == {"temperature": 0, "seed": 0}
     assert request["format"] == OllamaGenerationProvider.output_schema()
     assert "tools" not in request
     messages = request["messages"]
@@ -235,7 +248,17 @@ def test_generation_returns_only_validated_structured_output_without_reasoning()
     assert "untrusted data" in str(messages[0]).lower()
 
 
-def test_invalid_structured_output_fails_closed() -> None:
+@pytest.mark.parametrize(
+    "content",
+    [
+        '{"claims":[]}',
+        json.dumps(_structured_output("not-a-uuid")),
+        json.dumps({**_structured_output(), "operation": "exposure_recommendation"}),
+        json.dumps({**_structured_output(), "thinking": "unexpected extra field"}),
+    ],
+    ids=["missing-fields", "invalid-evidence-uuid", "invalid-operation", "extra-field"],
+)
+def test_invalid_structured_output_fails_closed(content: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/tags":
             return httpx.Response(200, json={"models": [{"name": MODEL, "digest": DIGEST}]})
@@ -243,7 +266,7 @@ def test_invalid_structured_output_fails_closed() -> None:
             return httpx.Response(200, json=_show_response())
         return httpx.Response(
             200,
-            json={"message": {"role": "assistant", "content": '{"claims":[]}'}, "done": True},
+            json={"message": {"role": "assistant", "content": content}, "done": True},
         )
 
     provider = OllamaGenerationProvider(
@@ -256,6 +279,176 @@ def test_invalid_structured_output_fails_closed() -> None:
         provider.generate(_exposure(), _evidence(), _configuration())
 
     assert caught.value.readiness.code == "generation_invalid_structured_output"
+
+
+@pytest.mark.parametrize(
+    "prior_version",
+    ["claims-recommendation-follow-up-v2", "claims-recommendation-follow-up-v3-gptoss-low"],
+)
+def test_generation_rejects_the_prior_prompt_version_before_chat(prior_version: str) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": MODEL, "digest": DIGEST}]})
+        assert request.url.path == "/api/show"
+        return httpx.Response(200, json=_show_response())
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+    configuration = replace(_configuration(), prompt_version=prior_version)
+
+    with pytest.raises(GenerationProviderUnavailable) as caught:
+        provider.generate(_exposure(), _evidence(), configuration)
+
+    assert caught.value.readiness.code == "generation_prompt_not_current"
+    assert paths == ["/api/tags", "/api/show"]
+
+
+@pytest.mark.parametrize(
+    ("changed_inventory", "expected_code", "expected_paths"),
+    [
+        (1, "generation_model_not_current", ["/api/tags", "/api/show"]),
+        (
+            2,
+            "generation_artifact_changed",
+            ["/api/tags", "/api/show", "/api/chat", "/api/tags", "/api/show"],
+        ),
+    ],
+    ids=["before-generation", "during-generation"],
+)
+def test_generation_enforces_the_pinned_digest(
+    changed_inventory: int, expected_code: str, expected_paths: list[str]
+) -> None:
+    inventory_count = 0
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal inventory_count
+        paths.append(request.url.path)
+        if request.url.path == "/api/tags":
+            inventory_count += 1
+            digest = "d" * 64 if inventory_count >= changed_inventory else DIGEST
+            return httpx.Response(200, json={"models": [{"name": MODEL, "digest": digest}]})
+        if request.url.path == "/api/show":
+            digest = "d" * 64 if inventory_count >= changed_inventory else DIGEST
+            return httpx.Response(200, json=_show_response(digest))
+        assert request.url.path == "/api/chat"
+        return httpx.Response(
+            200, json={"message": {"content": json.dumps(_structured_output())}, "done": True}
+        )
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GenerationProviderUnavailable) as caught:
+        provider.generate(_exposure(), _evidence(), _configuration())
+
+    assert caught.value.readiness.code == expected_code
+    assert caught.value.readiness.model is None
+    assert paths == expected_paths
+
+
+def test_generation_shares_one_deadline_with_preflight_and_postflight_inventory() -> None:
+    now = 10.0
+    requests: list[tuple[str, float]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal now
+        timeout = request.extensions["timeout"]
+        assert isinstance(timeout, dict)
+        requests.append((request.url.path, float(timeout["read"])))
+        now += 0.125
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": MODEL, "digest": DIGEST}]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json=_show_response())
+        assert request.url.path == "/api/chat"
+        return httpx.Response(
+            200, json={"message": {"content": json.dumps(_structured_output())}, "done": True}
+        )
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+        monotonic=lambda: now,
+    )
+
+    draft = provider.generate(_exposure(), _evidence(), _configuration(), timeout_seconds=1)
+
+    assert draft.recommendation is Recommendation.PLANNED_REMEDIATION
+    assert requests == [
+        ("/api/tags", 1.0),
+        ("/api/show", 0.875),
+        ("/api/chat", 0.75),
+        ("/api/tags", 0.625),
+        ("/api/show", 0.5),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_request", [0, 2, 4], ids=["preflight", "chat", "postflight"])
+async def test_generation_cancels_before_returning_output_when_the_deadline_expires(
+    blocked_request: int,
+) -> None:
+    cancelled = asyncio.Event()
+    paths: list[str] = []
+    expected_paths = ["/api/tags", "/api/show", "/api/chat", "/api/tags", "/api/show"]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if len(paths) - 1 == blocked_request:
+            try:
+                await asyncio.sleep(1)
+            finally:
+                cancelled.set()
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": MODEL, "digest": DIGEST}]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json=_show_response())
+        assert request.url.path == "/api/chat"
+        return httpx.Response(
+            200, json={"message": {"content": json.dumps(_structured_output())}, "done": True}
+        )
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GenerationProviderUnavailable) as caught:
+        await provider.generate_bounded(
+            _exposure(), _evidence(), _configuration(), timeout_seconds=0.05
+        )
+
+    assert caught.value.readiness.code == "generation_wall_time_budget_exhausted"
+    assert cancelled.is_set()
+    assert paths == expected_paths[: blocked_request + 1]
+
+
+def test_generation_with_an_exhausted_budget_fails_before_any_request() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("No runtime request is permitted after the Investigation deadline.")
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GenerationProviderUnavailable) as caught:
+        provider.generate(_exposure(), _evidence(), _configuration(), timeout_seconds=0)
+
+    assert caught.value.readiness.code == "generation_wall_time_budget_exhausted"
 
 
 def test_generation_parses_one_enumerated_evidence_gap_follow_up() -> None:
@@ -361,3 +554,41 @@ def test_generation_parses_one_enumerated_evidence_gap_follow_up() -> None:
 def test_generation_rejects_nonlocal_or_authenticated_runtimes(base_url: str) -> None:
     with pytest.raises(ValueError, match="unauthenticated HTTP loopback"):
         OllamaGenerationProvider(base_url=base_url, model_artifact=MODEL)
+
+
+@pytest.mark.parametrize("model_artifact", ["gpt-oss:20b-cloud", "gpt-oss:cloud"])
+def test_generation_rejects_explicit_cloud_artifacts(model_artifact: str) -> None:
+    with pytest.raises(ValueError, match="must not select an Ollama cloud model"):
+        OllamaGenerationProvider(base_url="http://localhost:11434", model_artifact=model_artifact)
+
+
+@pytest.mark.parametrize("remote_field", ["remote_model", "remote_host"])
+@pytest.mark.parametrize("remote_location", ["/api/tags", "/api/show"])
+def test_generation_readiness_rejects_remote_inventory_before_chat(
+    remote_field: str, remote_location: str
+) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        remote = {remote_field: "remote-artifact"} if request.url.path == remote_location else {}
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200, json={"models": [{"name": MODEL, "digest": DIGEST, **remote}]}
+            )
+        assert request.url.path == "/api/show"
+        return httpx.Response(200, json={**_show_response(), **remote})
+
+    provider = OllamaGenerationProvider(
+        base_url="http://localhost:11434",
+        model_artifact=MODEL,
+        transport=httpx.MockTransport(handler),
+    )
+
+    readiness = provider.check_readiness()
+
+    assert readiness.code == "generation_cloud_model_rejected"
+    assert readiness.model is None
+    assert paths == (
+        ["/api/tags"] if remote_location == "/api/tags" else ["/api/tags", "/api/show"]
+    )
