@@ -47,4 +47,4 @@ check:
 
 check-real-model:
 	EXPOSURE_LEDGER_RUN_REAL_MODEL_CHECK=1 PYTHONPATH="$(APP_PYTHONPATH)" \
-		uv run pytest -m real_model apps/worker/tests/test_real_generation_model.py
+		uv run pytest --capture=tee-sys -m real_model apps/worker/tests/test_real_generation_model.py

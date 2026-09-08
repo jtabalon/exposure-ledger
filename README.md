@@ -37,30 +37,104 @@ docs/
 
 ## Local prerequisites
 
-- Apple Silicon macOS for the first supported local workflow
-- Python 3.12 managed through `uv`
-- Node.js 20.9 or newer and pnpm 11
-- Docker for PostgreSQL
-- Ollama for local generation and embeddings
+- Apple Silicon macOS supported by both Docker Desktop and Ollama. Ollama requires macOS 14 or
+  newer; Docker Desktop supports the current and two previous major macOS releases.
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) to manage Python 3.12, as selected
+  by `.python-version`.
+- [Node.js 24](https://nodejs.org/en/download), matching `.nvmrc`, and **pnpm 11.19.0**, matching
+  `package.json`. The [pnpm compatibility table](https://pnpm.io/installation#compatibility)
+  supports Node 24 for pnpm 11; Node 20 is insufficient.
+- [Docker Desktop for Apple Silicon](https://docs.docker.com/desktop/setup/install/mac-install/),
+  including Docker Compose, for PostgreSQL 17 with pgvector.
+- [Ollama for macOS](https://docs.ollama.com/macos), running locally for generation and embeddings.
+  Allow storage and memory for `gpt-oss:20b` and `qwen3-embedding:0.6b` alongside PostgreSQL and
+  the application. Readiness checks do not establish that this workload fits the machine's
+  Investigation time budget; run the opt-in model check below to measure it.
 
 Model downloads are always explicit. The application never silently falls back to a hosted provider.
 
 ## Bootstrap
 
-Start Docker Desktop, then run:
+Install the prerequisites above, then run these commands from the repository root in order.
+If using an existing nvm installation, `nvm install` followed by `nvm use` selects `.nvmrc`.
 
 ```bash
+uv python install 3.12
+npm install --global pnpm@11.19.0
+node --version
+pnpm --version
 make install
-make dev
 ```
 
-`make dev` validates the PostgreSQL configuration, waits for the database, applies ordered migrations, and starts the API, worker, and web application together. Open [http://localhost:3000](http://localhost:3000). Configuration can be overridden by copying `.env.example` to `.env`; invalid database and API URLs fail with an actionable message.
+The versions should report Node `v24.x` and pnpm `11.19.0`. Defaults match `.env.example`; optionally
+copy it to a new root `.env` before continuing and edit the values there. Docker Compose and the
+Python processes read that file. For the web application, export overrides such as
+`EXPOSURE_LEDGER_API_URL` in the shell or place them in `apps/web/.env.local`. Keep local API and
+Ollama URLs on loopback.
 
-Local model downloads remain explicit and are not needed for the synthetic Assessment Run:
+Start the Docker Desktop and Ollama applications, complete their first-run setup, and verify their
+services before downloading models:
 
 ```bash
+open -a Docker
+open -a Ollama
+docker info
+docker compose version
+ollama --version
+curl --fail --show-error http://127.0.0.1:11434/api/version
 make models
+ollama list
 ```
+
+`make models` explicitly pulls `gpt-oss:20b` and `qwen3-embedding:0.6b`; it is never called by
+`make install` or `make dev`. Wait for both pulls to finish and verify both artifacts appear in
+`ollama list`. If deliberately overriding a model tag in configuration, pull that exact local tag
+explicitly as well. Cloud artifacts are not supported.
+
+Then start PostgreSQL, wait for its health check, apply migrations, and launch the application:
+
+```bash
+make infra-up
+make migrate
+pnpm dev
+```
+
+Open [http://localhost:3000](http://localhost:3000). For subsequent starts after prerequisite and
+model setup, `make dev` runs the PostgreSQL startup, migrations, and application commands together.
+The application launcher stops its other processes if the worker fails. A missing generation
+artifact therefore prevents this combined startup even when only a synthetic Assessment Run is
+intended; install the configured artifact and restart the application.
+
+If Turbopack fails with `Operation not permitted` while binding an internal CSS-processing port,
+the following Webpack production build and startup path was verified on Apple Silicon. With
+PostgreSQL migrated and the configured models installed, build from the repository root:
+
+```bash
+pnpm --filter @exposure-ledger/web exec next build --webpack
+```
+
+Then run each command in a separate terminal, using the same configuration:
+
+```bash
+make api
+make worker
+pnpm --filter @exposure-ledger/web start
+```
+
+This serves the built application at the same loopback address without development hot reload.
+Rebuild after changing web code. The default development and CI build commands remain unchanged.
+
+To view only the bundled synthetic interface after installing web dependencies, leave the API and
+worker stopped and run:
+
+```bash
+EXPOSURE_LEDGER_ENABLE_LOCAL_DISPOSITIONS=false make web
+```
+
+This read-only display needs neither PostgreSQL nor Ollama and shows API-unavailable states for
+live data. It does not process Assessment Runs. A queued `mode: synthetic` Assessment Run exercises
+the API, PostgreSQL, and worker; although its fixture does not invoke generation, the production
+worker still enforces generation readiness at startup.
 
 `GET /health` reports the worker's latest persisted local embedding and generation readiness
 observations. The worker refreshes them every ten seconds and the API rejects observations older
@@ -69,7 +143,19 @@ than thirty seconds. If Ollama is stopped or either configured artifact is missi
 endpoint and never substitutes a hosted provider. `OLLAMA_BASE_URL` must be an HTTP loopback URL.
 Cloud-tagged artifacts and model inventory entries that resolve to a remote model are rejected.
 The production worker records the failed readiness observation and exits at startup when the pinned
-generation artifact is unavailable, so the API can report the exact missing setup step.
+generation artifact is unavailable. Because the combined launcher also stops the API in that case,
+run `make api` separately to inspect the persisted health diagnostic, then complete the reported
+setup step and restart `make dev`.
+
+Generation uses Ollama's `/api/chat` structured-output contract with the application's JSON Schema,
+`stream: false`, `think: "low"`, temperature `0`, and seed `0`. The complete request contract is
+identified by the pinned prompt version `claims-recommendation-follow-up-v4-gptoss-low`. Ollama's
+[thinking documentation](https://docs.ollama.com/capabilities/thinking) specifies `low`, `medium`, or
+`high` for GPT-OSS; boolean values do not disable its reasoning. `low` is the initial setting to
+measure, not a latency guarantee. [Structured output](https://docs.ollama.com/capabilities/structured-outputs)
+still passes through application schema, evidence, and policy validation, and the local artifact
+digest is checked before and after generation. Each call remains subject to the Investigation's
+remaining absolute budget, including those checks.
 
 Create and inspect the tracer Assessment Run through the versioned API:
 
@@ -218,11 +304,33 @@ make check
 `make test` starts PostgreSQL and creates isolated databases for API integration tests. Deterministic
 known-answer providers verify fusion, isolation, outage behavior, and recall reporting. A real-model
 evaluation remains a separate release gate because CI does not download or assume access to the
-pinned local artifact. After explicitly installing the models with `make models`, run that gate with:
+pinned local artifact. After explicitly installing the models with `make models`, stop application
+workers that could load the generation model, then run the local gate. For the default configuration:
 
 ```bash
+ollama --version
+ollama stop gpt-oss:20b
 make check-real-model
 ```
+
+The explicit stop prepares an unloaded first call without deleting or downloading the artifact.
+If configuration overrides the model or endpoint, use that exact model tag and corresponding
+`OLLAMA_HOST` for the stop command. The gate reads the worker's root `.env` settings and never
+downloads, unloads, or substitutes a model itself.
+
+Record the Ollama version alongside the gate's JSON observations for artifact digest,
+request-contract version, readiness timing, and two consecutive structured generation calls.
+It checks `/api/ps` before each call so the observed loaded, unloaded, or unknown state accompanies
+the cold and warm candidates; the labels alone do not prove model residency. Each call retains
+the default 120-second absolute
+Investigation ceiling, including artifact checks. Validation verifies structured Claims and their
+evidence provenance. This small fixture is a contract and timing check; it does not establish
+full Assessment throughput or the quality of real vulnerability Recommendations. Record both
+observations on the target machine before claiming a latency improvement. Without a running local
+Ollama service and the configured artifact, this gate cannot produce real-model measurements.
+
+See the [issue #34 validation record](docs/validation/issue-34-local-runtime.md) for commands
+actually performed, observed prerequisites, and remaining real-runtime validation.
 
 ## Core documentation
 
