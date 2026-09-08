@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
 import { demoInvestigation } from "@/lib/demo-investigation"
+import type { WorkbenchInvestigation } from "@/lib/workbench-investigation"
 
 import { InvestigationWorkbench } from "./investigation-workbench"
 
@@ -21,6 +22,244 @@ const workbenchProps = {
 }
 
 describe("InvestigationWorkbench", () => {
+  it("labels retained unsupported factual Claims while keeping contextual Evidence selectable", () => {
+    const claim = {
+      ...demoInvestigation.claims[0],
+      text: "The vulnerable behavior is reachable at runtime.",
+      supported: false,
+      material: true,
+    }
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      claims: [claim],
+      validation: {
+        materialClaimsSupported: false,
+        validationIssues: [`${claim.id}:material_claim_missing_support`],
+      },
+      evidence: [{
+        ...demoInvestigation.evidence[0],
+        relationships: [{ claimId: claim.id, relationship: "contextual" }],
+      }],
+    }
+
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain("Claims and validation")
+    expect(html).not.toContain("What the evidence supports")
+    expect(html).toContain('aria-label="Claim validation: Unsupported Claim"')
+    expect(html).toContain("Material")
+    expect(html).toContain(claim.text)
+    expect(html).toContain(`${claim.id}:material_claim_missing_support`)
+    expect(html).toContain("Claim support requirements not satisfied")
+    expect(html).toContain("evidence entails a Claim or that a human verified it")
+    expect(html).toContain('aria-pressed="true" aria-controls="evidence-trace"')
+    expect(html).toContain('id="evidence-heading" aria-live="polite"')
+    expect(html).toContain('aria-label="Review C1: Unsupported Claim"')
+    expect(html).toContain('aria-label="Evidence relationship: Contextual"')
+    expect(html).toContain(investigation.evidence[0].passage.replaceAll('"', "&quot;"))
+  })
+
+  it("labels passing Claim checks without claiming human verification or semantic proof", () => {
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      validation: { materialClaimsSupported: true, validationIssues: [] },
+      claims: [{ ...demoInvestigation.claims[0], supported: true, material: false }],
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain('aria-label="Claim validation: Support requirements met"')
+    expect(html).toContain("Claim support requirements satisfied")
+    expect(html).toContain("Non-material")
+    expect(html).not.toContain('aria-label="Claim validation: Unsupported Claim"')
+  })
+
+  it("preserves citation diagnostics even when a Claim meets support requirements", () => {
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      validation: {
+        materialClaimsSupported: true,
+        validationIssues: ["claim-version:unknown_evidence_passage"],
+      },
+      claims: [{ ...demoInvestigation.claims[0], supported: true }],
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain("Support requirements met")
+    expect(html).toContain("claim-version:unknown_evidence_passage")
+    expect(html).not.toContain("Claim checks passed")
+    expect(html).not.toContain("Passes structural checks")
+  })
+
+  it("displays the effective rejected Recommendation and its reason separately from limitations", () => {
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      recommendation: {
+        label: "More Evidence Required",
+        accepted: false,
+        reason: "material_claims_unsupported",
+        summary: "The proposed conclusion needs more evidence.",
+        reasons: ["The runtime Claim has contextual evidence only."],
+        limitations: ["No runtime observation was captured."],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain("Recommendation not accepted")
+    expect(html).toContain("Effective Recommendation")
+    expect(html).toContain("More Evidence Required")
+    expect(html).toContain("Recommendation not accepted; effective value shown above")
+    expect(html).toContain("material_claims_unsupported")
+    expect(html).toContain(investigation.recommendation.reasons[0])
+    expect(html).toContain("Recommendation limitations")
+    expect(html).toContain(investigation.recommendation.limitations[0])
+    expect(html).not.toContain("Recommendation accepted by validation")
+  })
+
+  it("shows an accepted Recommendation's validation reason without a downgrade label", () => {
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench
+        investigation={{
+          ...demoInvestigation,
+          recommendation: {
+            ...demoInvestigation.recommendation,
+            accepted: true,
+            reason: "evidence_requirements_satisfied",
+          },
+        }}
+        {...workbenchProps}
+      />,
+    )
+
+    expect(html).toContain("Recommendation accepted by validation")
+    expect(html).toContain("evidence_requirements_satisfied")
+    expect(html).not.toContain("Recommendation not accepted")
+  })
+
+  it("keeps captured Evidence available in an incomplete Revision without Claims", () => {
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      claims: [],
+      validation: { materialClaimsSupported: false, validationIssues: [] },
+      stoppingReason: "Evidence acquisition stopped before Claim generation.",
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain("No Claims were retained.")
+    expect(html).toContain(investigation.stoppingReason)
+    expect(html).toContain("Evidence available to this Revision")
+    expect(html).toContain(investigation.evidence[0].source)
+    expect(html).not.toContain("Claim support requirements satisfied")
+    expect(html).toContain("Recommendation not accepted")
+    expect(html).not.toContain("Proposed Recommendation rejected")
+    expect(html).not.toContain("Recommendation downgraded")
+  })
+
+  it.each([
+    ["unavailable", null, "Unknown", "KEV Source unavailable"],
+    ["not_collected", null, "Unknown", "KEV not collected"],
+    ["missing", null, "Unknown", "KEV evidence missing"],
+    ["malformed", null, "Unknown", "KEV response malformed"],
+    ["available", null, "Unknown", "KEV value missing"],
+    ["available", false, "Not listed", "Current observation"],
+    ["available", true, "Listed", "Current observation"],
+    ["stale", false, "Last observed: Not listed", "Stale observation"],
+    ["stale", true, "Last observed: Listed", "Stale observation"],
+  ] as const)("preserves %s KEV state with listed=%s", (state, listed, value, label) => {
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      exposure: {
+        ...demoInvestigation.exposure,
+        kev: { state, listed, observedAt: "2026-09-01T12:00:00Z", detail: "Captured KEV state" },
+        dependencyPaths: null,
+      },
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+    const kevRow = html.match(/<dt[^>]*>KEV<\/dt>[\s\S]*?<\/dd>/)?.[0]
+
+    expect(kevRow).toContain(value)
+    expect(kevRow).toContain(label)
+    expect(kevRow).toContain('dateTime="2026-09-01T12:00:00Z"')
+    expect(kevRow).toContain("Captured KEV state")
+    if (listed === null) expect(kevRow).not.toContain("Not listed")
+    if (state !== "available") expect(kevRow).not.toContain("Current observation")
+    expect(html).toContain("Dependency Paths unknown")
+    expect(html).not.toContain('aria-label="Dependency Path 1"')
+  })
+
+  it("renders every known Dependency Path and preserves unknown EPSS", () => {
+    const investigation: WorkbenchInvestigation = {
+      ...demoInvestigation,
+      exposure: {
+        ...demoInvestigation.exposure,
+        dependencyPaths: [["project-one", "cipherleaf"], ["project-two", "cipherleaf"]],
+        epss: { state: "unavailable", score: null, percentile: null, observedAt: null, detail: null },
+      },
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench investigation={investigation} {...workbenchProps} />,
+    )
+
+    expect(html).toContain('aria-label="Dependency Path 1"')
+    expect(html).toContain('aria-label="Dependency Path 2"')
+    expect(html).toContain("project-one")
+    expect(html).toContain("project-two")
+    const epssRow = html.match(/<dt[^>]*>EPSS<\/dt>[\s\S]*?<\/dd>/)?.[0]
+    expect(epssRow).toContain("Unknown")
+    expect(epssRow).toContain("EPSS Source unavailable")
+    expect(epssRow).not.toContain("percentile")
+  })
+
+  it("renders live Revision configuration without substituting demo versions or generation models", () => {
+    const configuration = {
+      ...demoInvestigation.configuration,
+      applicationRelease: "release-live-32",
+      graphVersion: "graph-live-32",
+      promptVersion: "prompt-live-32",
+      policyVersion: "policy-live-32",
+      parserVersion: "parser-live-32",
+      retrievalConfigurationVersion: "retrieval-live-32",
+      sourcePolicyVersion: "source-policy-live-32",
+      sourceAdapterVersions: ["adapter-live-32"],
+      generationModel: {
+        provider: "provider-live-32",
+        modelArtifact: "model-live-32",
+        artifactDigest: "sha256:generation-live-32",
+      },
+    }
+    const html = renderToStaticMarkup(
+      <InvestigationWorkbench
+        investigation={{
+          ...demoInvestigation,
+          meta: { ...demoInvestigation.meta, mode: "live" },
+          configuration,
+        }}
+        {...workbenchProps}
+      />,
+    )
+
+    for (const value of [
+      configuration.applicationRelease, configuration.graphVersion, configuration.promptVersion,
+      configuration.policyVersion, configuration.parserVersion,
+      configuration.retrievalConfigurationVersion, configuration.sourcePolicyVersion,
+      ...configuration.sourceAdapterVersions, ...Object.values(configuration.generationModel),
+    ]) expect(html).toContain(value)
+    expect(html).not.toContain("prompt demo-001")
+    expect(html).not.toContain("graph v0.1")
+    expect(html).not.toContain("gpt-oss:20b")
+  })
+
   it("names every evidence relationship and preserves an authoritative conflict", () => {
     const investigation = {
       ...demoInvestigation,

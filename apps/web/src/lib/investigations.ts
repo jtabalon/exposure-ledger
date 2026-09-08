@@ -1,7 +1,11 @@
 import { apiBaseUrl, loadCollection } from "./assessment-runs"
 import type { AssetSnapshot } from "./asset-snapshots"
-import type { DemoInvestigation, EvidenceRelationship } from "./demo-investigation"
+import type { EvidenceRelationship } from "./evidence"
 import type { Exposure } from "./exposures"
+import type {
+  InvestigationConfiguration,
+  WorkbenchInvestigation,
+} from "./workbench-investigation"
 
 type RevisionCitation = {
   evidenceRecordId: string
@@ -108,22 +112,7 @@ export type InvestigationRevision = {
     toolCalls: number
     graphTransitions: number
   }
-  configuration: {
-    applicationRelease: string
-    graphVersion: string
-    promptVersion: string
-    policyVersion: string
-    parserVersion: string
-    retrievalConfigurationVersion: string
-    sourcePolicyVersion: string
-    sourceAdapterVersions: string[]
-    generationModel: {
-      provider: string
-      modelArtifact: string
-      artifactDigest: string
-    }
-    embeddingSpace: DemoInvestigation["retrieval"]["embeddingSpace"]
-  }
+  configuration: InvestigationConfiguration
   createdAt: string
 }
 
@@ -301,7 +290,7 @@ export function revisionToWorkbench(
   revision: InvestigationRevision,
   exposure: Exposure,
   snapshot: AssetSnapshot,
-): DemoInvestigation {
+): WorkbenchInvestigation {
   const claimLabels = new Map(
     revision.claims.map((claim, index) => [claim.identity, `C${index + 1}`]),
   )
@@ -367,24 +356,29 @@ export function revisionToWorkbench(
           : exposure.package.direct
             ? "Direct"
             : "Transitive",
-      dependencyPath: exposure.package.dependencyPaths?.[0] ?? [exposure.package.name],
-      kev: exposure.kev.listed ?? false,
-      epssPercentile:
-        exposure.epss.percentile === null
-          ? "Unknown"
-          : `${Math.round(exposure.epss.percentile * 100)}th`,
+      dependencyPaths: exposure.package.dependencyPaths,
+      kev: exposure.kev,
+      epss: exposure.epss,
       cvss: exposure.ranking.severity,
+    },
+    validation: {
+      materialClaimsSupported: revision.evidenceState.materialClaimsSupported,
+      validationIssues: revision.evidenceState.validationIssues,
     },
     recommendation: {
       label: recommendationLabels[revision.recommendation.value],
+      accepted: revision.recommendation.accepted,
+      reason: revision.recommendation.reason,
       summary: revision.recommendation.summary,
-      reasons: [...revision.recommendation.reasons, ...revision.recommendation.limitations],
+      reasons: revision.recommendation.reasons,
+      limitations: revision.recommendation.limitations,
     },
     policy: {
       assistanceClass: revision.outputPolicyDecision.assistanceClass,
       actionLevel: revision.outputPolicyDecision.actionLevel,
       decision: revision.outputPolicyDecision.result,
     },
+    configuration: revision.configuration,
     retrieval: {
       query: revision.evidenceState.retrieved.query,
       configurationVersion: revision.configuration.retrievalConfigurationVersion,
@@ -408,6 +402,8 @@ export function revisionToWorkbench(
       label: claimLabels.get(claim.identity) ?? claim.identity,
       kind: claim.kind,
       text: claim.text,
+      material: claim.material,
+      supported: claim.supported,
       limitation: claim.limitation ?? undefined,
     })),
     evidence: revision.evidenceState.retrieved.passages.map((passage) => {

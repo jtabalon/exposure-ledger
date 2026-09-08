@@ -2,6 +2,11 @@ import { ArrowDownUp, PackageSearch, ShieldCheck, TriangleAlert } from "lucide-r
 
 import { evidenceRelationshipLabels } from "../lib/evidence"
 import type { Exposure } from "../lib/exposures"
+import {
+  epssObservationValue,
+  kevObservationValue,
+  sourceObservationLabel,
+} from "../lib/source-observations"
 import { Badge } from "./ui/badge"
 
 function severityLabel(value: Exposure["ranking"]["severity"]): string {
@@ -21,41 +26,6 @@ function passageLabel(kind: string): string {
       epss_score: "EPSS score",
     }[kind] ?? "Evidence passage"
   )
-}
-
-function stateLabel(
-  source: "KEV" | "EPSS",
-  state: Exposure["kev"]["state"],
-): string {
-  switch (state) {
-    case "available":
-      return "Current observation"
-    case "stale":
-      return "Stale observation"
-    case "missing":
-      return `${source} evidence missing`
-    case "malformed":
-      return `${source} response malformed`
-    case "unavailable":
-      return `${source} Source unavailable`
-    case "not_collected":
-      return `${source} not collected`
-  }
-}
-
-function ordinal(value: number): string {
-  const remainder = value % 100
-  if (remainder >= 11 && remainder <= 13) return `${value}th`
-  switch (value % 10) {
-    case 1:
-      return `${value}st`
-    case 2:
-      return `${value}nd`
-    case 3:
-      return `${value}rd`
-    default:
-      return `${value}th`
-  }
 }
 
 export function ExposureQueuePanel({
@@ -130,7 +100,7 @@ export function ExposureQueuePanel({
                         </Badge>
                       ) : (
                         <Badge variant="outline" className="text-[9px]">
-                          Queued after top five
+                          Not selected for Investigation
                         </Badge>
                       )}
                     </div>
@@ -169,10 +139,9 @@ export function ExposureQueuePanel({
 
                     <div className="mt-2 font-mono text-[10px] text-muted-foreground">
                       {exposure.package.dependencyPaths
-                        ? exposure.package.dependencyPaths
-                            .map((path) => path.join(" → "))
-                            .join("; ")
-                        : "Dependency paths unknown for this manifest"}
+                        ?.filter((path) => path.length > 0)
+                        .map((path) => path.join(" → "))
+                        .join("; ") || "Dependency paths unknown for this manifest"}
                     </div>
                     <div
                       className="mt-4 grid gap-2 sm:grid-cols-2"
@@ -183,17 +152,18 @@ export function ExposureQueuePanel({
                           Known exploitation · CISA KEV
                         </div>
                         <div className="mt-1 text-sm font-semibold">
-                          {exposure.kev.listed === null
-                            ? stateLabel("KEV", exposure.kev.state)
-                            : exposure.kev.listed
-                              ? "Listed"
-                              : "Not listed"}
+                          {kevObservationValue(exposure.kev)}
                         </div>
-                        {exposure.kev.state === "stale" ? (
-                          <Badge variant="outline" className="mt-2 text-[9px] text-amber-800">
-                            Stale observation
-                          </Badge>
-                        ) : null}
+                        <Badge
+                          variant="outline"
+                          className={`mt-2 text-[9px] ${exposure.kev.state === "available" && exposure.kev.listed !== null ? "text-muted-foreground" : "text-amber-800"}`}
+                        >
+                          {sourceObservationLabel(
+                            "KEV",
+                            exposure.kev.state,
+                            exposure.kev.listed !== null,
+                          )}
+                        </Badge>
                         {exposure.kev.observedAt ? (
                           <time
                             dateTime={exposure.kev.observedAt}
@@ -213,15 +183,18 @@ export function ExposureQueuePanel({
                           Exploit probability · FIRST EPSS
                         </div>
                         <div className="mt-1 text-sm font-semibold">
-                          {exposure.epss.score === null || exposure.epss.percentile === null
-                            ? stateLabel("EPSS", exposure.epss.state)
-                            : `${(exposure.epss.score * 100).toFixed(1)}% probability · ${ordinal(Math.round(exposure.epss.percentile * 100))} percentile`}
+                          {epssObservationValue(exposure.epss)}
                         </div>
-                        {exposure.epss.state === "stale" ? (
-                          <Badge variant="outline" className="mt-2 text-[9px] text-amber-800">
-                            Stale observation
-                          </Badge>
-                        ) : null}
+                        <Badge
+                          variant="outline"
+                          className={`mt-2 text-[9px] ${exposure.epss.state === "available" && exposure.epss.score !== null && exposure.epss.percentile !== null ? "text-muted-foreground" : "text-amber-800"}`}
+                        >
+                          {sourceObservationLabel(
+                            "EPSS",
+                            exposure.epss.state,
+                            exposure.epss.score !== null && exposure.epss.percentile !== null,
+                          )}
+                        </Badge>
                         {exposure.epss.observedAt ? (
                           <time
                             dateTime={exposure.epss.observedAt}
